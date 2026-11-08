@@ -43,7 +43,7 @@ var DEFAULT_SETTINGS = {
   layoutMode: "block",
   defaultDuration: 60,
   allDayHeight: 56,
-  // 弹性时间轴：空档行压缩、有内容的行撑开，轴总高不变（DEC-012）
+  // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
 };
 function getTagColor(tag) {
@@ -64,7 +64,7 @@ function formatSecondsToTime(sec) {
   const m = Math.floor(clamped % 3600 / 60);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
-var BLOCK_TOP_GUTTER = 12;
+var BLOCK_TOP_GUTTER = 0;
 var BLOCK_BOTTOM_GUTTER = 14;
 var DRAG_SNAP_MINUTES = 15;
 var MIN_BLOCK_SECONDS = 15 * 60;
@@ -130,81 +130,89 @@ function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
   });
   return clusters;
 }
-var ELASTIC_MIN_EMPTY_ROW = 14;
-var ELASTIC_MIN_CONTENT_ROW = 30;
-var ELASTIC_MAX_GROWTH = 1.9;
-var ELASTIC_HARD_CAP = 4.2;
-var MIN_RENDER_BLOCK_PX = 20;
+var ELASTIC_EMPTY_RATIO = 0.34;
+var ELASTIC_CONTENT_RATIO = 0.9;
+var ELASTIC_MIN_EMPTY_ROW = 16;
+var ELASTIC_MIN_CONTENT_ROW = 40;
+var ELASTIC_ROW_PAD = 8;
+var ELASTIC_MAX_BLOCK = 240;
+var ELASTIC_MAX_VIEWPORT_SCALE = 1.5;
+var MIN_RENDER_BLOCK_PX = 16;
+function estimateBlockNeed(entry, widthPx) {
+  const text = String(entry && entry.text ? entry.text : "");
+  let units = 0;
+  for (const ch of text) {
+    units += /[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? 2 : 1;
+  }
+  const usable = Math.max(40, (Number(widthPx) || 200) - 22);
+  const perLine = Math.max(5, Math.floor(usable / 6.9));
+  const maxLines = (Number(widthPx) || 200) < 200 ? 3 : 6;
+  const lines = Math.min(maxLines, Math.max(1, Math.ceil(units / perLine)));
+  let h = 10 + lines * 15.5;
+  h += 15;
+  if (entry && entry.subItems && entry.subItems.length) h += 14;
+  return Math.max(28, Math.min(ELASTIC_MAX_BLOCK, h));
+}
 function buildTimeScale(opts) {
-  const { startHour, endHour, slotHeight, top, entries, elastic } = opts;
+  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight } = opts;
   const rowCount = Math.max(1, endHour - startHour);
-  const totalHeight = rowCount * slotHeight;
-  const heights = [];
+  const dayStartSec = startHour * 3600;
+  const dayEndSec = endHour * 3600;
+  let heights = [];
   if (!elastic) {
     for (let i = 0; i < rowCount; i++) heights.push(slotHeight);
   } else {
-    const covered = new Array(rowCount).fill(0);
-    const counts = new Array(rowCount).fill(0);
-    const textLens = new Array(rowCount).fill(0);
+    const emptyH = Math.max(ELASTIC_MIN_EMPTY_ROW, Math.round(slotHeight * ELASTIC_EMPTY_RATIO));
+    const contentH = Math.max(ELASTIC_MIN_CONTENT_ROW, Math.round(slotHeight * ELASTIC_CONTENT_RATIO));
+    const startsAt = new Array(rowCount).fill(0);
     (entries || []).forEach((e) => {
-      const s = Math.max(Number(e.s) || 0, startHour * 3600);
-      const en = Math.min(Number(e.en) || 0, endHour * 3600);
+      const s = Math.max(Number(e.s) || 0, dayStartSec);
+      if (s >= dayEndSec) return;
+      const idx = Math.floor((s - dayStartSec) / 3600);
+      if (idx >= 0 && idx < rowCount) startsAt[idx] += 1;
+    });
+    for (let i = 0; i < rowCount; i++) heights[i] = startsAt[i] > 0 ? contentH : emptyH;
+    const rowItems = Array.from({ length: rowCount }, () => []);
+    (entries || []).forEach((e) => {
+      const s = Math.max(Number(e.s) || 0, dayStartSec);
+      const en = Math.min(Number(e.en) || 0, dayEndSec);
+      const needH = Math.min(ELASTIC_MAX_BLOCK, Number(e.needH) || 0);
       if (en <= s) return;
+      const span = en - s;
       for (let i = 0; i < rowCount; i++) {
-        const rs = (startHour + i) * 3600;
-        const re = rs + 3600;
-        const overlap = Math.min(en, re) - Math.max(s, rs);
-        if (overlap <= 0) continue;
-        covered[i] += overlap;
-        if (s >= rs && s < re) {
-          counts[i] += 1;
-          textLens[i] += e.entry && e.entry.text ? String(e.entry.text).length : 0;
-        }
+        const rs = dayStartSec + i * 3600;
+        const ov = Math.min(en, rs + 3600) - Math.max(s, rs);
+        if (ov > 0) rowItems[i].push({ s, en, need: needH * (ov / span) });
       }
     });
-    const mins = [];
-    const desires = [];
-    const maxes = [];
     for (let i = 0; i < rowCount; i++) {
-      if (covered[i] <= 0) {
-        mins.push(ELASTIC_MIN_EMPTY_ROW);
-        desires.push(ELASTIC_MIN_EMPTY_ROW);
-        maxes.push(ELASTIC_MIN_EMPTY_ROW);
-      } else {
-        const cov = Math.min(1, covered[i] / 3600);
-        const extraItems = Math.min(3, Math.max(0, counts[i] - 1));
-        const textBoost = Math.min(1, textLens[i] / 48);
-        const base = Math.max(ELASTIC_MIN_CONTENT_ROW, slotHeight * 0.55);
-        const desire = Math.max(base, slotHeight * (1 + cov * 0.65 + extraItems * 0.18 + textBoost * 0.3));
-        mins.push(base);
-        desires.push(desire);
-        maxes.push(Math.min(desire * ELASTIC_MAX_GROWTH, slotHeight * ELASTIC_HARD_CAP));
-      }
+      const items = rowItems[i];
+      if (!items.length) continue;
+      if (heights[i] < contentH) heights[i] = contentH;
+      items.sort((a, b) => a.s - b.s || a.en - b.en);
+      const slots = [];
+      items.forEach((it) => {
+        let slot = slots.find((x) => x.end <= it.s);
+        if (!slot) {
+          slot = { end: it.en, sum: 0 };
+          slots.push(slot);
+        }
+        slot.sum += it.need;
+        slot.end = it.en;
+      });
+      const need = Math.max(...slots.map((x) => x.sum)) + ELASTIC_ROW_PAD;
+      if (need > heights[i]) heights[i] = need;
     }
-    const sumMin = mins.reduce((a, b) => a + b, 0);
-    const sumDesire = desires.reduce((a, b) => a + b, 0);
-    const sumMax = maxes.reduce((a, b) => a + b, 0);
-    const EPS = 1e-9;
-    if (totalHeight <= sumMin + EPS) {
-      const k = totalHeight / sumMin;
-      mins.forEach((v) => heights.push(v * k));
-    } else if (totalHeight <= sumDesire + EPS) {
-      const lambda = (totalHeight - sumMin) / Math.max(EPS, sumDesire - sumMin);
-      for (let i = 0; i < rowCount; i++) heights.push(mins[i] + (desires[i] - mins[i]) * lambda);
-    } else if (totalHeight <= sumMax + EPS && sumMax - sumDesire > EPS) {
-      const lambda = (totalHeight - sumDesire) / Math.max(EPS, sumMax - sumDesire);
-      for (let i = 0; i < rowCount; i++) heights.push(desires[i] + (maxes[i] - desires[i]) * lambda);
-    } else {
-      const extra = (totalHeight - Math.max(sumMax, sumDesire)) / rowCount;
-      for (let i = 0; i < rowCount; i++) heights.push(Math.max(maxes[i], desires[i]) + extra);
+    const sum = heights.reduce((a, b) => a + b, 0);
+    const vh = Number(viewportHeight) || 0;
+    if (vh > 0 && sum > 0 && sum < vh) {
+      const k = Math.min(ELASTIC_MAX_VIEWPORT_SCALE, vh / sum);
+      heights = heights.map((h) => h * k);
     }
   }
   const bounds = [0];
   for (let i = 0; i < rowCount; i++) bounds.push(bounds[i] + heights[i]);
-  heights[rowCount - 1] += totalHeight - bounds[rowCount];
-  bounds[rowCount] = totalHeight;
-  const dayStartSec = startHour * 3600;
-  const dayEndSec = endHour * 3600;
+  const totalHeight = bounds[rowCount];
   const yOf = (sec) => {
     const rel = Math.max(0, Math.min(rowCount, ((Number(sec) || 0) - dayStartSec) / 3600));
     const i = Math.min(rowCount - 1, Math.floor(rel));
@@ -1258,30 +1266,46 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const slotHeight = Number((_d = this.plugin.settings.slotHeight) != null ? _d : 52);
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
-    const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
     const elastic = this.plugin.settings.elasticTimeline !== false;
-    const collectTimed = () => {
-      const out = [];
-      days.forEach((d) => {
-        const ds = d.format("YYYY-MM-DD");
-        this.filterEntries(this.entriesMap.get(ds) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec).forEach((e) => {
-          const s = Math.max(dayStartSec, e.startSeconds || 0);
-          const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
-          out.push({ entry: e, s, en: Math.min(dayEndSec, Math.max(s + 60, rawEnd)) });
+    const viewWidth = Math.max(320, wrapper.clientWidth || 880);
+    const colWidth = Math.max(150, (viewWidth - 52) / Math.max(1, days.length));
+    const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
+    const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
+    const clustersByDay = /* @__PURE__ */ new Map();
+    const scaleEntries = [];
+    days.forEach((d) => {
+      const ds = d.format("YYYY-MM-DD");
+      const timed = this.filterEntries(this.entriesMap.get(ds) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+      clustersByDay.set(ds, clusters);
+      if (!elastic) return;
+      clusters.forEach((cluster) => {
+        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
+        cluster.items.forEach((it) => {
+          scaleEntries.push({ s: it.s, en: it.en, needH: estimateBlockNeed(it.entry, laneWidth) });
         });
       });
-      return out;
-    };
+    });
     const scale = buildTimeScale({
       startHour,
       endHour,
       slotHeight,
       top: BLOCK_TOP_GUTTER,
-      entries: elastic ? collectTimed() : [],
-      elastic
+      entries: scaleEntries,
+      elastic,
+      viewportHeight
     });
     this.currentTimeScale = scale;
-    const resizer = wrapper.createEl("div", {
+    const totalHeight = scale.totalHeight;
+    if (viewportHeight > 0) {
+      this.viewportRetry = 0;
+    } else if ((this.viewportRetry || 0) < 2) {
+      this.viewportRetry = (this.viewportRetry || 0) + 1;
+      requestAnimationFrame(() => {
+        if (wrapper.isConnected) this.renderView();
+      });
+    }
+    const resizer = header.createEl("div", {
       cls: "timenote-header-resizer",
       attr: { title: "\u62D6\u52A8\u8C03\u8282\u5168\u5929\u533A\u9AD8\u5EA6" }
     });
@@ -1299,6 +1323,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
       });
       label.style.top = `${scale.yOf(h * 3600)}px`;
+      if (h === startHour) label.addClass("is-first");
       const rowH = scale.heights[Math.min(scale.rowCount - 1, h - startHour)];
       if (scale.elastic && rowH < slotHeight * 0.5) label.addClass("is-dense");
     }
@@ -1318,13 +1343,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
       slotLayer.style.height = `${totalHeight}px`;
       slotLayer.style.bottom = "auto";
       this.attachSlotDrag(col, slotLayer, dateStr, scale);
-      const timed = this.filterEntries(this.entriesMap.get(dateStr) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
-      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+      const clusters = clustersByDay.get(dateStr) || [];
       clusters.forEach((cluster) => {
+        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
         cluster.items.forEach((it) => {
           const e = it.entry;
           const top = scale.yOf(it.s);
-          const height = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
+          const spanH = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
+          const height = spanH;
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
             cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
@@ -1475,8 +1501,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
       let curEnd = origEnd;
       const paint = () => {
         const top = scale.yOf(curStart);
+        const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
         block.style.top = `${top}px`;
-        block.style.height = `${Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top)}px`;
+        block.style.height = `${spanPx}px`;
         meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} \xB7 ${formatDuration(curEnd - curStart)}`;
       };
       const onMove = (e) => {
@@ -2169,7 +2196,7 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         }, 150);
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u81EA\u9002\u5E94\u69FD\u9AD8\uFF08\u5F39\u6027\u65F6\u95F4\u8F74\uFF09").setDesc("\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u6309\u5185\u5BB9\u91CF\u6491\u9AD8\u3001\u7A7A\u6863\u5C0F\u65F6\u81EA\u52A8\u538B\u6241\uFF0C\u8F74\u603B\u9AD8\u5EA6\u4FDD\u6301\u4E0D\u53D8\uFF0C\u4E00\u5C4F\u540C\u65F6\u517C\u987E\u5185\u5BB9\u663E\u793A\u4E0E\u5168\u5929\u6982\u89C8\u3002\u5173\u95ED\u5219\u56DE\u5230\u6BCF\u5C0F\u65F6\u7B49\u8DDD\u7684\u4F20\u7EDF\u65F6\u95F4\u8F74\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.elasticTimeline !== false).onChange(async (val) => {
+    new import_obsidian.Setting(containerEl).setName("\u81EA\u9002\u5E94\u65F6\u95F4\u8F74\uFF08\u5185\u5BB9\u5B9A\u9AD8\uFF09").setDesc("\u884C\u9AD8\u8DDF\u7740\u7B14\u8BB0\u5185\u5BB9\u8D70\uFF1A\u6CA1\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u81EA\u52A8\u538B\u6241\uFF0C\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u6309\u5185\u5BB9\u591A\u5C11\u6491\u5F00\uFF1B\u65F6\u95F4\u5757\u7684\u9AD8\u5EA6\u6052\u7B49\u4E8E\u5B83\u7684\u65F6\u95F4\u8DE8\u5EA6\uFF0C\u6240\u4EE5\u5185\u5BB9\u591A\u7684\u65F6\u6BB5\u5757\u66F4\u9AD8\u3002\u6574\u6761\u8F74\u968F\u5185\u5BB9\u4F38\u7F29\u3002\u5173\u95ED\u5219\u56DE\u5230\u6BCF\u5C0F\u65F6\u7B49\u8DDD\u7684\u4F20\u7EDF\u6837\u5F0F\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.elasticTimeline !== false).onChange(async (val) => {
       this.plugin.settings.elasticTimeline = val;
       await this.plugin.saveSettings();
       this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());

@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS = {
   layoutMode: "block",
   defaultDuration: 60,
   allDayHeight: 56,
-  // 弹性时间轴：空档行压缩、有内容的行撑开，轴总高不变（DEC-012）
+  // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
 };
 
@@ -62,10 +62,10 @@ function formatSecondsToTime(sec) {
 }
 
 // 块布局网格的上下留白（px）：
-// 顶部 —— 起始小时的刻度标签用 translateY(-50%) 居中，top=0 时上半截会被滚动区裁掉，
-//          留出余量后「00:00」等起始时刻才完整可见，首条时间块也不会紧贴表头。
-// 底部 —— 结束小时的刻度标签同理需要半行余量，同时让最后一行尽量贴近底部。
-const BLOCK_TOP_GUTTER = 12;
+// 顶部 —— 必须为 0：任何留白都会在「全天区」和第一个整点之间多出一条空行。
+//          起始时刻的刻度标签改用 .is-first 规则下移贴住轴线，不再靠留白躲避裁切。
+// 底部 —— 结束小时的刻度标签需要半行余量，同时让最后一行尽量贴近底部。
+const BLOCK_TOP_GUTTER = 0;
 const BLOCK_BOTTOM_GUTTER = 14;
 
 // 时间吸附：拖拽创建 / 调节范围时按 N 分钟取整，避免出现 14:37 这种脏时间
@@ -145,107 +145,119 @@ function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
 // ============================================================================
 // Elastic Time Scale（弹性时间轴）
 // ============================================================================
-// 把「每小时等距」换成「按内容量分配行高」，但轴总高度恒等于 rowCount * slotHeight：
-//   - 空档行压到 ELASTIC_MIN_EMPTY_ROW，不再白占一屏
-//   - 有记录的行按「覆盖时长 / 条目数 / 文本量」撑开，块越高越能显示完整文字
-//   - 富余空间按水位（water-filling）分配，永远不改变总高
+// 行高由「内容本身需要多少像素」决定：
+//   - 完全没有记录的小时压到 slotHeight * ELASTIC_EMPTY_RATIO（默认约 18px）
+//   - 被记录覆盖到的小时（含跨行条目的中间段）至少给到最小内容行高，避免长条目被掐细
+//   - 行内条目按内容高度求和，内容多的行自然变高
+//   - 整轴不足视口时整体等比放大行距，但设上限，防止块被拉成大片留白
+//
+// 重要：块的高度恒等于它在轴上的时间跨度（height = yOf(end) - yOf(start)），
+// 所以「内容多就高」只能靠行高实现，绝不允许再把块从跨度里截短 ——
+// 一旦块比跨度矮，块的下沿就不再对应结束时间，与时间轴刻度自相矛盾。
 //
 // 关键约束：sec -> y 的映射必须在整条轴上严格单调递增且连续 ——
 // 时间块的 top/height、整点刻度线、当前时间线、拖拽的像素↔时间换算全部依赖它。
 // 一旦出现高度为 0 的行，映射就不再是一一对应，拖拽会直接失效。
-const ELASTIC_MIN_EMPTY_ROW = 14;    // 空档行压缩下限（再矮刻度标签就糊成一团）
-const ELASTIC_MIN_CONTENT_ROW = 30;  // 有内容行的下限（够放标题 + 时间一行）
-const ELASTIC_MAX_GROWTH = 1.9;      // 有内容行相对自身理想高度最多再放大几倍
-const ELASTIC_HARD_CAP = 4.2;        // 有内容行绝对上限 = slotHeight * 该系数
-const MIN_RENDER_BLOCK_PX = 20;      // 时间块最小渲染高度
+const ELASTIC_EMPTY_RATIO = 0.34;    // 空档行高度 = slotHeight * 该系数
+const ELASTIC_CONTENT_RATIO = 0.9;   // 有条目行的最小高度 = slotHeight * 该系数
+const ELASTIC_MIN_EMPTY_ROW = 16;    // 空档行绝对下限（再矮刻度标签就糊成一团）
+const ELASTIC_MIN_CONTENT_ROW = 40;  // 有条目行绝对下限（够放标题 + 时间两行）
+const ELASTIC_ROW_PAD = 8;           // 行内给块留的上下呼吸
+const ELASTIC_MAX_BLOCK = 240;       // 行高计算时单个条目按内容撑高的上限
+const ELASTIC_MAX_VIEWPORT_SCALE = 1.5; // 内容不足一屏时行距最多放大到 1.5 倍（块高恒等于跨度，不能再放宽）
+const MIN_RENDER_BLOCK_PX = 16;      // 时间块最小渲染高度（低于它的极短记录会轻微溢出一两像素）
+
+// 估算一条记录「按内容」需要多高（不依赖 DOM，纯字数折算）
+// 中文按 2 个宽度单位、西文按 1 个，宽度用列宽近似，行高 15.5px 对 0.775rem
+function estimateBlockNeed(entry, widthPx) {
+  const text = String(entry && entry.text ? entry.text : "");
+  let units = 0;
+  for (const ch of text) {
+    units += /[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? 2 : 1;
+  }
+  const usable = Math.max(40, (Number(widthPx) || 200) - 22);
+  const perLine = Math.max(5, Math.floor(usable / 6.9));
+  // 周 / 3 天视图列很窄，折太多行会把整条轴撑爆；窄列只给 3 行
+  const maxLines = (Number(widthPx) || 200) < 200 ? 3 : 6;
+  const lines = Math.min(maxLines, Math.max(1, Math.ceil(units / perLine)));
+  let h = 10 + lines * 15.5;                                  // 上下内边距 + 标题行
+  h += 15;                                                    // 时间行
+  if (entry && entry.subItems && entry.subItems.length) h += 14;
+  return Math.max(28, Math.min(ELASTIC_MAX_BLOCK, h));
+}
 
 function buildTimeScale(opts) {
-  const { startHour, endHour, slotHeight, top, entries, elastic } = opts;
+  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight } = opts;
   const rowCount = Math.max(1, endHour - startHour);
-  const totalHeight = rowCount * slotHeight;
-  const heights: number[] = [];
+  const dayStartSec = startHour * 3600;
+  const dayEndSec = endHour * 3600;
+  let heights: number[] = [];
 
   if (!elastic) {
     // 等距模式：与原实现完全一致，出问题可一键退回
     for (let i = 0; i < rowCount; i++) heights.push(slotHeight);
   } else {
-    const covered = new Array(rowCount).fill(0);
-    const counts = new Array(rowCount).fill(0);
-    const textLens = new Array(rowCount).fill(0);
+    const emptyH = Math.max(ELASTIC_MIN_EMPTY_ROW, Math.round(slotHeight * ELASTIC_EMPTY_RATIO));
+    const contentH = Math.max(ELASTIC_MIN_CONTENT_ROW, Math.round(slotHeight * ELASTIC_CONTENT_RATIO));
 
+    // 1) 每行先给基础高度：有条目起点的行才拿到「内容行」的额度
+    const startsAt = new Array(rowCount).fill(0);
     (entries || []).forEach(e => {
-      const s = Math.max(Number(e.s) || 0, startHour * 3600);
-      const en = Math.min(Number(e.en) || 0, endHour * 3600);
+      const s = Math.max(Number(e.s) || 0, dayStartSec);
+      if (s >= dayEndSec) return;
+      const idx = Math.floor((s - dayStartSec) / 3600);
+      if (idx >= 0 && idx < rowCount) startsAt[idx] += 1;
+    });
+    for (let i = 0; i < rowCount; i++) heights[i] = startsAt[i] > 0 ? contentH : emptyH;
+
+    // 2) 每行按「块真正需要的高度」撑开：把落在该行的块按时间先后塞进纵向槽位，
+    //    同时发生的块左右并排（不同槽）、先后发生的块上下叠放（同一槽），取最满的一个槽。
+    //    这样块永远不会因为被压扁而互相盖住，内容多的行自然变高。
+    const rowItems = Array.from({ length: rowCount }, () => []);
+    (entries || []).forEach(e => {
+      const s = Math.max(Number(e.s) || 0, dayStartSec);
+      const en = Math.min(Number(e.en) || 0, dayEndSec);
+      const needH = Math.min(ELASTIC_MAX_BLOCK, Number(e.needH) || 0);
       if (en <= s) return;
+      const span = en - s;
       for (let i = 0; i < rowCount; i++) {
-        const rs = (startHour + i) * 3600;
-        const re = rs + 3600;
-        const overlap = Math.min(en, re) - Math.max(s, rs);
-        if (overlap <= 0) continue;
-        covered[i] += overlap;
-        // 条目只归属到「起点落在本小时」的行，跨行条目不会被重复计数
-        if (s >= rs && s < re) {
-          counts[i] += 1;
-          textLens[i] += e.entry && e.entry.text ? String(e.entry.text).length : 0;
-        }
+        const rs = dayStartSec + i * 3600;
+        const ov = Math.min(en, rs + 3600) - Math.max(s, rs);
+        if (ov > 0) rowItems[i].push({ s, en, need: needH * (ov / span) });
       }
     });
 
-    const mins = [];
-    const desires = [];
-    const maxes = [];
     for (let i = 0; i < rowCount; i++) {
-      if (covered[i] <= 0) {
-        // 空档行：下限 = 理想 = 目标高度，不参与富余瓜分，才能真正被压扁
-        mins.push(ELASTIC_MIN_EMPTY_ROW);
-        desires.push(ELASTIC_MIN_EMPTY_ROW);
-        maxes.push(ELASTIC_MIN_EMPTY_ROW);
-      } else {
-        const cov = Math.min(1, covered[i] / 3600);
-        const extraItems = Math.min(3, Math.max(0, counts[i] - 1));
-        const textBoost = Math.min(1, textLens[i] / 48);
-        const base = Math.max(ELASTIC_MIN_CONTENT_ROW, slotHeight * 0.55);
-        const desire = Math.max(base, slotHeight * (1 + cov * 0.65 + extraItems * 0.18 + textBoost * 0.3));
-        mins.push(base);
-        desires.push(desire);
-        // 上限：随内容量浮动（相对放大），否则撞上固定封顶后「条目多就更高」会失效；
-        // 再叠加一个绝对封顶，避免只有一条记录时块胖得离谱
-        maxes.push(Math.min(desire * ELASTIC_MAX_GROWTH, slotHeight * ELASTIC_HARD_CAP));
-      }
+      const items = rowItems[i];
+      if (!items.length) continue;
+      // 被记录覆盖到的小时（含跨行长条目的中间段）至少给最小内容行高：
+      // 块高恒等于跨度，中间段若被压成空档高度，长条目会被掐成细细一条
+      if (heights[i] < contentH) heights[i] = contentH;
+      items.sort((a, b) => a.s - b.s || a.en - b.en);
+      const slots: { end: number; sum: number }[] = [];
+      items.forEach(it => {
+        let slot = slots.find(x => x.end <= it.s);
+        if (!slot) { slot = { end: it.en, sum: 0 }; slots.push(slot); }
+        slot.sum += it.need;
+        slot.end = it.en;
+      });
+      const need = Math.max(...slots.map(x => x.sum)) + ELASTIC_ROW_PAD;
+      if (need > heights[i]) heights[i] = need;
     }
 
-    const sumMin = mins.reduce((a, b) => a + b, 0);
-    const sumDesire = desires.reduce((a, b) => a + b, 0);
-    const sumMax = maxes.reduce((a, b) => a + b, 0);
-    const EPS = 1e-9;
-
-    if (totalHeight <= sumMin + EPS) {
-      // 内容太满，连下限都放不下：整体等比压缩，总高依旧不变
-      const k = totalHeight / sumMin;
-      mins.forEach(v => heights.push(v * k));
-    } else if (totalHeight <= sumDesire + EPS) {
-      // 常规情形一：min 与 desire 之间线性插值，解出水位数 λ
-      const lambda = (totalHeight - sumMin) / Math.max(EPS, sumDesire - sumMin);
-      for (let i = 0; i < rowCount; i++) heights.push(mins[i] + (desires[i] - mins[i]) * lambda);
-    } else if (totalHeight <= sumMax + EPS && sumMax - sumDesire > EPS) {
-      // 常规情形二：先满足各自理想高度，再把富余优先喂给有内容的行（直到上限）
-      const lambda = (totalHeight - sumDesire) / Math.max(EPS, sumMax - sumDesire);
-      for (let i = 0; i < rowCount; i++) heights.push(desires[i] + (maxes[i] - desires[i]) * lambda);
-    } else {
-      // 内容很少：内容行已到上限，剩下的空间只能均分（此时整体趋近等距）
-      const extra = (totalHeight - Math.max(sumMax, sumDesire)) / rowCount;
-      for (let i = 0; i < rowCount; i++) heights.push(Math.max(maxes[i], desires[i]) + extra);
+    // 3) 内容不足一屏：整体等比放大行距，避免 24 小时全挤在上半屏、下面一大片空白。
+    //    块高恒等于跨度，所以放大倍数必须封顶，否则一条记录的小时会连同块一起被拉虚。
+    const sum = heights.reduce((a, b) => a + b, 0);
+    const vh = Number(viewportHeight) || 0;
+    if (vh > 0 && sum > 0 && sum < vh) {
+      const k = Math.min(ELASTIC_MAX_VIEWPORT_SCALE, vh / sum);
+      heights = heights.map(h => h * k);
     }
   }
 
   const bounds = [0];
   for (let i = 0; i < rowCount; i++) bounds.push(bounds[i] + heights[i]);
-  // 收口浮点累积误差，保证最后一行正好落在轴底
-  heights[rowCount - 1] += totalHeight - bounds[rowCount];
-  bounds[rowCount] = totalHeight;
-
-  const dayStartSec = startHour * 3600;
-  const dayEndSec = endHour * 3600;
+  const totalHeight = bounds[rowCount];
 
   const yOf = (sec) => {
     const rel = Math.max(0, Math.min(rowCount, ((Number(sec) || 0) - dayStartSec) / 3600));
@@ -1529,33 +1541,55 @@ class TimenoteView extends ItemView {
     const slotHeight = Number(this.plugin.settings.slotHeight ?? 52);
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
-    const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
 
-    // 时间轴：弹性模式按每小时的记录量重新分配行高，总高不变（DEC-012）
-    // 所有「秒 ↔ 像素」换算一律经 scale，禁止再手写 (sec - dayStart)/3600*slotHeight
+    // 时间轴：行高由内容决定（DEC-012），所有「秒 ↔ 像素」换算一律经 scale
     const elastic = this.plugin.settings.elasticTimeline !== false;
-    const collectTimed = () => {
-      const out = [];
-      days.forEach(d => {
-        const ds = d.format("YYYY-MM-DD");
-        this.filterEntries(this.entriesMap.get(ds) || [])
-          .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec)
-          .forEach(e => {
-            const s = Math.max(dayStartSec, e.startSeconds || 0);
-            const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
-            out.push({ entry: e, s, en: Math.min(dayEndSec, Math.max(s + 60, rawEnd)) });
-          });
+
+    // 块的「内容高度」需要列宽（中文折行后要几行），先按可见宽度估一次
+    const viewWidth = Math.max(320, wrapper.clientWidth || 880);
+    const colWidth = Math.max(150, (viewWidth - 52) / Math.max(1, days.length));
+    // 视口高度 = 整个面板减去固定表头，用于「内容不足一屏时把行距放大」
+    const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
+    const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
+
+    const clustersByDay = new Map();
+    const scaleEntries = [];
+    days.forEach(d => {
+      const ds = d.format("YYYY-MM-DD");
+      const timed = this.filterEntries(this.entriesMap.get(ds) || [])
+        .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+      clustersByDay.set(ds, clusters);
+      if (!elastic) return;
+      clusters.forEach(cluster => {
+        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
+        cluster.items.forEach(it => {
+          scaleEntries.push({ s: it.s, en: it.en, needH: estimateBlockNeed(it.entry, laneWidth) });
+        });
       });
-      return out;
-    };
+    });
+
     const scale = buildTimeScale({
       startHour, endHour, slotHeight, top: BLOCK_TOP_GUTTER,
-      entries: elastic ? collectTimed() : [], elastic
+      entries: scaleEntries, elastic, viewportHeight
     });
     this.currentTimeScale = scale;
+    const totalHeight = scale.totalHeight;
 
-    // 全天区与时间网格之间的可拖拽分隔条
-    const resizer = wrapper.createEl("div", {
+    // 首次渲染时面板可能还没完成布局（clientHeight = 0），此时测不到视口就不做等比放大。
+    // 下一帧补一次重渲染，避免整条轴挤在面板上半截；最多补两次，防止死循环。
+    if (viewportHeight > 0) {
+      this.viewportRetry = 0;
+    } else if ((this.viewportRetry || 0) < 2) {
+      this.viewportRetry = (this.viewportRetry || 0) + 1;
+      requestAnimationFrame(() => {
+        if (wrapper.isConnected) this.renderView();
+      });
+    }
+
+    // 全天区与时间网格之间的可拖拽分隔条：绝对定位压在表头底边上，不占布局高度，
+    // 否则会在全天区和第一个整点之间多出一条空行（用户反馈的「奇怪的空行」）
+    const resizer = header.createEl("div", {
       cls: "timenote-header-resizer",
       attr: { title: "拖动调节全天区高度" }
     });
@@ -1575,6 +1609,8 @@ class TimenoteView extends ItemView {
         text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
       });
       label.style.top = `${scale.yOf(h * 3600)}px`;
+      // 第一条刻度顶到轴顶，标签下移贴住轴线，避免 translateY(-50%) 被滚动容器裁掉半截
+      if (h === startHour) label.addClass("is-first");
       // 被压扁的空档行：标签缩小淡化，避免一行行糊在一起
       const rowH = scale.heights[Math.min(scale.rowCount - 1, h - startHour)];
       if (scale.elastic && rowH < slotHeight * 0.5) label.addClass("is-dense");
@@ -1600,15 +1636,18 @@ class TimenoteView extends ItemView {
       slotLayer.style.bottom = "auto";
       this.attachSlotDrag(col, slotLayer, dateStr, scale);
 
-      const timed = this.filterEntries(this.entriesMap.get(dateStr) || [])
-        .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
-      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+      const clusters = clustersByDay.get(dateStr) || [];
 
       clusters.forEach(cluster => {
+        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
         cluster.items.forEach(it => {
           const e = it.entry;
           const top = scale.yOf(it.s);
-          const height = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
+          // 块高 = 它在轴上的时间跨度：上沿对齐开始时间、下沿对齐结束时间，
+          // 与整点刻度严格一致。「内容多就高」由行高承担（见 buildTimeScale），
+          // 不允许再把块从跨度里截短 —— 截短后下沿就不代表结束时间了。
+          const spanH = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
+          const height = spanH;
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
             cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
@@ -1617,7 +1656,7 @@ class TimenoteView extends ItemView {
           block.style.height = `${height}px`;
           block.style.left = `${it.lane * widthPct}%`;
           block.style.width = `calc(${widthPct}% - 6px)`;
-          // 弹性轴下块高可能很矮：按可用高度收起次要信息，别让文字挤成一团
+          // 块高恒等于时间跨度，块矮时按可用高度收起次要信息，别让文字挤成一团
           if (height < 34) block.addClass("is-dense");
           if (height < 24) block.addClass("is-tiny");
 
@@ -1772,6 +1811,8 @@ class TimenoteView extends ItemView {
 
       const rect = block.getBoundingClientRect();
       const offsetY = ev.clientY - rect.top;
+      // 块高恒等于时间跨度，下沿就是结束时间，上下边缘可以直接拖；
+      // 只有矮到放不下两条命中区时才退化为整体平移
       const compact = rect.height < 30;
       let mode = "move";
       if (!compact && offsetY <= 8) mode = "start";
@@ -1784,8 +1825,9 @@ class TimenoteView extends ItemView {
 
       const paint = () => {
         const top = scale.yOf(curStart);
+        const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
         block.style.top = `${top}px`;
-        block.style.height = `${Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top)}px`;
+        block.style.height = `${spanPx}px`;
         meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} · ${formatDuration(curEnd - curStart)}`;
       };
 
@@ -2665,8 +2707,8 @@ class TimenoteSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("自适应槽高（弹性时间轴）")
-      .setDesc("有记录的小时按内容量撑高、空档小时自动压扁，轴总高度保持不变，一屏同时兼顾内容显示与全天概览。关闭则回到每小时等距的传统时间轴。")
+      .setName("自适应时间轴（内容定高）")
+      .setDesc("行高跟着笔记内容走：没有记录的小时自动压扁，有记录的小时按内容多少撑开；时间块的高度恒等于它的时间跨度，所以内容多的时段块更高。整条轴随内容伸缩。关闭则回到每小时等距的传统样式。")
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.elasticTimeline !== false)
         .onChange(async (val) => {

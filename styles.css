@@ -34,8 +34,8 @@
 }
 
 .timenote-nav-btn {
-  padding: 3px 8px;
-  border-radius: 4px;
+  padding: 3px 9px;
+  border-radius: 6px;
   border: 1px solid var(--background-modifier-border);
   background-color: var(--background-primary);
   color: var(--text-normal);
@@ -88,17 +88,17 @@
 .timenote-tabs {
   display: inline-flex;
   background-color: var(--background-modifier-hover);
-  border-radius: 6px;
+  border-radius: 7px;
   padding: 2px;
   gap: 2px;
 }
 
 .timenote-tab-btn {
-  padding: 3px 8px;
+  padding: 3px 9px;
   border: none;
   background: transparent;
   color: var(--text-muted);
-  border-radius: 4px;
+  border-radius: 5px;
   cursor: pointer;
   font-size: 0.78rem;
   font-weight: 500;
@@ -192,6 +192,7 @@
 
 /* ==========================================================================
    Unified TimeGrid: Fixed Header + Aligned Columns + Scroll Body
+   视觉基准（tasknotes 风格）：圆角 6-7px、无硬边框、左侧 3px 色条、淡色底、字阶 0.775/0.675
    ========================================================================== */
 .timenote-timegrid-wrapper {
   display: flex;
@@ -205,8 +206,9 @@
 .timenote-timegrid-header {
   display: flex;
   background-color: var(--background-secondary);
-  border-bottom: 2px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
   flex-shrink: 0;
+  position: relative; /* 供全天区分隔条绝对定位，避免多出一条空行 */
   z-index: 20;
 }
 
@@ -231,13 +233,13 @@
 }
 
 .timenote-header-day-col.is-today {
-  background-color: rgba(var(--color-accent-rgb), 0.05);
+  background-color: rgba(var(--color-accent-rgb), 0.06);
 }
 
 .timenote-day-title-row {
-  height: 38px;
+  height: 36px;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: center;
   gap: 6px;
   border-bottom: 1px solid var(--background-modifier-border);
@@ -251,14 +253,17 @@
 }
 
 .timenote-day-name {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: var(--text-muted);
   text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .timenote-day-num {
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .timenote-header-day-col.is-today .timenote-day-num {
@@ -267,59 +272,59 @@
 
 /* Dedicated All-Day box strictly inside each day's column */
 .timenote-day-allday-container {
-  /* 全天区更高，容纳更多全天条目；网格上下留白释放出的空间优先给它 */
+  /* 与表头同底色：不再是一条割裂的白色带子 */
   min-height: 56px;
   max-height: 180px;
   overflow-y: auto;
-  padding: 6px;
+  padding: 5px 6px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  background-color: var(--background-primary);
+  gap: 4px;
+  background-color: transparent;
   box-sizing: border-box;
   flex: 1;
+  scrollbar-width: thin;
 }
 
 .timenote-header-day-col.is-today .timenote-day-allday-container {
-  background-color: rgba(var(--color-accent-rgb), 0.02);
+  background-color: transparent;
 }
 
 .timenote-all-day-chip {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
-  background-color: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
+  padding: 3px 7px;
+  background-color: rgba(var(--color-accent-rgb), 0.1);
+  border: none;
   border-left: 3px solid var(--color-accent);
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 0.74rem;
-  line-height: 1.25;
+  font-size: 0.735rem;
+  line-height: 1.3;
   width: 100%;
   box-sizing: border-box;
   overflow: hidden;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .timenote-all-day-chip.is-task {
   border-left-color: var(--color-orange);
-  background-color: rgba(var(--color-orange-rgb), 0.06);
+  background-color: rgba(var(--color-orange-rgb), 0.1);
 }
 
 .timenote-all-day-chip.is-memo {
   border-left-color: var(--color-accent);
-  background-color: rgba(var(--color-accent-rgb), 0.04);
+  background-color: rgba(var(--color-accent-rgb), 0.08);
 }
 
 .timenote-all-day-chip:hover {
-  border-color: var(--color-accent);
   background-color: var(--background-modifier-hover);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
 }
 
 .timenote-all-day-chip.completed {
-  opacity: 0.6;
+  opacity: 0.55;
   border-left-color: var(--color-green);
   text-decoration: line-through;
 }
@@ -1093,15 +1098,22 @@
 .timenote-block-ruler {
   position: relative;
   flex: 0 0 52px;
-  border-right: 1px solid var(--background-modifier-border);
+  /* 分隔线交给列自己的 border-left，避免与第一列出现双线 */
 }
 .timenote-block-ruler-label {
   position: absolute;
   right: 8px;
   transform: translateY(-50%);
-  font-size: 0.7rem;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
   color: var(--text-muted);
   white-space: nowrap;
+}
+/* 第一条刻度紧贴轴顶：不能再用 -50%，否则上半截被滚动容器裁掉 */
+.timenote-block-ruler-label.is-first {
+  transform: translateY(0);
+  padding-top: 1px;
 }
 .timenote-block-columns { position: relative; display: flex; align-items: stretch; }
 .timenote-block-scroll { overscroll-behavior: contain; }
@@ -1111,12 +1123,16 @@
   min-width: 0;
   border-left: 1px solid var(--background-modifier-border);
 }
+.timenote-block-column.is-today {
+  background-color: rgba(var(--color-accent-rgb), 0.035);
+}
 .timenote-block-hour-line {
   position: absolute;
   left: 0;
   right: 0;
   height: 0;
   border-top: 1px solid var(--background-modifier-border);
+  opacity: 0.6;
   pointer-events: none;
 }
 .timenote-block-slot-layer {
@@ -1127,7 +1143,7 @@
   bottom: 0;
   cursor: crosshair;
 }
-.timenote-block-slot-layer:hover { background-color: var(--background-modifier-hover); }
+.timenote-block-slot-layer:hover { background-color: rgba(var(--color-accent-rgb), 0.03); }
 
 /* 当前时间指示线：跨整行，左侧时间胶囊压在刻度列上 */
 .timenote-now-line {
@@ -1142,55 +1158,69 @@
 .timenote-now-label {
   position: absolute;
   left: -50px;
-  top: -0.75em;
+  top: -0.7em;
   min-width: 44px;
-  padding: 0 4px;
-  border-radius: 3px;
+  padding: 0 5px;
+  border-radius: 4px;
   background: var(--color-red, #e5484d);
   color: #fff;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 600;
-  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
   text-align: center;
   white-space: nowrap;
 }
+
+/* ---- 时间块卡片：与全天 chip 共用一套视觉语言 ---- */
 .timenote-event-block {
   position: absolute;
   box-sizing: border-box;
   overflow: hidden;
-  padding: 4px 8px;
+  padding: 5px 8px 5px 9px;
   border-radius: 6px;
-  background-color: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-left: 3px solid var(--interactive-accent);
+  background-color: rgba(var(--color-accent-rgb), 0.07);
+  border: none;
+  border-left: 3px solid var(--color-accent);
   color: var(--text-normal);
   cursor: pointer;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
 }
-.timenote-event-block:hover { background-color: var(--background-modifier-hover); }
-.timenote-event-block.is-task { border-left-color: var(--text-accent); }
+.timenote-event-block:hover {
+  background-color: rgba(var(--color-accent-rgb), 0.14);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+.timenote-event-block.is-task {
+  border-left-color: var(--color-orange);
+  background-color: rgba(var(--color-orange-rgb), 0.09);
+}
+.timenote-event-block.is-task:hover { background-color: rgba(var(--color-orange-rgb), 0.16); }
 .timenote-event-block.is-blinko { border-left-color: var(--text-muted); }
-.timenote-event-block.is-completed { opacity: 0.6; }
-.timenote-event-block.is-range { border-left-width: 4px; }
+.timenote-event-block.is-completed { opacity: 0.55; }
+.timenote-event-block.is-range { border-left-width: 3px; }
 .timenote-event-block-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.78rem;
+  gap: 5px;
+  font-size: 0.775rem;
   font-weight: 500;
-  line-height: 1.3;
+  line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .timenote-event-block-meta {
-  font-size: 0.7rem;
+  margin-top: 1px;
+  font-size: 0.675rem;
   color: var(--text-muted);
-  line-height: 1.3;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.timenote-event-block-sub { font-size: 0.72rem; color: var(--text-muted); cursor: pointer; }
+.timenote-event-block-sub { font-size: 0.69rem; color: var(--text-muted); cursor: pointer; }
 .timenote-event-block-sub:hover { color: var(--text-normal); }
 
 /* ==========================================================================
@@ -1199,10 +1229,10 @@
 /* 被压缩的空档行：刻度字号缩小、淡化，避免整列标签糊成一片 */
 .timenote-block-ruler-label.is-dense {
   font-size: 0.6rem;
-  opacity: 0.5;
+  opacity: 0.45;
   letter-spacing: -0.02em;
 }
-/* 弹性模式下块有富余高度，标题允许折行，把内容真正显示出来 */
+/* 弹性模式下块高等于自身时间跨度，标题可折行把内容真正显示出来 */
 .timenote-block-columns.is-elastic .timenote-event-block-title {
   align-items: flex-start;
   white-space: normal;
@@ -1212,7 +1242,7 @@
 .timenote-block-columns.is-elastic .timenote-event-block-title > span {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 6;
   overflow: hidden;
 }
 .timenote-block-columns.is-elastic .timenote-event-block-title > input {
@@ -1251,32 +1281,35 @@
 /* ==========================================================================
    Drag & Resize（拖拽创建 / 调节范围 / 全天区高度，DEC-011）
    ========================================================================== */
-/* 全天区与时间网格之间的分隔条 */
+/* 全天区与时间网格之间的分隔条：绝对定位压在表头底边上，不占高度、不产生空行 */
 .timenote-header-resizer {
-  flex: 0 0 6px;
-  height: 6px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 8px;
   cursor: ns-resize;
   background-color: transparent;
-  position: relative;
-  z-index: 21;
-  transition: background-color 0.12s ease;
+  z-index: 25;
 }
 .timenote-header-resizer::after {
   content: "";
   position: absolute;
   left: 50%;
-  top: 2px;
-  width: 36px;
+  top: 3px;
+  width: 40px;
   height: 2px;
-  margin-left: -18px;
-  border-radius: 1px;
+  margin-left: -20px;
+  border-radius: 2px;
   background-color: var(--background-modifier-border);
-  transition: background-color 0.12s ease;
+  opacity: 0.9;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
 }
-.timenote-header-resizer:hover,
-.timenote-header-resizer.is-active { background-color: var(--background-modifier-hover); }
 .timenote-header-resizer:hover::after,
-.timenote-header-resizer.is-active::after { background-color: var(--interactive-accent); }
+.timenote-header-resizer.is-active::after {
+  background-color: var(--interactive-accent);
+  opacity: 1;
+}
 
 /* 拖拽创建时的预览块 */
 .timenote-block-ghost {

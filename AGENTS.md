@@ -13,8 +13,9 @@
 - **时间块边界**：只做「实际记录」（记录一段时间做了什么）；不做计划排程、容量规划、计时器、计划/实际区分；勾选任务待办是原有功能，不算排程。
 - **拖拽交互（DEC-011）**：`attachSlotDrag` 负责空白槽拖拽创建（15 分钟吸附、最小 15 分钟、`timenote-block-ghost` 预览，拖动阈值 5px，未拖动则沿用单击默认时长）；`attachBlockDrag` 负责已有块「上/下边缘改起止、中部整体平移」（阈值 4px，块高 < 30px 时只允许平移），松手后经 `DailyNoteService.updateEntryTime` 回写并重渲染；`attachAllDayResizer` 负责拖动分隔条调全天区高度（40–320px，实时改内联样式，松手才存 `settings.allDayHeight`）。**拖拽结束浏览器会补一次 click**，块上用 `dataset.dragMoved` 标记吃掉，否则会误跳原笔记。
 - **回写边界**：`updateEntryTime` 只改目标行的行首时间前缀（`rangeRe` / `singleRe` 两个锚定正则），并删掉行尾与时长相冲突的 `30m`/`1h` 标签；其余文本、标签、缩进、复选框一律不动。跨出可见时间轴（`startHour`–`endHour`）的记录不参与拖拽，避免把隐藏部分裁掉。
-- **块布局网格留白（DEC-010）**：`colsContainer` / 每个 `col` 高度为 `totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER`（12 / 14 px）；刻度标签、小时线、时间块、当前时间线、落点层的 `top` **一律加 `BLOCK_TOP_GUTTER`**，落点层的点击换算 `y` **一律减 `BLOCK_TOP_GUTTER`**。原因：刻度标签用 `translateY(-50%)` 居中，`top:0` 时上半截会被滚动区裁掉，视觉上像被全天区压住。**新增任何绝对定位元素都必须套用这个偏移**，否则会和刻度错位。
-- **当前时间线（DEC-009）**：仅块布局绘制。`renderBlockGrid` 在 `colsContainer`（已加 `position: relative`）末尾创建 `.timenote-now-line`，`left: 52px` 起（让开刻度列）横跨整行，左侧 `.timenote-now-label` 显示 `HH:mm`；`tickNowLine()` 按 `(now-startHour)/3600*slotHeight` 定位，当前时刻早于 `startHour` 或晚于 `endHour` 时 `display:none`，DOM 已被移除（`isConnected=false`）则直接返回。视图 `onOpen` 后由 `startNowClock()` 起 30s 定时器，`renderTimeGrid` 每次重渲染先 `stopNowClock()` 再重建，`onClose()` 兜底停表 —— **新增定时器务必在这三处收口**。
+- **块布局网格留白（DEC-013 修订 DEC-010）**：`colsContainer` / 每个 `col` 高度为 `totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER`，其中 **`BLOCK_TOP_GUTTER` 恒为 0**、`BLOCK_BOTTOM_GUTTER = 14`。**顶部留白一律不许加回来**：任何 > 0 的值都会在「全天区」和第一个整点之间多出一条空行（用户明确反馈过）。起始时刻的刻度标签改用 `.is-first`（`transform: translateY(0)`）贴住轴线，不再靠留白躲避裁切；底部留白保留，因为结束时刻的标签仍用 `translateY(-50%)` 居中、需要半行余量。全天区与网格之间的分隔条 `.timenote-header-resizer` 是**绝对定位**压在表头底边上的（8px 命中区），**不参与布局高度**，改成常规流元素会立刻多出一条空行。
+- **块高恒等于时间跨度（DEC-013）**：块渲染高度 = `yOf(end) - yOf(start)`（下限 `MIN_RENDER_BLOCK_PX = 16`），**块的上下沿必须与刻度精确对齐**，否则下沿就不再代表结束时间（用户 2026-11-09 明确要求「块的时间范围要和时间轴一致」，此前 `min(跨度, estimateBlockNeed)` 的做法已被否掉）。**「内容多就高」只能靠行高实现**：`buildTimeScale` 里按行聚合 `estimateBlockNeed`（中文按 2 个宽度单位、行高 15.5px、最多 6 行、上限 240px），内容多的行自然变高，块随跨度一起变高。因此**任何行高改动都会直接改变块高**，调参时两者不能分开想。
+- **当前时间线（DEC-009）**：仅块布局绘制。`renderBlockGrid` 在 `colsContainer`（已加 `position: relative`）末尾创建 `.timenote-now-line`，`left: 52px` 起（让开刻度列）横跨整行，左侧 `.timenote-now-label` 显示 `HH:mm`；`tickNowLine()` 按 `scale.yOf(nowSec)` 定位（**不许**再手写 `(now-startHour)/3600*slotHeight`，弹性轴下行高不等距会跑偏），当前时刻早于 `startHour` 或晚于 `endHour` 时 `display:none`，DOM 已被移除（`isConnected=false`）则直接返回。视图 `onOpen` 后由 `startNowClock()` 起 30s 定时器，`renderTimeGrid` 每次重渲染先 `stopNowClock()` 再重建，`onClose()` 兜底停表 —— **新增定时器务必在这三处收口**。
 - 唯一数据源：周期日记 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md`（`periodicNotesFolder` 可配置）；可选聚合 Blinko（`includeBlinko`）。
 - 7 种视图：`day` / `3day` / `week` / `month` / `quarter` / `year` / `timeline`；默认设置见 `main.ts` 的 `DEFAULT_SETTINGS`。月 / 季 / 年仍只显示计数，不画块。
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
@@ -27,7 +28,12 @@
 - 校验：`npm run typecheck`、`npm run check`（类型检查 + PCMP 合规）、`node --check main.js`、`python3 scripts/pcmp_index.py --check`。
 - 本地部署（真机 vault）：`/home/inverstar/文档/Time/.obsidian/plugins/timenote/`，只需覆盖 `manifest.json` + `main.js` + `styles.css`（README 可一并覆盖）。**Obsidian 要求文件夹名 == `manifest.id`**，故该目录必须是 `timenote/`，且 `.obsidian/community-plugins.json` 里要列 `"timenote"`（旧值是 `"time-notes"`，改 id 时务必一起换，否则插件不加载）。该 vault 目前**没有** `data.json`，改 id 无配置迁移风险；覆盖前把旧文件备份到 `~/tmp/`。
 - 版本递增：`npm run bump`（自动 +0.0.1，也可 `npm run bump -- 1.2.0` 指定），随后 `npm run build`。
-- 交互回归：`node /home/inverstar/tmp/nowline-test.js`（指示线与网格几何 12 项）、`node /home/inverstar/tmp/drag-test.js`（吸附与时间前缀回写 12 项）。
+- 开发脚本（都在 `scripts/dev/`，需要先 `npm run build`，测的是产物里的真实实现）：
+  - `npm run test:timeline` —— 弹性时间轴数学与分配 33 项断言（单调、互逆、空档压缩、内容单调、视口封顶、等距回退等）。
+  - `npm run preview:timeline` —— 生成静态对比预览到 `scripts/dev/out/timeline-preview.html`（等距 vs 弹性）；加 `-- --compare=clip` 换成「块被截短 vs 块铺满跨度」。
+  - `npm run test:drag` —— 拖拽吸附与 `updateEntryTime` 回写 13 项（只改目标行、保留复选框 / 缩进 / 列表符 / 标签）。
+  - `npm test` —— 上面两套一起跑。
+  - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；拖拽测试则直接从 `main.ts` 抽函数源码。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
 
@@ -41,4 +47,5 @@
 7. **版本号先于提交**：任何进 Git 的功能/修复提交都必须先 `npm run bump`（patch +1）并重新 build（DEC-010）。
 8. **收尾更新**：实质变更后递增 `ai/STATE.md` 的 `revision`，同步 `Last Updated` 与 Immediate Next Action；Lite 档位不建 TASK.md / sessions/。
 9. **时间轴换算只能走 `buildTimeScale()`**：块的 `top/height`、整点刻度线、当前时间线、拖拽创建/调节的像素↔时间换算，一律经 `scale.yOf()` / `scale.secOf()`；**禁止**再手写 `BLOCK_TOP_GUTTER + (sec - dayStartSec)/3600 * slotHeight`。弹性时间轴下行高不等距，散落的旧公式不会报错、只会静默错位（DEC-012）。
-10. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
+10. **临时脚本落 `scripts/dev/`**：一次性脚本、探针、数据核对一律建在项目内 `scripts/dev/`，不要写到 `/tmp`、`$HOME` 或项目根；**能复用的留下并写进本文件的「常用命令」**，纯粹一次性（跑完就没用的核对脚本）在任务收尾时删除。预览等生成产物写 `scripts/dev/out/`（已 gitignore，可随时重建）。
+11. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。

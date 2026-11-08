@@ -13,6 +13,9 @@ node_modules/
 # PCMP 派生索引：Markdown 才是权威，缓存可随时删除重建
 ai/.cache/
 
+# 开发脚本的生成产物（预览 HTML 等，可随时用 npm run preview:timeline 重建）
+scripts/dev/out/
+
 # AI 协作本地记忆与工作数据（不入库）
 .workbuddy/
 
