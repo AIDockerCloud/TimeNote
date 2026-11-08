@@ -42,7 +42,7 @@ var DEFAULT_SETTINGS = {
   quickAddSection: "\u7075\u611F\u95EA\u5FF5",
   layoutMode: "block",
   defaultDuration: 60,
-  allDayHeight: 56,
+  allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
 };
@@ -66,11 +66,15 @@ function formatSecondsToTime(sec) {
 }
 var BLOCK_TOP_GUTTER = 0;
 var BLOCK_BOTTOM_GUTTER = 14;
+var BLOCK_RULER_W = 64;
 var DRAG_SNAP_MINUTES = 15;
 var MIN_BLOCK_SECONDS = 15 * 60;
 function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
   const step = Math.max(1, minutes) * 60;
   return Math.round(sec / step) * step;
+}
+function blockEdgeHit(px) {
+  return Math.max(2, Math.min(9, (Number(px) || 0) / 3));
 }
 function formatDuration(seconds) {
   const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
@@ -1215,13 +1219,32 @@ var TimenoteView = class extends import_obsidian.ItemView {
         };
       }
     });
+    this.syncHeaderGutter(wrapper, header, scrollArea);
+  }
+  /**
+   * 表头在固定容器、时间网格在滚动容器：垂直滚动条会吃掉网格的可见宽度，
+   * 不把同等宽度补给表头，日期列就会和下面的时间列逐列错位。
+   * 弹性轴会二次重渲染、内容高度变化会让滚动条出现/消失，所以用 ResizeObserver
+   * 持续同步，而不是只在首帧量一次。
+   */
+  syncHeaderGutter(wrapper, header, scrollArea) {
+    const sync = () => {
+      if (!wrapper.isConnected) return false;
+      const gutter = Math.max(0, scrollArea.offsetWidth - scrollArea.clientWidth);
+      header.style.paddingRight = `${gutter}px`;
+      return true;
+    };
     requestAnimationFrame(() => {
-      const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
-      if (scrollbarWidth > 0) {
-        header.style.paddingRight = `${scrollbarWidth}px`;
-      } else {
-        header.style.paddingRight = "0px";
+      if (!sync()) return;
+      const ro = new ResizeObserver(() => {
+        if (!sync()) ro.disconnect();
+      });
+      ro.observe(scrollArea);
+      ro.observe(wrapper);
+      if (this.headerGutterObserver && this.headerGutterObserver !== ro) {
+        this.headerGutterObserver.disconnect();
       }
+      this.headerGutterObserver = ro;
     });
   }
   // ==========================================================================
@@ -1232,8 +1255,10 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
     const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
     const headerDays = header.createEl("div", { cls: "timenote-header-days" });
-    headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
-    const allDayHeight = Math.max(40, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)));
+    const rulerSpacer = headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
+    rulerSpacer.createEl("div", { cls: "timenote-ruler-corner" });
+    rulerSpacer.createEl("div", { cls: "timenote-allday-ruler-label", text: "ALL DAY" });
+    const allDayHeight = Math.max(32, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)));
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
       const isToday = d.isSame(window.moment(), "day");
@@ -1266,9 +1291,11 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const slotHeight = Number((_d = this.plugin.settings.slotHeight) != null ? _d : 52);
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
+    const nowAtRender = window.moment();
+    const hasToday = days.some((d) => d.isSame(nowAtRender, "day"));
     const elastic = this.plugin.settings.elasticTimeline !== false;
     const viewWidth = Math.max(320, wrapper.clientWidth || 880);
-    const colWidth = Math.max(150, (viewWidth - 52) / Math.max(1, days.length));
+    const colWidth = Math.max(150, (viewWidth - BLOCK_RULER_W) / Math.max(1, days.length));
     const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
     const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
     const clustersByDay = /* @__PURE__ */ new Map();
@@ -1324,6 +1351,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       });
       label.style.top = `${scale.yOf(h * 3600)}px`;
       if (h === startHour) label.addClass("is-first");
+      if (hasToday && h === nowAtRender.hour()) label.addClass("is-now");
       const rowH = scale.heights[Math.min(scale.rowCount - 1, h - startHour)];
       if (scale.elastic && rowH < slotHeight * 0.5) label.addClass("is-dense");
     }
@@ -1373,13 +1401,15 @@ var TimenoteView = class extends import_obsidian.ItemView {
             };
           }
           title.createEl("span", { text: e.text });
+          const tagSuffix = e.tags && e.tags.length > 0 ? ` \xB7 #${e.tags.slice(0, 2).join(" #")}` : "";
           const meta = block.createEl("div", {
             cls: "timenote-event-block-meta",
-            text: `${e.timeStr} \xB7 ${formatDuration(it.en - it.s)}`
+            text: `${formatSecondsToTime(it.s)} \u2013 ${formatSecondsToTime(it.en)}${tagSuffix}`
           });
-          if (e.tags && e.tags.length > 0) {
-            meta.textContent = `${meta.textContent} \xB7 #${e.tags.slice(0, 2).join(" #")}`;
-          }
+          const duration = block.createEl("div", {
+            cls: "timenote-event-block-duration",
+            text: formatDuration(it.en - it.s)
+          });
           if (e.subItems && e.subItems.length > 0) {
             const badge = block.createEl("div", { cls: "timenote-event-block-sub", text: `\u25BE${e.subItems.length} \u5B50\u9879` });
             badge.onclick = (ev) => {
@@ -1388,7 +1418,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
               new SubItemsModal(this.app, e).open();
             };
           }
-          this.attachBlockDrag(block, e, meta, scale);
+          this.attachBlockDrag(block, e, meta, duration, scale);
           block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
           block.onmouseleave = () => this.hideHoverTooltip();
           block.onclick = (ev) => {
@@ -1400,8 +1430,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         });
       });
     });
-    const nowAtRender = window.moment();
-    if (days.some((d) => d.isSame(nowAtRender, "day"))) {
+    if (hasToday) {
       this.nowLineEl = colsContainer.createEl("div", { cls: "timenote-now-line" });
       this.nowLabelEl = this.nowLineEl.createEl("span", {
         cls: "timenote-now-label",
@@ -1410,10 +1439,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       this.tickNowLine();
       this.startNowClock();
     }
-    requestAnimationFrame(() => {
-      const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
-      header.style.paddingRight = `${scrollbarWidth > 0 ? scrollbarWidth : 0}px`;
-    });
+    this.syncHeaderGutter(wrapper, header, scrollArea);
   }
   // ==========================================================================
   // Drag Interactions（拖拽创建 / 调节范围 / 全天区高度）
@@ -1477,34 +1503,44 @@ var TimenoteView = class extends import_obsidian.ItemView {
       formatSecondsToTime(endSec)
     ).open();
   }
-  attachBlockDrag(block, entry, meta, scale) {
-    block.createEl("div", { cls: "timenote-block-edge is-top" });
-    block.createEl("div", { cls: "timenote-block-edge is-bottom" });
+  attachBlockDrag(block, entry, meta, duration, scale) {
     if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
     const origStart = Number(entry.startSeconds) || 0;
     const origEnd = Number(entry.endSeconds) || origStart + 1800;
     const baseStartY = scale.yOf(origStart);
     const baseEndY = scale.yOf(origEnd);
+    block.onpointermove = (ev) => {
+      if (block.hasClass("is-dragging")) return;
+      const r = block.getBoundingClientRect();
+      const edge = blockEdgeHit(r.height);
+      const off = ev.clientY - r.top;
+      block.style.cursor = off <= edge || r.height - off <= edge ? "ns-resize" : "grab";
+    };
+    block.onpointerleave = () => {
+      if (!block.hasClass("is-dragging")) block.style.cursor = "";
+    };
     block.onpointerdown = (ev) => {
       if (ev.button !== 0) return;
       const target = ev.target;
       if (target && (target.tagName === "INPUT" || target.closest && target.closest(".timenote-event-block-sub"))) return;
       const rect = block.getBoundingClientRect();
       const offsetY = ev.clientY - rect.top;
-      const compact = rect.height < 30;
+      const edge = blockEdgeHit(rect.height);
       let mode = "move";
-      if (!compact && offsetY <= 8) mode = "start";
-      else if (!compact && rect.height - offsetY <= 8) mode = "end";
+      if (offsetY <= edge) mode = "start";
+      else if (rect.height - offsetY <= edge) mode = "end";
       const startY = ev.clientY;
       let moved = false;
       let curStart = origStart;
       let curEnd = origEnd;
+      const tagSuffix = entry.tags && entry.tags.length > 0 ? ` \xB7 #${entry.tags.slice(0, 2).join(" #")}` : "";
       const paint = () => {
         const top = scale.yOf(curStart);
         const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
         block.style.top = `${top}px`;
         block.style.height = `${spanPx}px`;
-        meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} \xB7 ${formatDuration(curEnd - curStart)}`;
+        meta.textContent = `${formatSecondsToTime(curStart)} \u2013 ${formatSecondsToTime(curEnd)}${tagSuffix}`;
+        duration.textContent = formatDuration(curEnd - curStart);
       };
       const onMove = (e) => {
         const dy = e.clientY - startY;
@@ -1512,19 +1548,20 @@ var TimenoteView = class extends import_obsidian.ItemView {
         if (!moved) {
           moved = true;
           block.addClass("is-dragging");
+          block.style.cursor = "grabbing";
           this.hideHoverTooltip();
         }
         const deltaStart = snapSeconds(scale.secOf(baseStartY + dy) - origStart);
         const deltaEnd = snapSeconds(scale.secOf(baseEndY + dy) - origEnd);
         if (mode === "move") {
           const dur = origEnd - origStart;
-          curStart = Math.max(0, Math.min(86400 - dur, origStart + deltaStart));
+          curStart = Math.max(scale.dayStartSec, Math.min(scale.dayEndSec - dur, origStart + deltaStart));
           curEnd = curStart + dur;
         } else if (mode === "start") {
-          curStart = Math.max(0, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + deltaStart));
+          curStart = Math.max(scale.dayStartSec, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + deltaStart));
           curEnd = origEnd;
         } else {
-          curEnd = Math.min(86400, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + deltaEnd));
+          curEnd = Math.min(scale.dayEndSec, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + deltaEnd));
           curStart = origStart;
         }
         paint();
@@ -1533,6 +1570,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         block.removeClass("is-dragging");
+        block.style.cursor = "";
         if (!moved) return;
         block.dataset.dragMoved = "1";
         window.setTimeout(() => {
@@ -1564,7 +1602,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       if (ev.button !== 0) return;
       ev.preventDefault();
       const startY = ev.clientY;
-      const startH = Math.max(40, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)));
+      const startH = Math.max(32, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)));
       const containers = Array.from(header.querySelectorAll(".timenote-day-allday-container"));
       let next = startH;
       const apply = (h) => {
@@ -1575,7 +1613,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         });
       };
       const onMove = (e) => {
-        next = Math.max(40, Math.min(320, Math.round(startH + (e.clientY - startY))));
+        next = Math.max(32, Math.min(320, Math.round(startH + (e.clientY - startY))));
         apply(next);
       };
       const onUp = () => {
@@ -1606,23 +1644,21 @@ var TimenoteView = class extends import_obsidian.ItemView {
     }
   }
   tickNowLine() {
-    var _a, _b, _c;
     const el = this.nowLineEl;
     if (!el || !el.isConnected) return;
     const now = window.moment();
     const scale = this.currentTimeScale;
-    const startHour = scale ? scale.startHour : Number((_a = this.plugin.settings.startHour) != null ? _a : 0);
-    const endHour = scale ? scale.endHour : Number((_b = this.plugin.settings.endHour) != null ? _b : 24);
-    const slotHeight = Number((_c = this.plugin.settings.slotHeight) != null ? _c : 52);
-    const startSec = startHour * 3600;
-    const endSec = endHour * 3600;
+    if (!scale) {
+      el.style.display = "none";
+      return;
+    }
     const nowSec = now.hours() * 3600 + now.minutes() * 60 + now.seconds();
-    if (nowSec < startSec || nowSec > endSec) {
+    if (nowSec < scale.dayStartSec || nowSec > scale.dayEndSec) {
       el.style.display = "none";
       return;
     }
     el.style.display = "";
-    el.style.top = scale ? `${scale.yOf(nowSec)}px` : `${BLOCK_TOP_GUTTER + (nowSec - startSec) / 3600 * slotHeight}px`;
+    el.style.top = `${scale.yOf(nowSec)}px`;
     if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
   }
   // ==========================================================================
@@ -2201,9 +2237,9 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveSettings();
       this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
     }));
-    new import_obsidian.Setting(containerEl).setName("\u5168\u5929\u533A\u9AD8\u5EA6").setDesc("\u9876\u90E8\u300C\u5168\u5929\u300D\u533A\u57DF\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u4E5F\u53EF\u5728\u89C6\u56FE\u91CC\u76F4\u63A5\u62D6\u52A8\u5168\u5929\u533A\u4E0E\u65F6\u95F4\u7F51\u683C\u4E4B\u95F4\u7684\u5206\u9694\u6761\u8C03\u8282\uFF1B\u9ED8\u8BA4 56\u3002").addSlider((slider) => {
+    new import_obsidian.Setting(containerEl).setName("\u5168\u5929\u533A\u9AD8\u5EA6").setDesc("ALL DAY \u884C\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u4E5F\u53EF\u5728\u89C6\u56FE\u91CC\u76F4\u63A5\u62D6\u52A8\u8BE5\u884C\u4E0E\u7F51\u683C\u4E4B\u95F4\u7684\u5206\u9694\u6761\u8C03\u8282\uFF1B\u9ED8\u8BA4 36\uFF0C\u4E0E\u666E\u901A\u6574\u70B9\u884C\u4E00\u81F4\u3002").addSlider((slider) => {
       var _a;
-      return slider.setLimits(40, 320, 4).setValue(Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)).setDynamicTooltip().onChange(async (val) => {
+      return slider.setLimits(32, 320, 4).setValue(Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)).setDynamicTooltip().onChange(async (val) => {
         this.plugin.settings.allDayHeight = val;
         await this.plugin.saveSettings();
         if (this.allDayRerenderTimer) window.clearTimeout(this.allDayRerenderTimer);

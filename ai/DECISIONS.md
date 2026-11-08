@@ -1,7 +1,7 @@
 ---
 pcmp_version: "2.2"
-revision: 8
-updated: 2026-11-08
+revision: 10
+updated: 2026-11-09
 ---
 
 # 架构与技术决策记录 (DECISIONS.md — Lite)
@@ -162,4 +162,28 @@ updated: 2026-11-08
 - 决策 (Decision): ① **放弃总高守恒**。行高由内容决定：空档行 = `slotHeight * 0.34`（下限 16px）；有条目起点的行 = `max(slotHeight * 0.9, 40px)`；再按「该行内块实际需要的高度」做纵向槽位装箱（同时发生的块左右并排不同槽、先后发生的块上下叠放同槽，取最满的槽 + 8px 呼吸），保证块不会被压扁重叠。② 轴高不足视口时整体等比放大行距，倍数**封顶 1.5**（`ELASTIC_MAX_VIEWPORT_SCALE`），避免整条轴挤在面板上半截、同时不让块被拉虚。③ **块渲染高度恒等于它在轴上的时间跨度**（`yOf(end) - yOf(start)`，下限 16px）：上沿对齐开始时间、下沿对齐结束时间，与刻度严格一致；「内容多就高」全部由行高承担（内容多的行被 `estimateBlockNeed` 撑开，块随跨度一起变高）。**禁止**再把块从跨度里截短 —— 截短后下沿不再代表结束时间，会让块看起来只占时间段的一小截（首版 `min(跨度, need)` 的做法已被用户否掉）。同时把「被记录覆盖到的小时」（含跨行长条目的中间段）从空档高度抬到最小内容行高，否则跨小时的长条目会被掐成细条。④ `BLOCK_TOP_GUTTER` 改为 **0**，起始刻度标签用 `.is-first` 下移贴住轴线；`.timenote-header-resizer` 改为**绝对定位**压在表头底边上（8px 命中区、不占布局高度），彻底消除那条空行。⑤ 视觉统一（参照 tasknotes）：表头 1px 单线、全天区与表头同底色、全天 chip 与时间块共用一套语言（圆角 6px / 无实边框 / 左侧 3px 色条 / 淡色底 0.08–0.10 透明度 / 标题 0.775rem·500 / 时间 0.675rem·muted / 等宽数字）、刻度列去掉 `border-right`（交给列自己的 `border-left`，消除双线）、小时线降到 0.6 透明度、今日列加 3.5% 淡色底、当前时间线胶囊圆角 4px。
 - 理由 (Reason): 「填满」和「内容定高」在数学上互斥 —— 只要总高锁死，稀疏的一天就必须有人吃掉富余，而唯一有意义的位置只有内容块本身（空档被压到底后没有别的去处），于是块被迫变胖。所以让轴高随内容伸缩才是唯一自洽解，代价是滚动范围不再恒定。把块高与行高解耦后还有一个额外好处：行距可以为了「一屏看全」自由放大，而块始终紧凑，信息密度不再被行距绑架。
 - 备选方案 (Alternatives): 保留总高守恒、把富余喂给空档行（空档会涨回 45px 左右，压缩效果消失）；块高直接 `height: auto` 由 CSS 撑（绝对定位下无法参与避让计算，同 lane 的块会互相压住）；用 `ResizeObserver` 真实测量文字高度替代字数估算（最准，但要重排两轮、且每次渲染都要读布局，暂不引入）；只改视觉不改高度分配（用户的核心诉求就是高度）。
-- 影响 (Consequences): 轴总高不再恒定，内容少的一天轴会明显变短（全空时约 24×18 = 432px），滚动范围随之变化；**块高与跨度绑定后，行高即块高** —— 一条时长两小时但只写了一行字的记录，块就是两小时的高度、下方留白（这是时间范围的真实体现，不再是「起点处的小卡片」），反之内容多的小时会把行和块一起撑高；`分列（lane）` 逻辑不变，同一簇内仍按时间重叠分列；拖拽时上下边缘可直接改起止（块的下沿就是结束时刻，不再需要「先拉满跨度」这一步），仅块高 < 30px 时才退化为整体平移；`estimateBlockNeed` 是字数估算，不同字体/主题下会有 ±1 行误差。
+- 影响 (Consequences): 轴总高不再恒定，内容少的一天轴会明显变短（全空时约 24×18 = 432px），滚动范围随之变化；**块高与跨度绑定后，行高即块高** —— 一条时长两小时但只写了一行字的记录，块就是两小时的高度、下方留白（这是时间范围的真实体现，不再是「起点处的小卡片」），反之内容多的小时会把行和块一起撑高；`分列（lane）` 逻辑不变，同一簇内仍按时间重叠分列；拖拽时上下边缘可直接改起止（块的下沿就是结束时刻，不再需要「先拉满跨度」这一步）；`estimateBlockNeed` 是字数估算，不同字体/主题下会有 ±1 行误差。**修订（2026-11-09）**：原「仅块高 < 30px 时才退化为整体平移」条款已由 DEC-014 废止 —— 任意块高都必须能改起止。
+
+## DEC-014 — 目标态视觉落地：把周视图做成一整张表格，并去掉所有拖拽把手
+日期: 2026-11-09 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-09 00:51 指令「为什么要把手？去掉把手，我希望边缘自然拖动，无论大小都要可以，目前这个看起来还行，请实现」；目标态视觉经 2026-11-09 00:35–00:50 两轮效果图确认（时间字体更粗/显眼/鲜艳、ALL DAY 行并入表格、块实色不遮字、表头不再格格不入）
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要可见的拖拽尺寸气泡 / 吸附提示、需要按块高改变命中策略（如固定 8px）、需要把「等距 36px/行」改回默认行高策略、或 ALL DAY 行需要独立底色时复审
+- 背景 (Context): ① [事实] 效果图与 DEC-011 实现都在块的上下边缘画了条状把手（`.grip` / `.timenote-block-edge`），并且用「块高 < 30/44px 时只保留整体平移」来避免两条把手把矮块占满；用户明确反对这个思路 —— 把手本身多余，且「无论大小都要可以」改边界。② [事实] 表头是 `background-secondary` 灰底、ALL DAY 行与网格分属两块拼贴，时间刻度用 `text-muted` 0.68rem 无字重，整体不像一张表（用户两轮反馈）。③ [事实] 目标态此前只存在于 `scripts/dev/out/target-design.html`，插件代码一直没动；用户在本轮批准效果图并要求实现。④ [事实] `tickNowLine()` 还留了一条 `scale` 缺失时手写等距公式的 fallback，与 AGENTS 红线 9 冲突。
+- 决策 (Decision): ① **删除所有把手 DOM 与 CSS**：`attachBlockDrag` 不再创建 `.timenote-block-edge`，`styles.css` 删掉对应规则；设计稿 `preview-target-design.mjs` 同步删 `.grip` 并用脚本演示光标切换。② **任意块高都能改起止**：命中区 `edgeOf(h) = clamp(h/3, 2, 9)`，上/下沿各一段、中间留平移段，最矮 16px 的块也有三段；删除 `compact = rect.height < 30` 退化分支。光标是唯一提示：`pointermove` 按位置切 `ns-resize` / `grab`，拖动中 `grabbing`，松手清空。③ 拖拽结果一律夹在 `scale.dayStartSec`–`scale.dayEndSec` 内（原来夹 0–86400，会把块拖出可见轴）。④ **整张表格化**：表头 / ALL DAY / 网格统一 `background-primary`；表头列 `border-right` 改 `border-left` 与网格列共用竖线；`timenote-block-ruler-spacer` 拆成 36px 日期行占位 + 自适应 `ALL DAY` 标签两层，标签随行高居中；ALL DAY 行无独立底色/粗线，chip 横向 wrap；`.timenote-header-resizer::after` 仅 hover 浮现。时间刻度 0.72rem/600/正文色 + `text-shadow` 描边断线，当前小时 `.is-now` 主色 + 9px 引出线，当前时间线同步改主色。⑤ 块：20% 底 / 42% 边 / 4px 左色条 / 7px 圆角、文字正文色、标题 600 字重；meta 只写 `起 – 止`，时长移入右下角 `.timenote-event-block-duration`，矮块随次要信息一起收起。⑥ `allDayHeight` 默认 56 → 36、下限 40 → 32（与整点行同量级）；`tickNowLine` 无 `scale` 时隐藏而不手写公式。⑦ 保留弹性时间轴（对应效果图右栏「内容驱动」），等距 36px/行仍由设置页「自适应时间轴」开关提供（效果图左栏）。
+- 理由 (Reason): 把手是「把不可见的命中区画出来」的补丁，代价是矮块被两条 9px 条占满、于是又得加退化分支，越补越复杂；直接让边缘本身成为命中区、按高度比例自适应，一条规则同时解决「好看」和「无论大小都能拖」。视觉上先对齐目标再写代码，是为了避免重复出现「解决了错误的问题」—— 表头灰底、刻度淡化、ALL DAY 独立底色都是同一处结构性割裂，必须一起改，逐个微调只会继续拼贴。
+- 备选方案 (Alternatives): 保留可见把手但做矮块自动隐藏（用户明确否决）；用 `ResizeObserver` 真实测量块高再决定命中区（每次渲染多一轮布局读取，无收益）；固定 8px 命中区（16px 块会被上下两片占满，中部平移消失）；把拖拽改到键盘 / 弹窗（失去 TaskNotes 手感）；改用等距 36px/行重排整条轴（会推翻 DEC-013 已确认的「内容定高」，用户本轮没有要求改行高策略）。
+- 影响 (Consequences): 版本 1.0.4 → 1.0.5；`attachBlockDrag` 签名多了 `duration` 参数，调用处与拖拽中的 `paint()` 同步更新 meta 与时长；`allDayHeight` 默认值与下限变化只影响新配置（真机 `data.json` 里已是 89，需用户自行调回 36–40 才能完全对齐效果图）；`scripts/dev/out/*.png` 旧截图因沙箱拒绝 chromium 截图而未重生成并已清理，视觉基准以 `target-design.html`（可交互）为准；提交脚本升级为五段式，新增 `~/tmp/tn-v105-snapshot` 快照，否则第 4 段的 `rsync --delete` 会把本次改动抹回 1.0.4。
+
+## DEC-015 — 修复真机「背景色全无 + 表头逐列错位」
+日期: 2026-11-09 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-09 01:30 反馈「有错位，而且背景色没了」（v1.0.5 部署后真机 reload 所见）
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): Obsidian 升级后 `color-mix()` 兼容性变化、需要自定义主题强调色变量、刻度列宽需要随语言/字号变化、或要把表头并入同一滚动容器时复审
+- 背景 (Context): ① [事实] 查 Obsidian 官方 CSS 变量文档：**没有** `--color-accent-rgb`；`--color-orange-rgb` / `--color-green-rgb` / `--color-purple-rgb` 自 1.13 起弃用；`--background-modifier-border-rgb` 从未定义。插件 `styles.css` 里 29 处 `rgba(var(--xxx-rgb), a)` 展开后因变量未定义导致**整条声明失效**，时间块、全天 chip、今日列、热力图等在真机上全部透明。② [事实] `scripts/dev/preview-*.mjs` 自己补了 `--color-accent-rgb: 124,92,255`，所以预览稿一直是「有颜色」的，问题被完全掩盖 —— 这是「预览好看、真机没色」的根因。③ [事实] 用复刻真实 DOM 的浏览器探针测得：表头第 1 列相对网格左偏 6.23px、每列宽差 0.89px，逐列累积到 0。根因是 `.timenote-block-ruler-spacer` 作为 flex item 默认 `min-width: auto`，被 `ALL DAY` 标签的 min-content（约 58px）撑宽到 58.23px，而网格刻度列仍是 52px。④ [事实] 网格列继承 `.timenote-column` 的 `border-right`，与 `.timenote-block-column` 的 `border-left` 叠加成双线，表头列只有 `border-left`。⑤ [事实] 滚动条补偿只在一帧 `requestAnimationFrame` 里量一次，弹性轴二次重渲染、内容高度变化导致滚动条出现/消失后不再同步。
+- 决策 (Decision): ① `styles.css` 所有失效写法改为**双声明**：先固定 `rgba()` 兜底（老内核至少不会全透明），再 `color-mix(in srgb, var(--color-accent / --color-orange / --color-green / --color-purple / --background-modifier-border, #fallback) N%, transparent)` 跟随主题；文件头写明禁用原因。今日列底色由 3.5% 提到设计稿的 5%。② 刻度列统一 `--tn-ruler-w: 64px`（`main.ts` 同步 `BLOCK_RULER_W = 64`，列宽估算、当前时间线 `left`、时间胶囊 `max-width` 全部走变量，不再硬编码 52px）；spacer 加 `min-width: 0` + `overflow: hidden`、ruler 加 `min-width: 0`，杜绝内容撑宽。③ 网格列显式 `border-right: none`，与表头共用唯一一条 `border-left` 竖线。④ 抽 `syncHeaderGutter(wrapper, header, scrollArea)`：rAF 首帧同步 + `ResizeObserver` 持续观察 `scrollArea` / `wrapper`，把 `offsetWidth - clientWidth` 补成表头 `padding-right`；两个渲染器共用，重渲染时断开旧 observer。⑤ 新增 `scripts/dev/preview-real-dom.mjs`（复刻真实 DOM + 内联真实 CSS，**故意不定义** `-rgb` 变量，页面底部探针输出 7 列 left/width 偏差与各类 computed background-color）与 `scripts/dev/test-visual-regression.mjs`（17 项静态断言），并接入 `npm test` / `npm run preview:real`。
+- 理由 (Reason): 颜色失效是「预览环境比真机多几个变量」造成的假阳性，靠肉眼看设计稿永远发现不了，必须让预览与真机变量环境一致并用 computed style 断言。列错位不是视觉调参问题，而是 flex 自动最小尺寸把表头刻度列撑宽的结构性偏差 —— 只要 spacer 还能被内容撑宽，任何 padding 补偿都救不了；加宽到能容纳标签 + 显式禁止撑宽，才是一次性闭合。
+- 备选方案 (Alternatives): 在插件 CSS 里自行补 `--color-accent-rgb` 变量（等于继续粉饰预览/真机差异，且不会跟随主题）；改回 `var(--background-secondary)` 灰底表头（只是遮住问题，且推翻 DEC-014 已确认的表格化视觉）；把 ALL DAY 标签缩小到能塞进 52px（字重与可辨识度下降，且不同语言/字号仍可能撑宽）；表头与网格合并到同一滚动容器并用 sticky 定位（改动面大，涉及两个渲染器与拖拽坐标）；用 `scrollbar-gutter: stable` 纯 CSS 补偿（滚动条始终占位，但表头仍需同等 padding，且旧版 Electron 不支持）。
+- 影响 (Consequences): 本轮**不递增版本**（1.0.5 尚未提交，修复并入同一批次），但 `~/tmp/tn-v105-snapshot` 必须重新同步，否则五段式脚本第 4 段 `rsync --delete` 会把修复抹掉；真机 vault 的 `main.js` / `styles.css` 已重新覆盖，需 reload 插件。浏览器探针（浅色 / 深色）结果：7 列 left / width 偏差全部 0px，时间块 `color(srgb … / 0.2)`、任务块 `/ 0.22`、chip `/ 0.14`、今日列 `/ 0.05` 均非空；`npm test` 由 33+23 项扩为 33+23+17 项。

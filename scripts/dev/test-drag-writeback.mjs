@@ -94,7 +94,13 @@ function buildRunner(text) {
   };
 }
 
-// ---------- 3) 断言 ----------
+// ---------- 3) 无把手边缘命中区（DEC-014，真实源码） ----------
+const eStart = src.indexOf("function blockEdgeHit(");
+if (eStart < 0) throw new Error("main.ts 里找不到 blockEdgeHit");
+const eEnd = src.indexOf("\n}\n", eStart) + 3;
+const blockEdgeHit = new Function(`${src.slice(eStart, eEnd)}\nreturn blockEdgeHit;`)();
+
+// ---------- 4) 断言 ----------
 console.log(`--- snapSeconds（吸附粒度 ${snapMin} 分钟）---`);
 const H = (h) => h * 3600;
 ok("14:07 → 14:00", snapSeconds(14 * 3600 + 7 * 60) === 14 * 3600);
@@ -168,6 +174,22 @@ console.log("--- updateEntryTime ---");
   await run({ filePath: file.path, lineNum: 1 }, H(8), H(9) + 1800);
   ok("缩进与 * 符号保留", file._text === "\t* 08:00-09:30 缩进星号\n", JSON.stringify(file._text));
 }
+
+console.log("--- 无把手边缘命中区（DEC-014）---");
+[16, 20, 24, 30, 44, 60, 200].forEach((h) => {
+  const edge = blockEdgeHit(h);
+  ok(
+    `${h}px 块同时有上沿 / 中部 / 下沿`,
+    edge >= 2 && edge <= 9 && h - 2 * edge > 0,
+    `edge=${edge.toFixed(2)}`
+  );
+});
+ok("大块命中区封顶 9px", blockEdgeHit(200) === 9);
+ok("极矮块命中区下限 2px", blockEdgeHit(1) === 2);
+ok(
+  "源码里没有把手 DOM 与 < 30px 退化分支",
+  !src.includes("timenote-block-edge") && !src.includes("rect.height < 30")
+);
 
 console.log(`\n===== ${pass} passed, ${fails.length} failed =====`);
 if (fails.length) {
