@@ -39,7 +39,9 @@ var DEFAULT_SETTINGS = {
   firstDayOfWeek: 1,
   // 1: Monday, 0: Sunday
   parseAllBullets: true,
-  quickAddSection: "\u7075\u611F\u95EA\u5FF5"
+  quickAddSection: "\u7075\u611F\u95EA\u5FF5",
+  layoutMode: "block",
+  defaultDuration: 60
 };
 function getTagColor(tag) {
   let hash = 0;
@@ -59,6 +61,64 @@ function formatSecondsToTime(sec) {
   const m = Math.floor(clamped % 3600 / 60);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+function parseTimeToSeconds(str) {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const sec = m[3] ? parseInt(m[3], 10) : 0;
+  if (h > 24 || h === 24 && (min > 0 || sec > 0) || min > 59 || sec > 59) return null;
+  return h * 3600 + min * 60 + sec;
+}
+function addMinutesToTime(timeStr, minutes) {
+  const sec = parseTimeToSeconds(timeStr);
+  if (sec === null) return "";
+  const total = Math.min(1440, Math.floor(sec / 60) + minutes);
+  if (total >= 1440) return "24:00";
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
+  const items = entries.map((e) => {
+    const st = Math.max(dayStartSec, e.startSeconds || 0);
+    const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
+    const en = Math.min(dayEndSec, Math.max(st + 60, rawEnd));
+    return { entry: e, s: st, en, lane: 0 };
+  }).sort((a, b) => a.s - b.s || a.en - b.en);
+  const clusters = [];
+  let current = null;
+  items.forEach((it) => {
+    if (!current || it.s >= current.end) {
+      current = { end: it.en, items: [], laneCount: 1 };
+      clusters.push(current);
+    }
+    current.items.push(it);
+    current.end = Math.max(current.end, it.en);
+  });
+  clusters.forEach((c) => {
+    const laneEnds = [];
+    c.items.forEach((it) => {
+      let lane = laneEnds.findIndex((end) => end <= it.s);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(it.en);
+      } else {
+        laneEnds[lane] = it.en;
+      }
+      it.lane = lane;
+    });
+    c.laneCount = Math.max(1, laneEnds.length);
+  });
+  return clusters;
+}
 function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("---") || trimmed.startsWith("```")) {
@@ -76,9 +136,11 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   let startSeconds = 0;
   let endSeconds = 0;
   let timeStr = "";
+  let explicitRange = false;
   const rangeMatch = content.match(rangeRegex);
   if (rangeMatch) {
     hasTime = true;
+    explicitRange = true;
     const sh = parseInt(rangeMatch[1], 10);
     const sm = parseInt(rangeMatch[2], 10);
     const ss1 = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : 0;
@@ -87,6 +149,9 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     const ss2 = rangeMatch[6] ? parseInt(rangeMatch[6], 10) : 0;
     startSeconds = sh * 3600 + sm * 60 + ss1;
     endSeconds = eh * 3600 + em * 60 + ss2;
+    if (endSeconds <= startSeconds) {
+      endSeconds = Math.min(86400, startSeconds + 1800);
+    }
     startMinutes = Math.floor(startSeconds / 60);
     endMinutes = Math.floor(endSeconds / 60);
     const hasSeconds = !!(rangeMatch[3] || rangeMatch[6]);
@@ -106,6 +171,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
       const durationMatch = content.match(/(?:^|\s)(\d+)(m|min|h|小时|分钟)(?:\s|$)/i);
       let durationSeconds = 1800;
       if (durationMatch) {
+        explicitRange = true;
         const val = parseInt(durationMatch[1], 10);
         const unit = durationMatch[2].toLowerCase();
         durationSeconds = unit.startsWith("h") || unit === "\u5C0F\u65F6" ? val * 3600 : val * 60;
@@ -143,6 +209,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     isTask,
     isCompleted,
     hasTime,
+    isRange: explicitRange,
     startSeconds,
     endSeconds,
     startMinutes,
@@ -336,11 +403,12 @@ var DailyNoteService = class {
     }
   }
   // Append new entry to daily note
-  async addEntry(dateStr, timeStr, content, isTask, tags = []) {
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
     let file = this.findDailyNoteFile(dateStr);
     const tagPart = tags.length > 0 ? " " + tags.map((t) => "#" + t).join(" ") : "";
     const linePrefix = isTask ? "- [ ] " : "- ";
-    const timePrefix = timeStr ? `${timeStr} ` : "";
+    const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
+    const timePrefix = rangeStr ? `${rangeStr} ` : "";
     const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
     if (!file) {
       const m = window.moment(dateStr);
@@ -444,6 +512,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
   async onClose() {
     this.hideHoverTooltip();
+    this.stopNowClock();
   }
   showHoverTooltip(entry, targetEl, event) {
     this.hideHoverTooltip();
@@ -640,6 +709,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
         this.renderView();
       };
     });
+    const layoutBtn = actions.createEl("button", {
+      text: this.getLayoutMode() === "block" ? "\u5757\u5E03\u5C40" : "\u7D27\u51D1\u6D41",
+      cls: "timenote-layout-toggle"
+    });
+    layoutBtn.onclick = async () => {
+      this.plugin.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
+      await this.plugin.saveSettings();
+    };
     const addBtn = actions.createEl("button", { text: "+ \u8BB0\u4E00\u6761", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
       new QuickAddModal(this.app, this.plugin, this.currentDate.format("YYYY-MM-DD"), () => {
@@ -785,6 +862,18 @@ var TimenoteView = class extends import_obsidian.ItemView {
     this.renderTimeGrid(container, days);
   }
   renderTimeGrid(container, days) {
+    this.stopNowClock();
+    this.nowLineEl = null;
+    this.nowLabelEl = null;
+    if (this.getLayoutMode() === "compact") {
+      return this.renderCompactGrid(container, days);
+    }
+    return this.renderBlockGrid(container, days);
+  }
+  getLayoutMode() {
+    return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
+  }
+  renderCompactGrid(container, days) {
     const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
     const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
     const headerDays = header.createEl("div", { cls: "timenote-header-days" });
@@ -982,6 +1071,178 @@ var TimenoteView = class extends import_obsidian.ItemView {
     });
   }
   // ==========================================================================
+  // Time Block Grid Renderer（共享渲染层，日 / 3天 / 周 复用）
+  // ==========================================================================
+  renderBlockGrid(container, days) {
+    var _a, _b, _c;
+    const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
+    const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
+    const headerDays = header.createEl("div", { cls: "timenote-header-days" });
+    headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
+    days.forEach((d) => {
+      const dateStr = d.format("YYYY-MM-DD");
+      const isToday = d.isSame(window.moment(), "day");
+      const dayCol = headerDays.createEl("div", {
+        cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
+      });
+      const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
+      titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
+      titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
+      titleRow.onclick = () => {
+        this.currentDate = d;
+        this.currentViewMode = "day";
+        this.renderView();
+      };
+      const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
+      const allDay = this.filterEntries(this.entriesMap.get(dateStr) || []).filter((e) => !e.hasTime);
+      allDay.forEach((entry) => {
+        const chip = allDayContainer.createEl("div", {
+          cls: `timenote-all-day-chip ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "completed" : ""}`
+        });
+        chip.createEl("span", { text: entry.text, cls: "timenote-all-day-chip-text" });
+        chip.onclick = () => this.jumpToFileLine(entry);
+      });
+    });
+    const startHour = Number((_a = this.plugin.settings.startHour) != null ? _a : 0);
+    const endHour = Number((_b = this.plugin.settings.endHour) != null ? _b : 24);
+    const slotHeight = Number((_c = this.plugin.settings.slotHeight) != null ? _c : 52);
+    const dayStartSec = startHour * 3600;
+    const dayEndSec = endHour * 3600;
+    const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
+    const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
+    scrollArea.onscroll = () => this.hideHoverTooltip();
+    const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
+    colsContainer.style.height = `${totalHeight}px`;
+    const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
+    for (let h = startHour; h <= endHour; h++) {
+      const label = ruler.createEl("div", {
+        cls: "timenote-block-ruler-label",
+        text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
+      });
+      label.style.top = `${(h - startHour) * slotHeight}px`;
+    }
+    days.forEach((d) => {
+      const dateStr = d.format("YYYY-MM-DD");
+      const isToday = d.isSame(window.moment(), "day");
+      const col = colsContainer.createEl("div", {
+        cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
+      });
+      col.style.height = `${totalHeight}px`;
+      for (let h = startHour; h <= endHour; h++) {
+        const line = col.createEl("div", { cls: "timenote-block-hour-line" });
+        line.style.top = `${(h - startHour) * slotHeight}px`;
+      }
+      const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
+      slotLayer.onclick = (ev) => {
+        const rect = col.getBoundingClientRect();
+        const y = Math.max(0, ev.clientY - rect.top);
+        const rawSec = dayStartSec + y / slotHeight * 3600;
+        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
+        const startStr = formatSecondsToTime(snapped);
+        const endSec = Math.min(dayEndSec, snapped + (this.plugin.settings.defaultDuration || 60) * 60);
+        const endStr = formatSecondsToTime(endSec);
+        new QuickAddModal(this.app, this.plugin, dateStr, () => this.renderView(), startStr, endStr).open();
+      };
+      const timed = this.filterEntries(this.entriesMap.get(dateStr) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+      clusters.forEach((cluster) => {
+        cluster.items.forEach((it) => {
+          const e = it.entry;
+          const top = (it.s - dayStartSec) / 3600 * slotHeight;
+          const height = Math.max(22, (it.en - it.s) / 3600 * slotHeight);
+          const widthPct = 100 / cluster.laneCount;
+          const block = col.createEl("div", {
+            cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
+          });
+          block.style.top = `${top}px`;
+          block.style.height = `${height}px`;
+          block.style.left = `${it.lane * widthPct}%`;
+          block.style.width = `calc(${widthPct}% - 6px)`;
+          const title = block.createEl("div", { cls: "timenote-event-block-title" });
+          if (e.isTask) {
+            const cb = title.createEl("input", { cls: "timenote-card-checkbox", attr: { type: "checkbox" } });
+            cb.checked = e.isCompleted;
+            cb.onclick = async (ev) => {
+              ev.stopPropagation();
+              this.hideHoverTooltip();
+              await this.plugin.dailyNoteService.toggleTask(e);
+              this.renderView();
+            };
+          }
+          title.createEl("span", { text: e.text });
+          const meta = block.createEl("div", {
+            cls: "timenote-event-block-meta",
+            text: `${e.timeStr} \xB7 ${formatDuration(it.en - it.s)}`
+          });
+          if (e.tags && e.tags.length > 0) {
+            meta.textContent = `${meta.textContent} \xB7 #${e.tags.slice(0, 2).join(" #")}`;
+          }
+          if (e.subItems && e.subItems.length > 0) {
+            const badge = block.createEl("div", { cls: "timenote-event-block-sub", text: `\u25BE${e.subItems.length} \u5B50\u9879` });
+            badge.onclick = (ev) => {
+              ev.stopPropagation();
+              this.hideHoverTooltip();
+              new SubItemsModal(this.app, e).open();
+            };
+          }
+          block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
+          block.onmouseleave = () => this.hideHoverTooltip();
+          block.onclick = (ev) => {
+            ev.stopPropagation();
+            this.hideHoverTooltip();
+            this.jumpToFileLine(e);
+          };
+        });
+      });
+    });
+    const nowAtRender = window.moment();
+    if (days.some((d) => d.isSame(nowAtRender, "day"))) {
+      this.nowLineEl = colsContainer.createEl("div", { cls: "timenote-now-line" });
+      this.nowLabelEl = this.nowLineEl.createEl("span", {
+        cls: "timenote-now-label",
+        text: nowAtRender.format("HH:mm")
+      });
+      this.tickNowLine();
+      this.startNowClock();
+    }
+    requestAnimationFrame(() => {
+      const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
+      header.style.paddingRight = `${scrollbarWidth > 0 ? scrollbarWidth : 0}px`;
+    });
+  }
+  // ==========================================================================
+  // Now Line Clock（当前时间指示线，30s 刷新）
+  // ==========================================================================
+  startNowClock() {
+    this.stopNowClock();
+    this.nowLineTimer = window.setInterval(() => this.tickNowLine(), 3e4);
+  }
+  stopNowClock() {
+    if (this.nowLineTimer) {
+      window.clearInterval(this.nowLineTimer);
+      this.nowLineTimer = null;
+    }
+  }
+  tickNowLine() {
+    var _a, _b, _c;
+    const el = this.nowLineEl;
+    if (!el || !el.isConnected) return;
+    const now = window.moment();
+    const startHour = Number((_a = this.plugin.settings.startHour) != null ? _a : 0);
+    const endHour = Number((_b = this.plugin.settings.endHour) != null ? _b : 24);
+    const slotHeight = Number((_c = this.plugin.settings.slotHeight) != null ? _c : 52);
+    const startSec = startHour * 3600;
+    const endSec = endHour * 3600;
+    const nowSec = now.hours() * 3600 + now.minutes() * 60 + now.seconds();
+    if (nowSec < startSec || nowSec > endSec) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    el.style.top = `${(nowSec - startSec) / 3600 * slotHeight}px`;
+    if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
+  }
+  // ==========================================================================
   // Timeline / Stream View Renderer
   // ==========================================================================
   renderTimelineView(container) {
@@ -1008,8 +1269,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
     entries.forEach((entry) => {
       const isBlinko = entry.source === "blinko";
       const item = group.createEl("div", { cls: "timenote-timeline-item" });
+      const spanSec = entry.hasTime ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0) : 0;
       item.createEl("div", {
-        text: entry.hasTime ? entry.timeStr : "\u5168\u5929",
+        text: entry.hasTime ? `${entry.timeStr} \xB7 ${formatDuration(spanSec)}` : "\u5168\u5929",
         cls: "timenote-timeline-badge"
       });
       item.createEl("div", {
@@ -1375,11 +1637,12 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
 };
 var QuickAddModal = class extends import_obsidian.Modal {
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = "") {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
     this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
+    this.endTimeStr = prefillEndTime || addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
     this.isTask = false;
     this.content = "";
     this.tagsStr = "";
@@ -1400,7 +1663,25 @@ var QuickAddModal = class extends import_obsidian.Modal {
       cls: "timenote-modal-input",
       attr: { type: "text", placeholder: "\u65F6\u95F4 (\u5982 14:30 \u6216 14:00:31\uFF0C\u7559\u7A7A\u4E3A\u5168\u5929)", value: this.timeStr }
     });
-    timeInput.oninput = (e) => this.timeStr = e.target.value;
+    const endTimeInput = row1.createEl("input", {
+      cls: "timenote-modal-input",
+      attr: { type: "text", placeholder: "\u7ED3\u675F\u65F6\u95F4 (\u7559\u7A7A\u4E3A\u5355\u65F6\u95F4\u70B9)", value: this.endTimeStr }
+    });
+    const durationHint = row1.createEl("span", { cls: "timenote-duration-hint", text: "" });
+    const updateDurationHint = () => {
+      const sSec = parseTimeToSeconds(this.timeStr);
+      const eSec = parseTimeToSeconds(this.endTimeStr);
+      durationHint.textContent = sSec !== null && eSec !== null && eSec > sSec ? `\u65F6\u957F ${formatDuration(eSec - sSec)}` : this.endTimeStr ? "\u7ED3\u675F\u9700\u665A\u4E8E\u5F00\u59CB" : "\u6309\u9ED8\u8BA4 30m \u663E\u793A";
+    };
+    timeInput.oninput = (e) => {
+      this.timeStr = e.target.value.trim();
+      updateDurationHint();
+    };
+    endTimeInput.oninput = (e) => {
+      this.endTimeStr = e.target.value.trim();
+      updateDurationHint();
+    };
+    updateDurationHint();
     const row2 = form.createEl("div", { cls: "timenote-modal-row" });
     const taskCheckbox = row2.createEl("input", { attr: { type: "checkbox", id: "tn-is-task" } });
     taskCheckbox.onchange = (e) => this.isTask = e.target.checked;
@@ -1430,13 +1711,29 @@ var QuickAddModal = class extends import_obsidian.Modal {
         new import_obsidian.Notice("\u8BF7\u8F93\u5165\u5185\u5BB9\uFF01");
         return;
       }
+      const startStr = this.timeStr.trim();
+      const endStr = this.endTimeStr.trim();
+      const hasExplicitRange = /[-~至到]/.test(startStr);
+      if (!hasExplicitRange && endStr) {
+        const sSec = parseTimeToSeconds(startStr);
+        const eSec = parseTimeToSeconds(endStr);
+        if (sSec === null || eSec === null) {
+          new import_obsidian.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
+          return;
+        }
+        if (eSec <= sSec) {
+          new import_obsidian.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u5F00\u59CB\u65F6\u95F4\uFF08\u6682\u4E0D\u652F\u6301\u8DE8\u65E5\uFF09\uFF01");
+          return;
+        }
+      }
       const tags = this.tagsStr.split(/[,，\s]+/).filter((t) => t.trim().length > 0);
       await this.plugin.dailyNoteService.addEntry(
         this.targetDate,
-        this.timeStr.trim(),
+        startStr,
         this.content.trim(),
         this.isTask,
-        tags
+        tags,
+        hasExplicitRange ? "" : endStr
       );
       new import_obsidian.Notice(`\u2705 \u5DF2\u6210\u529F\u8BB0\u5F55\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
       this.close();
@@ -1455,7 +1752,7 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "TimeNote (\u65F6\u95F4\u7B14\u8BB0) \u8BBE\u7F6E" });
+    containerEl.createEl("h2", { text: "TimeNote \u8BBE\u7F6E" });
     new import_obsidian.Setting(containerEl).setName("\u5468\u671F\u7B14\u8BB0\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u65E5\u8BB0\uFF08Daily Notes\uFF09\u6240\u5728\u7684\u6839\u76EE\u5F55\u3002\u63D2\u4EF6\u4F1A\u8BFB\u53D6\u5176\u4E2D\u683C\u5F0F\u4E3A YYYY-MM-DD \u7684\u7B14\u8BB0\u6587\u4EF6\u3002").addText((text) => text.setPlaceholder("SpiralNotes").setValue(this.plugin.settings.periodicNotesFolder).onChange(async (val) => {
       this.plugin.settings.periodicNotesFolder = val.trim() || "SpiralNotes";
       this.plugin.dailyNoteService.dailyNoteIndex.clear();
@@ -1467,6 +1764,61 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     new import_obsidian.Setting(containerEl).setName("\u9ED8\u8BA4\u89C6\u56FE\u6A21\u5F0F").setDesc("\u6253\u5F00\u65E5\u5386\u65F6\u9ED8\u8BA4\u5C55\u793A\u7684\u89C6\u56FE\u3002").addDropdown((drop) => drop.addOption("day", "\u65E5\u89C6\u56FE (Day)").addOption("3day", "3\u5929\u89C6\u56FE (3-Day)").addOption("week", "\u5468\u89C6\u56FE (Week)").addOption("month", "\u6708\u89C6\u56FE (Month)").addOption("quarter", "\u5B63\u5EA6\u89C6\u56FE (Quarter)").addOption("year", "\u5E74\u5EA6\u89C6\u56FE (Year)").addOption("timeline", "\u65F6\u95F4\u7EBF\u89C6\u56FE (Timeline)").setValue(this.plugin.settings.defaultView).onChange(async (val) => {
       this.plugin.settings.defaultView = val;
+      await this.plugin.saveSettings();
+    }));
+    const hourChoices = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => {
+      const h = from + i;
+      return { value: String(h), label: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00` };
+    });
+    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u8D77\u59CB\u65F6\u95F4").setDesc("\u65E5 / 3\u5929 / \u5468\u89C6\u56FE\u65F6\u95F4\u7F51\u683C\u7684\u8D77\u59CB\u5C0F\u65F6\u3002\u9ED8\u8BA4 00:00\uFF08\u5168\u5929\uFF09\uFF0C\u53EF\u6309\u4F5C\u606F\u6536\u7A84\uFF0C\u4F8B\u5982 06:00\u3002").addDropdown((drop) => {
+      var _a;
+      hourChoices(0, 23).forEach((o) => drop.addOption(o.value, o.label));
+      drop.setValue(String((_a = this.plugin.settings.startHour) != null ? _a : 0));
+      drop.onChange(async (val) => {
+        var _a2;
+        const h = parseInt(val, 10);
+        this.plugin.settings.startHour = h;
+        if (((_a2 = this.plugin.settings.endHour) != null ? _a2 : 24) <= h) {
+          this.plugin.settings.endHour = Math.min(24, h + 1);
+          new import_obsidian.Notice(`\u7ED3\u675F\u65F6\u95F4\u5DF2\u81EA\u52A8\u8C03\u6574\u4E3A ${String(this.plugin.settings.endHour).padStart(2, "0")}:00`);
+        }
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u7ED3\u675F\u65F6\u95F4").setDesc("\u65F6\u95F4\u7F51\u683C\u7684\u7ED3\u675F\u5C0F\u65F6\uFF0C\u9ED8\u8BA4 24:00\uFF08\u5168\u5929\uFF09\u3002\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\u3002").addDropdown((drop) => {
+      var _a;
+      hourChoices(1, 24).forEach((o) => drop.addOption(o.value, o.label));
+      drop.setValue(String((_a = this.plugin.settings.endHour) != null ? _a : 24));
+      drop.onChange(async (val) => {
+        var _a2;
+        const h = parseInt(val, 10);
+        if (h <= ((_a2 = this.plugin.settings.startHour) != null ? _a2 : 0)) {
+          new import_obsidian.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\uFF01");
+          return;
+        }
+        this.plugin.settings.endHour = h;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u6BCF\u5C0F\u65F6\u69FD\u9AD8").setDesc("\u65F6\u95F4\u7F51\u683C\u4E2D\u6BCF\u5C0F\u65F6\u5360\u7528\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u8C03\u5927\u65F6\u95F4\u5757\u66F4\u5BBD\u677E\uFF0C\u8C03\u5C0F\u53EF\u4E00\u5C4F\u770B\u5230\u66F4\u591A\u5C0F\u65F6\uFF1B\u9ED8\u8BA4 52\u3002").addSlider((slider) => {
+      var _a;
+      return slider.setLimits(28, 96, 4).setValue(Number((_a = this.plugin.settings.slotHeight) != null ? _a : 52)).setDynamicTooltip().onChange(async (val) => {
+        this.plugin.settings.slotHeight = val;
+        await this.plugin.saveSettings();
+        if (this.slotRerenderTimer) window.clearTimeout(this.slotRerenderTimer);
+        this.slotRerenderTimer = window.setTimeout(() => {
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
+        }, 150);
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u7F51\u683C\u5E03\u5C40").setDesc("\u5757\u5E03\u5C40\u6309\u8D77\u6B62\u65F6\u95F4\u7ED8\u5236\u6709\u9AD8\u5EA6\u7684\u8BB0\u5F55\u5757\uFF1B\u7D27\u51D1\u6D41\u6298\u53E0\u7A7A\u95F2\u65F6\u6BB5\u3001\u6309\u884C\u5C55\u793A\u3002\u53EF\u5728\u5DE5\u5177\u680F\u968F\u65F6\u5207\u6362\u3002").addDropdown((drop) => drop.addOption("block", "\u5757\u5E03\u5C40\uFF08\u9ED8\u8BA4\uFF09").addOption("compact", "\u7D27\u51D1\u6D41").setValue(this.plugin.settings.layoutMode || "block").onChange(async (val) => {
+      this.plugin.settings.layoutMode = val;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
+      this.plugin.settings.defaultDuration = parseInt(val, 10);
       await this.plugin.saveSettings();
     }));
     new import_obsidian.Setting(containerEl).setName("\u4E00\u5468\u7B2C\u4E00\u5929").setDesc("\u8BBE\u7F6E\u5468\u89C6\u56FE\u4E2D\u6BCF\u5468\u4EE5\u5468\u4E00\u8FD8\u662F\u5468\u65E5\u5F00\u59CB\u3002").addDropdown((drop) => drop.addOption("1", "\u5468\u4E00").addOption("0", "\u5468\u65E5").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (val) => {

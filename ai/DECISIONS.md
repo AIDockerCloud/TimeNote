@@ -1,6 +1,6 @@
 ---
 pcmp_version: "2.2"
-revision: 3
+revision: 6
 updated: 2026-11-08
 ---
 
@@ -79,3 +79,39 @@ updated: 2026-11-08
 - 理由 (Reason): 署名应与仓库归属一致；该字段仅用于展示，不影响 `id` 与用户 `data.json`。
 - 备选方案 (Alternatives): 保留 `Antigravity`（署名与归属割裂）；改用个人名（用户未指定）。
 - 影响 (Consequences): 仅元数据变化，无运行时影响；DEC-004 中「author 未获授权修改」的记录已由此决策补齐。
+
+## DEC-007 — 时间块作为共享渲染层融入现有视图（块布局默认）
+日期: 2026-11-08 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-08 22:28 指令「方案B，可切换，默认是块布局，只做实际记录」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要支持计划排程 / 容量规划、跨日时间块，或月 / 季 / 年视图需要展示时间块统计时复审
+- 背景 (Context): [事实] `parseLine` 已算出每条定时记录的 `startSeconds`/`endSeconds`，但 `renderTimeGrid` 仅用压缩流画横线，README 宣称的时间网格与重叠避让未实现；参考 TaskNotes（`timeEntries` + FullCalendar 共用画布、仅重叠分 lane）与 OpenTodo（Day/Week 拖放 time blocking，仍在同一日历画布）。
+- 决策 (Decision): 不新增第 8 种视图模式；在 day / 3day / week 的时间网格中新增共享块布局（`renderBlockGrid`）：绝对定位 `top/height`、仅重叠簇内分 lane、时长徽标、标签 / 子项 / hover / 跳原笔记沿用现有交互。原压缩流保留为「紧凑流」（`renderCompactGrid`），工具栏可切换，设置项 `layoutMode` 默认 `block`、`defaultDuration` 默认 60 分钟。添加端：`QuickAddModal` 增加结束时间与实时时长提示及校验、空白槽点击按位置预填起止；`addEntry` 写日记行内 `HH:mm-HH:mm`，`parseLine` 增加 `isRange` 与跨零点兜底；时间线视图显示时长。时间块**只做实际记录**，不做计划排程、容量规划、计时器或计划/实际区分。
+- 理由 (Reason): 7 个视图是时间尺度维度、时间块是条目形态维度，两者正交；做成 tab 会造成同一份数据两套渲染且月/季/年无法复用。两个参考项目都把时间块放在共享日历画布。数据层已具备起止时间，改动集中在渲染与添加交互，且块布局首次让 README 宣称的「时间网格」与实现对齐。
+- 备选方案 (Alternatives): 新增「时间块」视图模式（组合爆炸、重复渲染）；保持压缩流只加时长标签（无法表达时间段跨度）；引入 frontmatter / 独立笔记（违反日记唯一数据源硬约束）。
+- 影响 (Consequences): 紧凑流仍可用，用户可随时切回；跨零点范围一期不支持（兜底 30 分钟块）；月/季/年仍只显示计数；拖拽创建与块边缘调整起止未实现（P2）；新增 12 个 `timenote-block-*` / `timenote-event-*` 样式类。
+
+## DEC-008 — 时间轴默认范围以代码 00:00-24:00 为准，并补齐设置项
+日期: 2026-11-08 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-08 22:41 指令「默认的设置没什么问题，设置里面可以调就可以」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要按「首次可见时段」自动滚动、或默认值需随用户作息自适应时复审
+- 背景 (Context): 本条收敛 STATE 中长期挂起的 [未决] 差异项。[事实][差异] `README.md` 曾称时间轴默认 `06:00 - 24:00` 且「设置中可配置」，但 `main.ts` 的 `DEFAULT_SETTINGS` 为 `startHour: 0, endHour: 24`，且**设置页并无起止时间控件**——文档宣称的可调项在 UI 上不存在，`startHour`/`endHour`/`slotHeight` 只能靠手改 `data.json`。块布局与紧凑流两个渲染器都读这两项。
+- 决策 (Decision): 默认值保持代码现状 `startHour: 0` / `endHour: 24`（全天覆盖，不漏记录），**不改默认**；在设置页新增「时间轴起始时间」（00:00–23:00）与「时间轴结束时间」（01:00–24:00）两个下拉，块布局与紧凑流共用，改动后立即保存并重渲染所有 TimeNote 叶子；起始时间调到不早于结束时间时自动把结束时间抬到 `起始+1`（上限 24:00）并提示，结束时间选到不晚于起始时间时拒绝并提示。文档同步为「默认 00:00 - 24:00，可按作息收窄」。
+- 理由 (Reason): 默认全天是保守选择——记录不会被「视野外」的时间段丢掉；而「只关心 06:00 之后」是个人作息偏好，属于设置项而非默认值的职责。补 UI 后 README 的「可配置」才成为事实，差异从根上消除，而不是只改文档措辞掩盖。
+- 备选方案 (Alternatives): 把默认改成 06:00-24:00（会让 00:00-06:00 的记录在网格中不可见，且改变既有用户观感）；只改 README 措辞为 0-24 而不补 UI（文档仍会宣称不存在的设置项）；引入时段预设（如「工作时段 09:00-18:00」）——留待有真实需求再做。
+- 影响 (Consequences): 设置页新增 2 项、共 9 项；`slotHeight` 仍无 UI（属显示密度，暂不暴露）；全天默认下 24h × 52px ≈ 1248px，日视图需滚动（未做「自动滚动到当前时间/首条记录」，列为 P2 候选）。
+
+## DEC-009 — 暴露每小时槽高设置，并加入当前时间指示线
+日期: 2026-11-08 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-08 22:47 指令「slotHeight（每小时槽高）开出来在设置里面可配置，另外有没有当前时间线？没有的话加一下」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要「首次打开自动滚动到当前时间 / 首条记录」、需要在紧凑流或月 / 季 / 年视图也显示当前时间位置、或需要指示线可关闭时复审
+- 背景 (Context): 本条补齐 DEC-008 遗留的 `slotHeight` 无 UI 事项。[事实] `slotHeight` 自始存在于 `DEFAULT_SETTINGS`（默认 52px），块布局与紧凑流都读它，但设置页无入口，只能手改 `data.json`；DEC-008 已把 `startHour`/`endHour` 开出来，本条补齐同组最后一个显示参数。[事实] 代码中**不存在**任何当前时间指示（全仓无 `now-line` / `nowIndicator` 相关实现，也没有任何 `setInterval`），日历无法回答「我现在处在今天的哪个位置」。
+- 决策 (Decision): ① 设置页新增「每小时槽高」滑块，范围 28–96px、步长 4、`setDynamicTooltip()` 显示当前值，默认 52；拖动会连续触发 `onChange`，故保存后经 150ms 防抖再统一重渲染所有 TimeNote 叶子。② 块布局新增当前时间指示线：`colsContainer` 末尾插入 `.timenote-now-line`，`left: 52px` 让开刻度列、`border-top: 2px`、`z-index: 6`、`pointer-events: none`；左侧 `.timenote-now-label` 用红底白字显示 `HH:mm`（`var(--color-red)` 带 `#e5484d` 兜底）；`tickNowLine()` 每 30s 更新 `top` 与标签，超出 `[startHour, endHour]` 时隐藏，`isConnected=false` 时静默返回；只在所显示日期包含今天时创建；定时器在 `renderTimeGrid` 重渲染前、`onClose` 中清除。
+- 理由 (Reason): 槽高是同一维度（时间轴显示范围 / 密度）的最后一块拼图，收进设置页才能和不暴露 `data.json` 的普通用户对齐；当前时间线是日历类产品的默认预期（TaskNotes / OpenTodo / Google Calendar 皆有），且实现只需一个绝对定位元素 + 30s 定时器，不触碰数据层。
+- 备选方案 (Alternatives): 槽高用下拉档位（30/40/52/64/80）——不如滑块细粒度；当前时间线做成每秒刷新的 `requestAnimationFrame`（无必要，分钟级足够，还费电）；在紧凑流里也画（时间轴已折叠，位置会误导）；首帧自动滚动到当前时刻（会与「文件修改即重渲染」冲突，用户滚动位置被反复夺走，故不做）。
+- 影响 (Consequences): 设置页共 10 项；块布局 DOM 多 1 个元素 + 1 个 30s 定时器（紧凑流不起表）；`slotHeight` 改动会重建网格并重置滚动位置（防抖后一次）；默认全天 + 52px 时当前时间线可能在首屏之外，需要滚动才能看到；未实现「自动滚动到当前时间」。

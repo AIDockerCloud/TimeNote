@@ -32,7 +32,9 @@ const DEFAULT_SETTINGS = {
   slotHeight: 52,
   firstDayOfWeek: 1, // 1: Monday, 0: Sunday
   parseAllBullets: true,
-  quickAddSection: "灵感闪念"
+  quickAddSection: "灵感闪念",
+  layoutMode: "block",
+  defaultDuration: 60
 };
 
 // Deterministic tag color generator
@@ -54,6 +56,71 @@ function formatSecondsToTime(sec) {
   const h = Math.floor(clamped / 3600);
   const m = Math.floor((clamped % 3600) / 60);
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+function parseTimeToSeconds(str) {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const sec = m[3] ? parseInt(m[3], 10) : 0;
+  if (h > 24 || (h === 24 && (min > 0 || sec > 0)) || min > 59 || sec > 59) return null;
+  return h * 3600 + min * 60 + sec;
+}
+
+function addMinutesToTime(timeStr, minutes) {
+  const sec = parseTimeToSeconds(timeStr);
+  if (sec === null) return "";
+  const total = Math.min(1440, Math.floor(sec / 60) + minutes);
+  if (total >= 1440) return "24:00";
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+// 只在真正重叠的区间内分列；不重叠的区间占满整列（借鉴 TaskNotes lane 策略）
+function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
+  const items = entries.map(e => {
+    const st = Math.max(dayStartSec, e.startSeconds || 0);
+    const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
+    const en = Math.min(dayEndSec, Math.max(st + 60, rawEnd));
+    return { entry: e, s: st, en, lane: 0 };
+  }).sort((a, b) => a.s - b.s || a.en - b.en);
+
+  const clusters = [];
+  let current = null;
+  items.forEach(it => {
+    if (!current || it.s >= current.end) {
+      current = { end: it.en, items: [], laneCount: 1 };
+      clusters.push(current);
+    }
+    current.items.push(it);
+    current.end = Math.max(current.end, it.en);
+  });
+
+  clusters.forEach(c => {
+    const laneEnds = [];
+    c.items.forEach(it => {
+      let lane = laneEnds.findIndex(end => end <= it.s);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(it.en);
+      } else {
+        laneEnds[lane] = it.en;
+      }
+      it.lane = lane;
+    });
+    c.laneCount = Math.max(1, laneEnds.length);
+  });
+  return clusters;
 }
 
 // ============================================================================
@@ -85,10 +152,12 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   let startSeconds = 0;
   let endSeconds = 0;
   let timeStr = "";
+  let explicitRange = false;
 
   const rangeMatch = content.match(rangeRegex);
   if (rangeMatch) {
     hasTime = true;
+    explicitRange = true;
     const sh = parseInt(rangeMatch[1], 10);
     const sm = parseInt(rangeMatch[2], 10);
     const ss1 = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : 0;
@@ -98,6 +167,10 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
 
     startSeconds = sh * 3600 + sm * 60 + ss1;
     endSeconds = eh * 3600 + em * 60 + ss2;
+    if (endSeconds <= startSeconds) {
+      // 一期不支持跨零点：兜底为 30 分钟块，避免负高度
+      endSeconds = Math.min(86400, startSeconds + 1800);
+    }
     startMinutes = Math.floor(startSeconds / 60);
     endMinutes = Math.floor(endSeconds / 60);
 
@@ -126,6 +199,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
       const durationMatch = content.match(/(?:^|\s)(\d+)(m|min|h|小时|分钟)(?:\s|$)/i);
       let durationSeconds = 1800; // default 30 min duration
       if (durationMatch) {
+        explicitRange = true;
         const val = parseInt(durationMatch[1], 10);
         const unit = durationMatch[2].toLowerCase();
         durationSeconds = (unit.startsWith('h') || unit === '小时') ? val * 3600 : val * 60;
@@ -173,6 +247,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     isTask,
     isCompleted,
     hasTime,
+    isRange: explicitRange,
     startSeconds,
     endSeconds,
     startMinutes,
@@ -409,11 +484,12 @@ class DailyNoteService {
   }
 
   // Append new entry to daily note
-  async addEntry(dateStr, timeStr, content, isTask, tags = []) {
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
     let file = this.findDailyNoteFile(dateStr);
     const tagPart = tags.length > 0 ? ' ' + tags.map(t => '#' + t).join(' ') : '';
     const linePrefix = isTask ? '- [ ] ' : '- ';
-    const timePrefix = timeStr ? `${timeStr} ` : '';
+    const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
+    const timePrefix = rangeStr ? `${rangeStr} ` : '';
     const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
 
     if (!file) {
@@ -535,6 +611,7 @@ class TimenoteView extends ItemView {
 
   async onClose() {
     this.hideHoverTooltip();
+    this.stopNowClock();
   }
 
   showHoverTooltip(entry, targetEl, event) {
@@ -785,6 +862,16 @@ class TimenoteView extends ItemView {
       };
     });
 
+    // 布局切换：显示密度，不是视图模式
+    const layoutBtn = actions.createEl("button", {
+      text: this.getLayoutMode() === "block" ? "块布局" : "紧凑流",
+      cls: "timenote-layout-toggle"
+    });
+    layoutBtn.onclick = async () => {
+      this.plugin.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
+      await this.plugin.saveSettings();
+    };
+
     // Quick Add Button
     const addBtn = actions.createEl("button", { text: "+ 记一条", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
@@ -952,6 +1039,21 @@ class TimenoteView extends ItemView {
   }
 
   renderTimeGrid(container, days) {
+    // 每次重渲染前先停表并清引用，避免指向已移除的 DOM
+    this.stopNowClock();
+    this.nowLineEl = null;
+    this.nowLabelEl = null;
+    if (this.getLayoutMode() === "compact") {
+      return this.renderCompactGrid(container, days);
+    }
+    return this.renderBlockGrid(container, days);
+  }
+
+  getLayoutMode() {
+    return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
+  }
+
+  renderCompactGrid(container, days) {
     const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
 
     // 1. Fixed Header: Dedicated Day column for EACH day (Title on top, that day's all-day box below)
@@ -1198,6 +1300,197 @@ class TimenoteView extends ItemView {
   }
 
   // ==========================================================================
+  // Time Block Grid Renderer（共享渲染层，日 / 3天 / 周 复用）
+  // ==========================================================================
+  renderBlockGrid(container, days) {
+    const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
+    const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
+    const headerDays = header.createEl("div", { cls: "timenote-header-days" });
+    headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
+
+    days.forEach(d => {
+      const dateStr = d.format("YYYY-MM-DD");
+      const isToday = d.isSame(window.moment(), "day");
+      const dayCol = headerDays.createEl("div", {
+        cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
+      });
+      const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
+      titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
+      titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
+      titleRow.onclick = () => {
+        this.currentDate = d;
+        this.currentViewMode = "day";
+        this.renderView();
+      };
+      const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
+      const allDay = this.filterEntries(this.entriesMap.get(dateStr) || []).filter(e => !e.hasTime);
+      allDay.forEach(entry => {
+        const chip = allDayContainer.createEl("div", {
+          cls: `timenote-all-day-chip ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "completed" : ""}`
+        });
+        chip.createEl("span", { text: entry.text, cls: "timenote-all-day-chip-text" });
+        chip.onclick = () => this.jumpToFileLine(entry);
+      });
+    });
+
+    const startHour = Number(this.plugin.settings.startHour ?? 0);
+    const endHour = Number(this.plugin.settings.endHour ?? 24);
+    const slotHeight = Number(this.plugin.settings.slotHeight ?? 52);
+    const dayStartSec = startHour * 3600;
+    const dayEndSec = endHour * 3600;
+    const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
+
+    const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
+    scrollArea.onscroll = () => this.hideHoverTooltip();
+    const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
+    colsContainer.style.height = `${totalHeight}px`;
+
+    const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
+    for (let h = startHour; h <= endHour; h++) {
+      const label = ruler.createEl("div", {
+        cls: "timenote-block-ruler-label",
+        text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
+      });
+      label.style.top = `${(h - startHour) * slotHeight}px`;
+    }
+
+    days.forEach(d => {
+      const dateStr = d.format("YYYY-MM-DD");
+      const isToday = d.isSame(window.moment(), "day");
+      const col = colsContainer.createEl("div", {
+        cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
+      });
+      col.style.height = `${totalHeight}px`;
+
+      for (let h = startHour; h <= endHour; h++) {
+        const line = col.createEl("div", { cls: "timenote-block-hour-line" });
+        line.style.top = `${(h - startHour) * slotHeight}px`;
+      }
+
+      // 点击空白槽：按位置换算时间，预填起止后快速记录（只做实际记录，不做排程）
+      const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
+      slotLayer.onclick = (ev) => {
+        const rect = col.getBoundingClientRect();
+        const y = Math.max(0, ev.clientY - rect.top);
+        const rawSec = dayStartSec + (y / slotHeight) * 3600;
+        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
+        const startStr = formatSecondsToTime(snapped);
+        const endSec = Math.min(dayEndSec, snapped + (this.plugin.settings.defaultDuration || 60) * 60);
+        const endStr = formatSecondsToTime(endSec);
+        new QuickAddModal(this.app, this.plugin, dateStr, () => this.renderView(), startStr, endStr).open();
+      };
+
+      const timed = this.filterEntries(this.entriesMap.get(dateStr) || [])
+        .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
+
+      clusters.forEach(cluster => {
+        cluster.items.forEach(it => {
+          const e = it.entry;
+          const top = ((it.s - dayStartSec) / 3600) * slotHeight;
+          const height = Math.max(22, ((it.en - it.s) / 3600) * slotHeight);
+          const widthPct = 100 / cluster.laneCount;
+          const block = col.createEl("div", {
+            cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
+          });
+          block.style.top = `${top}px`;
+          block.style.height = `${height}px`;
+          block.style.left = `${it.lane * widthPct}%`;
+          block.style.width = `calc(${widthPct}% - 6px)`;
+
+          const title = block.createEl("div", { cls: "timenote-event-block-title" });
+          if (e.isTask) {
+            const cb = title.createEl("input", { cls: "timenote-card-checkbox", attr: { type: "checkbox" } });
+            cb.checked = e.isCompleted;
+            cb.onclick = async (ev) => {
+              ev.stopPropagation();
+              this.hideHoverTooltip();
+              await this.plugin.dailyNoteService.toggleTask(e);
+              this.renderView();
+            };
+          }
+          title.createEl("span", { text: e.text });
+
+          const meta = block.createEl("div", {
+            cls: "timenote-event-block-meta",
+            text: `${e.timeStr} · ${formatDuration(it.en - it.s)}`
+          });
+          if (e.tags && e.tags.length > 0) {
+            meta.textContent = `${meta.textContent} · #${e.tags.slice(0, 2).join(" #")}`;
+          }
+          if (e.subItems && e.subItems.length > 0) {
+            const badge = block.createEl("div", { cls: "timenote-event-block-sub", text: `▾${e.subItems.length} 子项` });
+            badge.onclick = (ev) => {
+              ev.stopPropagation();
+              this.hideHoverTooltip();
+              new SubItemsModal(this.app, e).open();
+            };
+          }
+
+          block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
+          block.onmouseleave = () => this.hideHoverTooltip();
+          block.onclick = (ev) => {
+            ev.stopPropagation();
+            this.hideHoverTooltip();
+            this.jumpToFileLine(e);
+          };
+        });
+      });
+    });
+
+    // 当前时间指示线：只在「今天」出现在所显示日期中时创建，位置由 tickNowLine 维护
+    const nowAtRender = window.moment();
+    if (days.some(d => d.isSame(nowAtRender, "day"))) {
+      this.nowLineEl = colsContainer.createEl("div", { cls: "timenote-now-line" });
+      this.nowLabelEl = this.nowLineEl.createEl("span", {
+        cls: "timenote-now-label",
+        text: nowAtRender.format("HH:mm")
+      });
+      this.tickNowLine();
+      this.startNowClock();
+    }
+
+    requestAnimationFrame(() => {
+      const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
+      header.style.paddingRight = `${scrollbarWidth > 0 ? scrollbarWidth : 0}px`;
+    });
+  }
+
+  // ==========================================================================
+  // Now Line Clock（当前时间指示线，30s 刷新）
+  // ==========================================================================
+  startNowClock() {
+    this.stopNowClock();
+    this.nowLineTimer = window.setInterval(() => this.tickNowLine(), 30000);
+  }
+
+  stopNowClock() {
+    if (this.nowLineTimer) {
+      window.clearInterval(this.nowLineTimer);
+      this.nowLineTimer = null;
+    }
+  }
+
+  tickNowLine() {
+    const el = this.nowLineEl;
+    if (!el || !el.isConnected) return;
+    const now = window.moment();
+    const startHour = Number(this.plugin.settings.startHour ?? 0);
+    const endHour = Number(this.plugin.settings.endHour ?? 24);
+    const slotHeight = Number(this.plugin.settings.slotHeight ?? 52);
+    const startSec = startHour * 3600;
+    const endSec = endHour * 3600;
+    const nowSec = now.hours() * 3600 + now.minutes() * 60 + now.seconds();
+    if (nowSec < startSec || nowSec > endSec) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    el.style.top = `${((nowSec - startSec) / 3600) * slotHeight}px`;
+    if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
+  }
+
+  // ==========================================================================
   // Timeline / Stream View Renderer
   // ==========================================================================
 
@@ -1231,8 +1524,11 @@ class TimenoteView extends ItemView {
       const isBlinko = entry.source === "blinko";
       const item = group.createEl("div", { cls: "timenote-timeline-item" });
 
+      const spanSec = entry.hasTime
+        ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0)
+        : 0;
       item.createEl("div", {
-        text: entry.hasTime ? entry.timeStr : "全天",
+        text: entry.hasTime ? `${entry.timeStr} · ${formatDuration(spanSec)}` : "全天",
         cls: "timenote-timeline-badge"
       });
 
@@ -1696,11 +1992,12 @@ class TimenoteView extends ItemView {
 class QuickAddModal extends Modal {
   // TODO(types): 渐进替换为显式字段声明
   [key: string]: any;
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = "") {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
     this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
+    this.endTimeStr = prefillEndTime || addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
     this.isTask = false;
     this.content = "";
     this.tagsStr = "";
@@ -1726,7 +2023,27 @@ class QuickAddModal extends Modal {
       cls: "timenote-modal-input",
       attr: { type: "text", placeholder: "时间 (如 14:30 或 14:00:31，留空为全天)", value: this.timeStr }
     });
-    timeInput.oninput = (e) => this.timeStr = (e.target as HTMLInputElement).value;
+    const endTimeInput = row1.createEl("input", {
+      cls: "timenote-modal-input",
+      attr: { type: "text", placeholder: "结束时间 (留空为单时间点)", value: this.endTimeStr }
+    });
+    const durationHint = row1.createEl("span", { cls: "timenote-duration-hint", text: "" });
+    const updateDurationHint = () => {
+      const sSec = parseTimeToSeconds(this.timeStr);
+      const eSec = parseTimeToSeconds(this.endTimeStr);
+      durationHint.textContent = (sSec !== null && eSec !== null && eSec > sSec)
+        ? `时长 ${formatDuration(eSec - sSec)}`
+        : (this.endTimeStr ? "结束需晚于开始" : "按默认 30m 显示");
+    };
+    timeInput.oninput = (e) => {
+      this.timeStr = (e.target as HTMLInputElement).value.trim();
+      updateDurationHint();
+    };
+    endTimeInput.oninput = (e) => {
+      this.endTimeStr = (e.target as HTMLInputElement).value.trim();
+      updateDurationHint();
+    };
+    updateDurationHint();
 
     // Is Task Row
     const row2 = form.createEl("div", { cls: "timenote-modal-row" });
@@ -1765,13 +2082,29 @@ class QuickAddModal extends Modal {
         new Notice("请输入内容！");
         return;
       }
+      const startStr = this.timeStr.trim();
+      const endStr = this.endTimeStr.trim();
+      const hasExplicitRange = /[-~至到]/.test(startStr);
+      if (!hasExplicitRange && endStr) {
+        const sSec = parseTimeToSeconds(startStr);
+        const eSec = parseTimeToSeconds(endStr);
+        if (sSec === null || eSec === null) {
+          new Notice("时间格式不正确，请使用 HH:mm！");
+          return;
+        }
+        if (eSec <= sSec) {
+          new Notice("结束时间必须晚于开始时间（暂不支持跨日）！");
+          return;
+        }
+      }
       const tags = this.tagsStr.split(/[,，\s]+/).filter(t => t.trim().length > 0);
       await this.plugin.dailyNoteService.addEntry(
         this.targetDate,
-        this.timeStr.trim(),
+        startStr,
         this.content.trim(),
         this.isTask,
-        tags
+        tags,
+        hasExplicitRange ? "" : endStr
       );
       new Notice(`✅ 已成功记录到 ${this.targetDate} 日记中！`);
       this.close();
@@ -1799,7 +2132,7 @@ class TimenoteSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "TimeNote (时间笔记) 设置" });
+    containerEl.createEl("h2", { text: "TimeNote 设置" });
 
     new Setting(containerEl)
       .setName("周期笔记存放文件夹")
@@ -1837,6 +2170,95 @@ class TimenoteSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.defaultView)
         .onChange(async (val) => {
           this.plugin.settings.defaultView = val;
+          await this.plugin.saveSettings();
+        }));
+
+    // 时间轴起止时间：块布局与紧凑流共用，收窄范围可减少滚动
+    const hourChoices = (from, to) =>
+      Array.from({ length: to - from + 1 }, (_, i) => {
+        const h = from + i;
+        return { value: String(h), label: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00` };
+      });
+
+    new Setting(containerEl)
+      .setName("时间轴起始时间")
+      .setDesc("日 / 3天 / 周视图时间网格的起始小时。默认 00:00（全天），可按作息收窄，例如 06:00。")
+      .addDropdown(drop => {
+        hourChoices(0, 23).forEach(o => drop.addOption(o.value, o.label));
+        drop.setValue(String(this.plugin.settings.startHour ?? 0));
+        drop.onChange(async (val) => {
+          const h = parseInt(val, 10);
+          this.plugin.settings.startHour = h;
+          if ((this.plugin.settings.endHour ?? 24) <= h) {
+            this.plugin.settings.endHour = Math.min(24, h + 1);
+            new Notice(`结束时间已自动调整为 ${String(this.plugin.settings.endHour).padStart(2, "0")}:00`);
+          }
+          await this.plugin.saveSettings();
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+            .forEach(leaf => (leaf.view as TimenoteView).renderView());
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("时间轴结束时间")
+      .setDesc("时间网格的结束小时，默认 24:00（全天）。必须晚于起始时间。")
+      .addDropdown(drop => {
+        hourChoices(1, 24).forEach(o => drop.addOption(o.value, o.label));
+        drop.setValue(String(this.plugin.settings.endHour ?? 24));
+        drop.onChange(async (val) => {
+          const h = parseInt(val, 10);
+          if (h <= (this.plugin.settings.startHour ?? 0)) {
+            new Notice("结束时间必须晚于起始时间！");
+            return;
+          }
+          this.plugin.settings.endHour = h;
+          await this.plugin.saveSettings();
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+            .forEach(leaf => (leaf.view as TimenoteView).renderView());
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("每小时槽高")
+      .setDesc("时间网格中每小时占用的高度（像素）。调大时间块更宽松，调小可一屏看到更多小时；默认 52。")
+      .addSlider(slider => slider
+        .setLimits(28, 96, 4)
+        .setValue(Number(this.plugin.settings.slotHeight ?? 52))
+        .setDynamicTooltip()
+        .onChange(async (val) => {
+          this.plugin.settings.slotHeight = val;
+          await this.plugin.saveSettings();
+          // 拖动滑块会连续触发，防抖后统一重渲染
+          if (this.slotRerenderTimer) window.clearTimeout(this.slotRerenderTimer);
+          this.slotRerenderTimer = window.setTimeout(() => {
+            this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+              .forEach(leaf => (leaf.view as TimenoteView).renderView());
+          }, 150);
+        }));
+
+    new Setting(containerEl)
+      .setName("时间网格布局")
+      .setDesc("块布局按起止时间绘制有高度的记录块；紧凑流折叠空闲时段、按行展示。可在工具栏随时切换。")
+      .addDropdown(drop => drop
+        .addOption("block", "块布局（默认）")
+        .addOption("compact", "紧凑流")
+        .setValue(this.plugin.settings.layoutMode || "block")
+        .onChange(async (val) => {
+          this.plugin.settings.layoutMode = val;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("新建时间块默认时长")
+      .setDesc("从日历空白槽点击、或打开快速记录时，默认预填的结束时间。")
+      .addDropdown(drop => drop
+        .addOption("30", "30 分钟")
+        .addOption("60", "1 小时")
+        .addOption("90", "1.5 小时")
+        .addOption("120", "2 小时")
+        .setValue(String(this.plugin.settings.defaultDuration || 60))
+        .onChange(async (val) => {
+          this.plugin.settings.defaultDuration = parseInt(val, 10);
           await this.plugin.saveSettings();
         }));
 

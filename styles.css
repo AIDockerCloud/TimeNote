@@ -1084,3 +1084,126 @@
 .timenote-subitems-list li {
   margin-bottom: 6px;
 }
+
+/* ==========================================================================
+   Time Block Layout (block mode) — 共享渲染层
+   ========================================================================== */
+.timenote-block-ruler-spacer { flex: 0 0 52px; }
+.timenote-block-ruler {
+  position: relative;
+  flex: 0 0 52px;
+  border-right: 1px solid var(--background-modifier-border);
+}
+.timenote-block-ruler-label {
+  position: absolute;
+  right: 8px;
+  transform: translateY(-50%);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.timenote-block-columns { position: relative; display: flex; align-items: stretch; }
+.timenote-block-scroll { overscroll-behavior: contain; }
+.timenote-block-column {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.timenote-block-hour-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  pointer-events: none;
+}
+.timenote-block-slot-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  cursor: crosshair;
+}
+.timenote-block-slot-layer:hover { background-color: var(--background-modifier-hover); }
+
+/* 当前时间指示线：跨整行，左侧时间胶囊压在刻度列上 */
+.timenote-now-line {
+  position: absolute;
+  left: 52px;
+  right: 0;
+  height: 0;
+  border-top: 2px solid var(--color-red, #e5484d);
+  z-index: 6;
+  pointer-events: none;
+}
+.timenote-now-label {
+  position: absolute;
+  left: -50px;
+  top: -0.75em;
+  min-width: 44px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--color-red, #e5484d);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  white-space: nowrap;
+}
+.timenote-event-block {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.timenote-event-block:hover { background-color: var(--background-modifier-hover); }
+.timenote-event-block.is-task { border-left-color: var(--text-accent); }
+.timenote-event-block.is-blinko { border-left-color: var(--text-muted); }
+.timenote-event-block.is-completed { opacity: 0.6; }
+.timenote-event-block.is-range { border-left-width: 4px; }
+.timenote-event-block-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timenote-event-block-meta {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.timenote-event-block-sub { font-size: 0.72rem; color: var(--text-muted); cursor: pointer; }
+.timenote-event-block-sub:hover { color: var(--text-normal); }
+.timenote-layout-toggle {
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background-color: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.timenote-layout-toggle:hover { background-color: var(--background-modifier-hover); }
+.timenote-duration-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  align-self: center;
+}
