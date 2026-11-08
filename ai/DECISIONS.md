@@ -1,6 +1,6 @@
 ---
 pcmp_version: "2.2"
-revision: 7
+revision: 8
 updated: 2026-11-08
 ---
 
@@ -127,3 +127,15 @@ updated: 2026-11-08
 - 理由 (Reason): 刻度标签是半小时高的视觉锚点，被裁一半会让「最上面一行是几点」判断失真，也让人误以为是全天区压住了网格；统一用一个偏移量包住所有绝对定位元素，比逐个微调 `top` 更不容易错位。`versions.json` 是社区发布硬门槛，补齐后 `npm run bump` 把「记得改三个文件」变成一条命令，避免版本漂移。底部留白 14px 刚好容纳半个标签高度（约 6px）再留 8px 呼吸，末行既完整可见又贴近底部；全天区用释放的余量加高到 56–180px，能多显示 1–3 条全天条目。
 - 备选方案 (Alternatives): 用 `padding-top` 撑开滚动区（绝对定位元素仍以 padding box 为参考，`top:0` 依然贴边，不解决问题）；把刻度标签改成 `translateY(-100%)` 贴底对齐（起始标签会整体跑到容器外，更糟）；给 `startHour` 默认值加半小时偏移（污染数据语义）；版本号用 `npm version`（会创建 tag 并触发 npm 语义，与 Obsidian 插件发布流程不符）。
 - 影响 (Consequences): 网格总高 +26px（全天 52px 槽高下 1248 → 1274）；落点层不再覆盖上下留白，点击留白区不会误建记录；`versions.json` 需随每次提交追加，忘记 bump 会导致版本回退风险（已写入 AGENTS 红线 7）；`package-lock.json` 由 `npm install --package-lock-only` 同步；LICENSE 仍未补（授权协议需人类确认，未擅自选定）。
+
+## DEC-011 — 全天区高度可拖拽调节；时间块支持拖拽创建与拖拽调范围
+日期: 2026-11-08 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-08 23:22 指令「全天任务行的高度要可以手动拖来调节，另外创建块的方式要和tasknotes体验一致，可以拖动来选择和调节时间范围」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要横向拖拽跨日、需要拖拽时显示吸附时间气泡、需要撤销（Ctrl+Z）拖拽结果，或需要把吸附粒度/最小块时长做成设置项时复审
+- 背景 (Context): [事实] 全天区高度此前是 CSS 写死的 `min-height: 56px / max-height: 180px`（DEC-010 调整），用户无法按自己一天的全天条目数量调整；块布局的创建入口只有「单击空白槽」与「+ 记一条」弹窗，已有块的时间范围只能靠手改日记文本。参考 TaskNotes 的日历交互：空白处按住拖动直接圈出时间范围并创建，已有事件拖边缘改起止、拖主体平移。
+- 决策 (Decision): ① 新增设置项 `allDayHeight`（默认 56，范围 40–320），块布局按它给每个 `.timenote-day-allday-container` 设内联 `height/minHeight/maxHeight`；全天区与网格之间插入 `.timenote-header-resizer`（6px 高、`cursor: ns-resize`），按住拖动实时改所有日列的内联高度，松手才 `saveSettings()`。设置页同步提供「全天区高度」滑块（步长 4）。② 空白槽改为指针拖拽创建：`pointerdown` 记录吸附锚点，位移 > 5px 才进入拖拽并显示 `.timenote-block-ghost` 虚线预览（实时 `起 - 止 · 时长`），松手用预览的起止打开 `QuickAddModal`；未拖动则沿用「吸附 30 分钟 + 默认时长」的单击行为。吸附粒度 15 分钟（`DRAG_SNAP_MINUTES`），最短 15 分钟（`MIN_BLOCK_SECONDS`）。③ 已有块支持拖拽调节：顶部/底部 8px 命中区改起止，中部整体平移（块高 < 30px 时仅平移）；拖拽中实时改 `top/height` 与 meta 文案，松手经新增的 `DailyNoteService.updateEntryTime` 回写日记行首时间前缀并重渲染。④ 拖拽结束浏览器补发的 click 用 `block.dataset.dragMoved` 吃掉，避免误跳原笔记；跨出 `startHour`–`endHour` 的记录不参与拖拽。
+- 理由 (Reason): 全天区高度是「我一天有多少条无时间记录」的私人差异，写死必然有人不够用有人浪费；用分隔条比翻设置页更符合日历类工具的直觉。拖拽创建把「选范围」这件事从「先开弹窗再输两个时间」变成一次手势，和 TaskNotes 一致；而回写走「只改行首时间前缀」的正则，能把对用户笔记的改动面压到最小，符合既有「日记是用户数据」红线。
+- 备选方案 (Alternatives): 用 HTML5 原生 drag-and-drop（无法精确按像素换算时间，且拖影不可控）；按住后先弹窗再拖（多一步，失去所见即所得）；把时间范围改成 frontmatter 字段以便自由拖拽（违反日记单行数据源约束，DEC-007）；拖拽后不立即写盘、等弹窗确认（会与「松手即创建」的直觉冲突，TaskNotes 也是松手即建）。
+- 影响 (Consequences): 设置页共 11 项；块内多了 2 个 `.timenote-block-edge` 装饰元素（`pointer-events: none`，不拦截点击）；拖拽期间 `user-select: none`，块内文本不可直接选中复制；每次拖拽松手都会写盘并整视图重渲染（与勾选任务一致）；15 分钟吸附意味着无法通过拖拽得到 5 分钟级的精确范围（需要时仍可手改文本）；尚无跨日拖拽与撤销。

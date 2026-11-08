@@ -1,6 +1,6 @@
 {
   "name": "timenote",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Obsidian 插件：基于周期日记的时间轴与全周期日历视图",
   "main": "main.js",

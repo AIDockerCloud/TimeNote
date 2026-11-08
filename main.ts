@@ -34,7 +34,8 @@ const DEFAULT_SETTINGS = {
   parseAllBullets: true,
   quickAddSection: "灵感闪念",
   layoutMode: "block",
-  defaultDuration: 60
+  defaultDuration: 60,
+  allDayHeight: 56
 };
 
 // Deterministic tag color generator
@@ -64,6 +65,15 @@ function formatSecondsToTime(sec) {
 // 底部 —— 结束小时的刻度标签同理需要半行余量，同时让最后一行尽量贴近底部。
 const BLOCK_TOP_GUTTER = 12;
 const BLOCK_BOTTOM_GUTTER = 14;
+
+// 时间吸附：拖拽创建 / 调节范围时按 N 分钟取整，避免出现 14:37 这种脏时间
+const DRAG_SNAP_MINUTES = 15;
+const MIN_BLOCK_SECONDS = 15 * 60;
+
+function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
+  const step = Math.max(1, minutes) * 60;
+  return Math.round(sec / step) * step;
+}
 
 function formatDuration(seconds) {
   const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
@@ -488,6 +498,40 @@ class DailyNoteService {
       await this.app.vault.modify(file, lines.join('\n'));
       this.fileCache.delete(file.path);
     }
+  }
+
+  // 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留
+  async updateEntryTime(entry, startSec, endSec) {
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof TFile)) return false;
+
+    const content = await this.app.vault.read(file);
+    const lines = content.split('\n');
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+
+    const line = lines[idx];
+    const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+
+    let newLine;
+    if (rangeRe.test(line)) {
+      newLine = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp}`);
+    } else if (singleRe.test(line)) {
+      newLine = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp}`);
+    } else {
+      return false;
+    }
+
+    // 旧的时长标签（30m / 1h）与新范围冲突，去掉行尾那一个
+    newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, '');
+    if (newLine === line) return false;
+
+    lines[idx] = newLine;
+    await this.app.vault.modify(file, lines.join('\n'));
+    this.fileCache.delete(file.path);
+    return true;
   }
 
   // Append new entry to daily note
@@ -1315,6 +1359,9 @@ class TimenoteView extends ItemView {
     const headerDays = header.createEl("div", { cls: "timenote-header-days" });
     headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
 
+    // 全天区高度：设置项持久化，拖拽分隔条可实时调整（DEC-011）
+    const allDayHeight = Math.max(40, Math.min(320, Number(this.plugin.settings.allDayHeight ?? 56)));
+
     days.forEach(d => {
       const dateStr = d.format("YYYY-MM-DD");
       const isToday = d.isSame(window.moment(), "day");
@@ -1330,6 +1377,9 @@ class TimenoteView extends ItemView {
         this.renderView();
       };
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
+      allDayContainer.style.height = `${allDayHeight}px`;
+      allDayContainer.style.minHeight = `${allDayHeight}px`;
+      allDayContainer.style.maxHeight = `${allDayHeight}px`;
       const allDay = this.filterEntries(this.entriesMap.get(dateStr) || []).filter(e => !e.hasTime);
       allDay.forEach(entry => {
         const chip = allDayContainer.createEl("div", {
@@ -1346,6 +1396,13 @@ class TimenoteView extends ItemView {
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
     const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
+
+    // 全天区与时间网格之间的可拖拽分隔条
+    const resizer = wrapper.createEl("div", {
+      cls: "timenote-header-resizer",
+      attr: { title: "拖动调节全天区高度" }
+    });
+    this.attachAllDayResizer(resizer, header);
 
     const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
     scrollArea.onscroll = () => this.hideHoverTooltip();
@@ -1374,21 +1431,12 @@ class TimenoteView extends ItemView {
         line.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
       }
 
-      // 点击空白槽：按位置换算时间，预填起止后快速记录（只做实际记录，不做排程）
+      // 空白槽：按住拖动选择时间范围创建（TaskNotes 手感）；单击仍按默认时长预填
       const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
       slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
       slotLayer.style.height = `${totalHeight}px`;
       slotLayer.style.bottom = "auto";
-      slotLayer.onclick = (ev) => {
-        const rect = col.getBoundingClientRect();
-        const y = Math.max(0, ev.clientY - rect.top - BLOCK_TOP_GUTTER);
-        const rawSec = dayStartSec + (y / slotHeight) * 3600;
-        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
-        const startStr = formatSecondsToTime(snapped);
-        const endSec = Math.min(dayEndSec, snapped + (this.plugin.settings.defaultDuration || 60) * 60);
-        const endStr = formatSecondsToTime(endSec);
-        new QuickAddModal(this.app, this.plugin, dateStr, () => this.renderView(), startStr, endStr).open();
-      };
+      this.attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight);
 
       const timed = this.filterEntries(this.entriesMap.get(dateStr) || [])
         .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
@@ -1437,11 +1485,16 @@ class TimenoteView extends ItemView {
             };
           }
 
+          // 上下边缘拖动改起止、中部拖动整体平移（TaskNotes 手感）
+          this.attachBlockDrag(block, e, meta, dayStartSec, dayEndSec, slotHeight);
+
           block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
           block.onmouseleave = () => this.hideHoverTooltip();
           block.onclick = (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
+            // 拖拽结束后浏览器仍会补一次 click，这里吃掉，避免误跳原笔记
+            if (block.dataset.dragMoved === "1") return;
             this.jumpToFileLine(e);
           };
         });
@@ -1464,6 +1517,196 @@ class TimenoteView extends ItemView {
       const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
       header.style.paddingRight = `${scrollbarWidth > 0 ? scrollbarWidth : 0}px`;
     });
+  }
+
+  // ==========================================================================
+  // Drag Interactions（拖拽创建 / 调节范围 / 全天区高度）
+  // ==========================================================================
+  attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight) {
+    const secAt = (clientY) => {
+      const rect = col.getBoundingClientRect();
+      const y = Math.max(0, clientY - rect.top - BLOCK_TOP_GUTTER);
+      return dayStartSec + (y / slotHeight) * 3600;
+    };
+
+    slotLayer.onpointerdown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const anchorSec = snapSeconds(secAt(ev.clientY));
+      const startY = ev.clientY;
+      let moved = false;
+      let ghost: HTMLElement | null = null;
+
+      const onMove = (e: PointerEvent) => {
+        if (!moved && Math.abs(e.clientY - startY) < 5) return;
+        moved = true;
+        const cur = snapSeconds(secAt(e.clientY));
+        let s = Math.min(anchorSec, cur);
+        let en = Math.max(anchorSec, cur);
+        s = Math.max(dayStartSec, Math.min(s, dayEndSec - MIN_BLOCK_SECONDS));
+        en = Math.min(dayEndSec, Math.max(en, s + MIN_BLOCK_SECONDS));
+        if (!ghost) ghost = col.createEl("div", { cls: "timenote-block-ghost" });
+        ghost.style.top = `${BLOCK_TOP_GUTTER + ((s - dayStartSec) / 3600) * slotHeight}px`;
+        ghost.style.height = `${Math.max(16, ((en - s) / 3600) * slotHeight)}px`;
+        ghost.dataset.start = String(s);
+        ghost.dataset.end = String(en);
+        ghost.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} · ${formatDuration(en - s)}`;
+      };
+
+      const onUp = (e: PointerEvent) => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        if (moved && ghost) {
+          const s = Number(ghost.dataset.start);
+          const en = Number(ghost.dataset.end);
+          ghost.remove();
+          this.openQuickAdd(dateStr, s, en);
+          return;
+        }
+        if (ghost) ghost.remove();
+        // 未拖动 = 单击：沿用原有「按位置吸附 30 分钟 + 默认时长」预填
+        const rawSec = secAt(e.clientY);
+        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
+        const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
+        this.openQuickAdd(dateStr, snapped, endSec);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+
+  openQuickAdd(dateStr, startSec, endSec) {
+    new QuickAddModal(
+      this.app, this.plugin, dateStr, () => this.renderView(),
+      formatSecondsToTime(startSec), formatSecondsToTime(endSec)
+    ).open();
+  }
+
+  attachBlockDrag(block, entry, meta, dayStartSec, dayEndSec, slotHeight) {
+    // 视觉把手（不拦截事件，命中区按 offsetY 判定）
+    block.createEl("div", { cls: "timenote-block-edge is-top" });
+    block.createEl("div", { cls: "timenote-block-edge is-bottom" });
+
+    // 跨出可见时间轴范围的记录不参与拖拽，避免把隐藏部分裁掉
+    if (entry.startSeconds < dayStartSec || entry.endSeconds > dayEndSec) return;
+
+    const pxToSec = (px) => (px / slotHeight) * 3600;
+
+    block.onpointerdown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      const target = ev.target as HTMLElement;
+      if (target && (target.tagName === "INPUT" || (target.closest && target.closest(".timenote-event-block-sub")))) return;
+
+      const rect = block.getBoundingClientRect();
+      const offsetY = ev.clientY - rect.top;
+      const compact = rect.height < 30;
+      let mode = "move";
+      if (!compact && offsetY <= 8) mode = "start";
+      else if (!compact && rect.height - offsetY <= 8) mode = "end";
+
+      const startY = ev.clientY;
+      const origStart = Number(entry.startSeconds) || 0;
+      const origEnd = Number(entry.endSeconds) || origStart + 1800;
+      let moved = false;
+      let curStart = origStart;
+      let curEnd = origEnd;
+
+      const paint = () => {
+        block.style.top = `${BLOCK_TOP_GUTTER + ((curStart - dayStartSec) / 3600) * slotHeight}px`;
+        block.style.height = `${Math.max(22, ((curEnd - curStart) / 3600) * slotHeight)}px`;
+        meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} · ${formatDuration(curEnd - curStart)}`;
+      };
+
+      const onMove = (e: PointerEvent) => {
+        const dy = e.clientY - startY;
+        if (!moved && Math.abs(dy) < 4) return;
+        if (!moved) {
+          moved = true;
+          block.addClass("is-dragging");
+          this.hideHoverTooltip();
+        }
+        const delta = snapSeconds(pxToSec(dy));
+        if (mode === "move") {
+          const dur = origEnd - origStart;
+          curStart = Math.max(0, Math.min(86400 - dur, origStart + delta));
+          curEnd = curStart + dur;
+        } else if (mode === "start") {
+          curStart = Math.max(0, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + delta));
+          curEnd = origEnd;
+        } else {
+          curEnd = Math.min(86400, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + delta));
+          curStart = origStart;
+        }
+        paint();
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        block.removeClass("is-dragging");
+        if (!moved) return;
+        block.dataset.dragMoved = "1";
+        window.setTimeout(() => { delete block.dataset.dragMoved; }, 80);
+        if (curStart === origStart && curEnd === origEnd) {
+          paint();
+          return;
+        }
+        void this.commitEntryRange(entry, curStart, curEnd);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+
+  async commitEntryRange(entry, startSec, endSec) {
+    const ok = await this.plugin.dailyNoteService.updateEntryTime(entry, startSec, endSec);
+    if (!ok) {
+      new Notice("时间范围未写入：找不到目标行，已恢复原状");
+      this.renderView();
+      return;
+    }
+    new Notice(`已更新：${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.renderView();
+  }
+
+  attachAllDayResizer(resizer, header) {
+    resizer.onpointerdown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const startY = ev.clientY;
+      const startH = Math.max(40, Math.min(320, Number(this.plugin.settings.allDayHeight ?? 56)));
+      const containers = Array.from(header.querySelectorAll(".timenote-day-allday-container")) as HTMLElement[];
+      let next = startH;
+
+      const apply = (h) => {
+        containers.forEach(el => {
+          el.style.height = `${h}px`;
+          el.style.minHeight = `${h}px`;
+          el.style.maxHeight = `${h}px`;
+        });
+      };
+
+      const onMove = (e: PointerEvent) => {
+        next = Math.max(40, Math.min(320, Math.round(startH + (e.clientY - startY))));
+        apply(next);
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        resizer.removeClass("is-active");
+        if (next !== startH) {
+          this.plugin.settings.allDayHeight = next;
+          void this.plugin.saveSettings();
+        }
+      };
+
+      resizer.addClass("is-active");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
   }
 
   // ==========================================================================
@@ -2241,6 +2484,23 @@ class TimenoteSettingTab extends PluginSettingTab {
           // 拖动滑块会连续触发，防抖后统一重渲染
           if (this.slotRerenderTimer) window.clearTimeout(this.slotRerenderTimer);
           this.slotRerenderTimer = window.setTimeout(() => {
+            this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+              .forEach(leaf => (leaf.view as TimenoteView).renderView());
+          }, 150);
+        }));
+
+    new Setting(containerEl)
+      .setName("全天区高度")
+      .setDesc("顶部「全天」区域的高度（像素）。也可在视图里直接拖动全天区与时间网格之间的分隔条调节；默认 56。")
+      .addSlider(slider => slider
+        .setLimits(40, 320, 4)
+        .setValue(Number(this.plugin.settings.allDayHeight ?? 56))
+        .setDynamicTooltip()
+        .onChange(async (val) => {
+          this.plugin.settings.allDayHeight = val;
+          await this.plugin.saveSettings();
+          if (this.allDayRerenderTimer) window.clearTimeout(this.allDayRerenderTimer);
+          this.allDayRerenderTimer = window.setTimeout(() => {
             this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
               .forEach(leaf => (leaf.view as TimenoteView).renderView());
           }, 150);

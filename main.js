@@ -41,7 +41,8 @@ var DEFAULT_SETTINGS = {
   parseAllBullets: true,
   quickAddSection: "\u7075\u611F\u95EA\u5FF5",
   layoutMode: "block",
-  defaultDuration: 60
+  defaultDuration: 60,
+  allDayHeight: 56
 };
 function getTagColor(tag) {
   let hash = 0;
@@ -63,6 +64,12 @@ function formatSecondsToTime(sec) {
 }
 var BLOCK_TOP_GUTTER = 12;
 var BLOCK_BOTTOM_GUTTER = 14;
+var DRAG_SNAP_MINUTES = 15;
+var MIN_BLOCK_SECONDS = 15 * 60;
+function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
+  const step = Math.max(1, minutes) * 60;
+  return Math.round(sec / step) * step;
+}
 function formatDuration(seconds) {
   const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
   const h = Math.floor(mins / 60);
@@ -403,6 +410,33 @@ var DailyNoteService = class {
       await this.app.vault.modify(file, lines.join("\n"));
       this.fileCache.delete(file.path);
     }
+  }
+  // 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留
+  async updateEntryTime(entry, startSec, endSec) {
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof import_obsidian.TFile)) return false;
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    const line = lines[idx];
+    const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+    let newLine;
+    if (rangeRe.test(line)) {
+      newLine = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp}`);
+    } else if (singleRe.test(line)) {
+      newLine = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp}`);
+    } else {
+      return false;
+    }
+    newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+    if (newLine === line) return false;
+    lines[idx] = newLine;
+    await this.app.vault.modify(file, lines.join("\n"));
+    this.fileCache.delete(file.path);
+    return true;
   }
   // Append new entry to daily note
   async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
@@ -1076,11 +1110,12 @@ var TimenoteView = class extends import_obsidian.ItemView {
   // Time Block Grid Renderer（共享渲染层，日 / 3天 / 周 复用）
   // ==========================================================================
   renderBlockGrid(container, days) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
     const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
     const headerDays = header.createEl("div", { cls: "timenote-header-days" });
     headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
+    const allDayHeight = Math.max(40, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)));
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
       const isToday = d.isSame(window.moment(), "day");
@@ -1096,6 +1131,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
         this.renderView();
       };
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
+      allDayContainer.style.height = `${allDayHeight}px`;
+      allDayContainer.style.minHeight = `${allDayHeight}px`;
+      allDayContainer.style.maxHeight = `${allDayHeight}px`;
       const allDay = this.filterEntries(this.entriesMap.get(dateStr) || []).filter((e) => !e.hasTime);
       allDay.forEach((entry) => {
         const chip = allDayContainer.createEl("div", {
@@ -1105,12 +1143,17 @@ var TimenoteView = class extends import_obsidian.ItemView {
         chip.onclick = () => this.jumpToFileLine(entry);
       });
     });
-    const startHour = Number((_a = this.plugin.settings.startHour) != null ? _a : 0);
-    const endHour = Number((_b = this.plugin.settings.endHour) != null ? _b : 24);
-    const slotHeight = Number((_c = this.plugin.settings.slotHeight) != null ? _c : 52);
+    const startHour = Number((_b = this.plugin.settings.startHour) != null ? _b : 0);
+    const endHour = Number((_c = this.plugin.settings.endHour) != null ? _c : 24);
+    const slotHeight = Number((_d = this.plugin.settings.slotHeight) != null ? _d : 52);
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
     const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
+    const resizer = wrapper.createEl("div", {
+      cls: "timenote-header-resizer",
+      attr: { title: "\u62D6\u52A8\u8C03\u8282\u5168\u5929\u533A\u9AD8\u5EA6" }
+    });
+    this.attachAllDayResizer(resizer, header);
     const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
     scrollArea.onscroll = () => this.hideHoverTooltip();
     const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
@@ -1138,16 +1181,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
       slotLayer.style.height = `${totalHeight}px`;
       slotLayer.style.bottom = "auto";
-      slotLayer.onclick = (ev) => {
-        const rect = col.getBoundingClientRect();
-        const y = Math.max(0, ev.clientY - rect.top - BLOCK_TOP_GUTTER);
-        const rawSec = dayStartSec + y / slotHeight * 3600;
-        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
-        const startStr = formatSecondsToTime(snapped);
-        const endSec = Math.min(dayEndSec, snapped + (this.plugin.settings.defaultDuration || 60) * 60);
-        const endStr = formatSecondsToTime(endSec);
-        new QuickAddModal(this.app, this.plugin, dateStr, () => this.renderView(), startStr, endStr).open();
-      };
+      this.attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight);
       const timed = this.filterEntries(this.entriesMap.get(dateStr) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
       const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
       clusters.forEach((cluster) => {
@@ -1190,11 +1224,13 @@ var TimenoteView = class extends import_obsidian.ItemView {
               new SubItemsModal(this.app, e).open();
             };
           }
+          this.attachBlockDrag(block, e, meta, dayStartSec, dayEndSec, slotHeight);
           block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
           block.onmouseleave = () => this.hideHoverTooltip();
           block.onclick = (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
+            if (block.dataset.dragMoved === "1") return;
             this.jumpToFileLine(e);
           };
         });
@@ -1214,6 +1250,178 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const scrollbarWidth = scrollArea.offsetWidth - scrollArea.clientWidth;
       header.style.paddingRight = `${scrollbarWidth > 0 ? scrollbarWidth : 0}px`;
     });
+  }
+  // ==========================================================================
+  // Drag Interactions（拖拽创建 / 调节范围 / 全天区高度）
+  // ==========================================================================
+  attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight) {
+    const secAt = (clientY) => {
+      const rect = col.getBoundingClientRect();
+      const y = Math.max(0, clientY - rect.top - BLOCK_TOP_GUTTER);
+      return dayStartSec + y / slotHeight * 3600;
+    };
+    slotLayer.onpointerdown = (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const anchorSec = snapSeconds(secAt(ev.clientY));
+      const startY = ev.clientY;
+      let moved = false;
+      let ghost = null;
+      const onMove = (e) => {
+        if (!moved && Math.abs(e.clientY - startY) < 5) return;
+        moved = true;
+        const cur = snapSeconds(secAt(e.clientY));
+        let s = Math.min(anchorSec, cur);
+        let en = Math.max(anchorSec, cur);
+        s = Math.max(dayStartSec, Math.min(s, dayEndSec - MIN_BLOCK_SECONDS));
+        en = Math.min(dayEndSec, Math.max(en, s + MIN_BLOCK_SECONDS));
+        if (!ghost) ghost = col.createEl("div", { cls: "timenote-block-ghost" });
+        ghost.style.top = `${BLOCK_TOP_GUTTER + (s - dayStartSec) / 3600 * slotHeight}px`;
+        ghost.style.height = `${Math.max(16, (en - s) / 3600 * slotHeight)}px`;
+        ghost.dataset.start = String(s);
+        ghost.dataset.end = String(en);
+        ghost.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} \xB7 ${formatDuration(en - s)}`;
+      };
+      const onUp = (e) => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        if (moved && ghost) {
+          const s = Number(ghost.dataset.start);
+          const en = Number(ghost.dataset.end);
+          ghost.remove();
+          this.openQuickAdd(dateStr, s, en);
+          return;
+        }
+        if (ghost) ghost.remove();
+        const rawSec = secAt(e.clientY);
+        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
+        const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
+        this.openQuickAdd(dateStr, snapped, endSec);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+  openQuickAdd(dateStr, startSec, endSec) {
+    new QuickAddModal(
+      this.app,
+      this.plugin,
+      dateStr,
+      () => this.renderView(),
+      formatSecondsToTime(startSec),
+      formatSecondsToTime(endSec)
+    ).open();
+  }
+  attachBlockDrag(block, entry, meta, dayStartSec, dayEndSec, slotHeight) {
+    block.createEl("div", { cls: "timenote-block-edge is-top" });
+    block.createEl("div", { cls: "timenote-block-edge is-bottom" });
+    if (entry.startSeconds < dayStartSec || entry.endSeconds > dayEndSec) return;
+    const pxToSec = (px) => px / slotHeight * 3600;
+    block.onpointerdown = (ev) => {
+      if (ev.button !== 0) return;
+      const target = ev.target;
+      if (target && (target.tagName === "INPUT" || target.closest && target.closest(".timenote-event-block-sub"))) return;
+      const rect = block.getBoundingClientRect();
+      const offsetY = ev.clientY - rect.top;
+      const compact = rect.height < 30;
+      let mode = "move";
+      if (!compact && offsetY <= 8) mode = "start";
+      else if (!compact && rect.height - offsetY <= 8) mode = "end";
+      const startY = ev.clientY;
+      const origStart = Number(entry.startSeconds) || 0;
+      const origEnd = Number(entry.endSeconds) || origStart + 1800;
+      let moved = false;
+      let curStart = origStart;
+      let curEnd = origEnd;
+      const paint = () => {
+        block.style.top = `${BLOCK_TOP_GUTTER + (curStart - dayStartSec) / 3600 * slotHeight}px`;
+        block.style.height = `${Math.max(22, (curEnd - curStart) / 3600 * slotHeight)}px`;
+        meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} \xB7 ${formatDuration(curEnd - curStart)}`;
+      };
+      const onMove = (e) => {
+        const dy = e.clientY - startY;
+        if (!moved && Math.abs(dy) < 4) return;
+        if (!moved) {
+          moved = true;
+          block.addClass("is-dragging");
+          this.hideHoverTooltip();
+        }
+        const delta = snapSeconds(pxToSec(dy));
+        if (mode === "move") {
+          const dur = origEnd - origStart;
+          curStart = Math.max(0, Math.min(86400 - dur, origStart + delta));
+          curEnd = curStart + dur;
+        } else if (mode === "start") {
+          curStart = Math.max(0, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + delta));
+          curEnd = origEnd;
+        } else {
+          curEnd = Math.min(86400, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + delta));
+          curStart = origStart;
+        }
+        paint();
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        block.removeClass("is-dragging");
+        if (!moved) return;
+        block.dataset.dragMoved = "1";
+        window.setTimeout(() => {
+          delete block.dataset.dragMoved;
+        }, 80);
+        if (curStart === origStart && curEnd === origEnd) {
+          paint();
+          return;
+        }
+        void this.commitEntryRange(entry, curStart, curEnd);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+  async commitEntryRange(entry, startSec, endSec) {
+    const ok = await this.plugin.dailyNoteService.updateEntryTime(entry, startSec, endSec);
+    if (!ok) {
+      new import_obsidian.Notice("\u65F6\u95F4\u8303\u56F4\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.renderView();
+      return;
+    }
+    new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.renderView();
+  }
+  attachAllDayResizer(resizer, header) {
+    resizer.onpointerdown = (ev) => {
+      var _a;
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const startY = ev.clientY;
+      const startH = Math.max(40, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)));
+      const containers = Array.from(header.querySelectorAll(".timenote-day-allday-container"));
+      let next = startH;
+      const apply = (h) => {
+        containers.forEach((el) => {
+          el.style.height = `${h}px`;
+          el.style.minHeight = `${h}px`;
+          el.style.maxHeight = `${h}px`;
+        });
+      };
+      const onMove = (e) => {
+        next = Math.max(40, Math.min(320, Math.round(startH + (e.clientY - startY))));
+        apply(next);
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        resizer.removeClass("is-active");
+        if (next !== startH) {
+          this.plugin.settings.allDayHeight = next;
+          void this.plugin.saveSettings();
+        }
+      };
+      resizer.addClass("is-active");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
   }
   // ==========================================================================
   // Now Line Clock（当前时间指示线，30s 刷新）
@@ -1814,6 +2022,17 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
         if (this.slotRerenderTimer) window.clearTimeout(this.slotRerenderTimer);
         this.slotRerenderTimer = window.setTimeout(() => {
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
+        }, 150);
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u5168\u5929\u533A\u9AD8\u5EA6").setDesc("\u9876\u90E8\u300C\u5168\u5929\u300D\u533A\u57DF\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u4E5F\u53EF\u5728\u89C6\u56FE\u91CC\u76F4\u63A5\u62D6\u52A8\u5168\u5929\u533A\u4E0E\u65F6\u95F4\u7F51\u683C\u4E4B\u95F4\u7684\u5206\u9694\u6761\u8C03\u8282\uFF1B\u9ED8\u8BA4 56\u3002").addSlider((slider) => {
+      var _a;
+      return slider.setLimits(40, 320, 4).setValue(Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 56)).setDynamicTooltip().onChange(async (val) => {
+        this.plugin.settings.allDayHeight = val;
+        await this.plugin.saveSettings();
+        if (this.allDayRerenderTimer) window.clearTimeout(this.allDayRerenderTimer);
+        this.allDayRerenderTimer = window.setTimeout(() => {
           this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
         }, 150);
       });

@@ -1208,3 +1208,76 @@
   white-space: nowrap;
   align-self: center;
 }
+
+/* ==========================================================================
+   Drag & Resize（拖拽创建 / 调节范围 / 全天区高度，DEC-011）
+   ========================================================================== */
+/* 全天区与时间网格之间的分隔条 */
+.timenote-header-resizer {
+  flex: 0 0 6px;
+  height: 6px;
+  cursor: ns-resize;
+  background-color: transparent;
+  position: relative;
+  z-index: 21;
+  transition: background-color 0.12s ease;
+}
+.timenote-header-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  width: 36px;
+  height: 2px;
+  margin-left: -18px;
+  border-radius: 1px;
+  background-color: var(--background-modifier-border);
+  transition: background-color 0.12s ease;
+}
+.timenote-header-resizer:hover,
+.timenote-header-resizer.is-active { background-color: var(--background-modifier-hover); }
+.timenote-header-resizer:hover::after,
+.timenote-header-resizer.is-active::after { background-color: var(--interactive-accent); }
+
+/* 拖拽创建时的预览块 */
+.timenote-block-ghost {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  box-sizing: border-box;
+  border: 1px dashed var(--interactive-accent);
+  border-radius: 6px;
+  background-color: rgba(var(--color-accent-rgb), 0.18);
+  color: var(--text-normal);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  padding: 2px 6px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* 已有块的上下边缘把手（拖动改起止） */
+.timenote-block-edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 6px;
+  opacity: 0;
+  background-color: var(--interactive-accent);
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+.timenote-block-edge.is-top { top: 0; border-radius: 6px 6px 0 0; }
+.timenote-block-edge.is-bottom { bottom: 0; border-radius: 0 0 6px 6px; }
+.timenote-event-block:hover .timenote-block-edge { opacity: 0.45; }
+
+/* 拖拽过程中 */
+.timenote-event-block { user-select: none; }
+.timenote-event-block:hover { cursor: grab; }
+.timenote-event-block.is-dragging {
+  opacity: 0.9;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  z-index: 8;
+  cursor: grabbing;
+}
