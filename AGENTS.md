@@ -18,10 +18,11 @@
 - **表格化视觉 + 无把手边缘拖动（DEC-014）**：`renderBlockGrid` 的 `timenote-block-ruler-spacer` 拆成「日期行占位 + `ALL DAY` 行标签」两层 flex，标签随 `allDayHeight` 自动居中；表头 / ALL DAY 行 / 网格统一 `background-primary` + 同一套 `border-left` 竖线（表头列从 `border-right` 改 `border-left`），`ALL DAY` 行不加底色、不加粗线、chip 横向 wrap；刻度 0.72rem/600/正文色 + `text-shadow` 描边断线，当前小时加 `.is-now`（主色 + 9px 引出线），当前时间线也改主色；块 20% 底 / 42% 边 / 4px 左色条 / 7px 圆角，文字一律正文色，meta 只写起止时刻，时长在右下角 `.timenote-event-block-duration`。**不创建任何 `.timenote-block-edge` / grip DOM**：边缘命中判定与 `cursor`（ns-resize / grab / grabbing）全在 `attachBlockDrag` 里按 `getBoundingClientRect()` 实时算；`.timenote-header-resizer::after` 也改为仅 hover 时浮现，静态表格里看不到把手。
 - **当前时间线（DEC-009）**：仅块布局绘制。`renderBlockGrid` 在 `colsContainer`（已加 `position: relative`）末尾创建 `.timenote-now-line`，`left: var(--tn-ruler-w, 64px)` 起（让开刻度列）横跨整行，左侧 `.timenote-now-label` 显示 `HH:mm`；`tickNowLine()` 按 `scale.yOf(nowSec)` 定位（**不许**再手写 `(now-startHour)/3600*slotHeight`，弹性轴下行高不等距会跑偏），当前时刻早于 `startHour` 或晚于 `endHour` 时 `display:none`，DOM 已被移除（`isConnected=false`）则直接返回。视图 `onOpen` 后由 `startNowClock()` 起 30s 定时器，`renderTimeGrid` 每次重渲染先 `stopNowClock()` 再重建，`onClose()` 兜底停表 —— **新增定时器务必在这三处收口**。
 - **真机颜色与列对齐（DEC-015）**：Obsidian **从未定义** `--color-accent-rgb`，`--color-orange-rgb` / `--color-green-rgb` / `--color-purple-rgb` 自 1.13 起弃用，`--background-modifier-border-rgb` 也不存在 → 旧写法 `rgba(var(--xxx-rgb), a)` 在真机上整条声明失效（预览脚本自己补了变量，所以「预览有颜色、真机全透明」）。现在全量改为「固定 `rgba()` 兜底 + `color-mix(in srgb, var(--color-accent 等) N%, transparent)`」双声明。**列错位**根因是 `.timenote-block-ruler-spacer` 作为 flex item 默认 `min-width:auto`，被 `ALL DAY` 标签的 min-content 撑宽约 6px，导致 7 个日期列相对网格逐列偏移；修法是刻度列统一 `--tn-ruler-w: 64px`（与 `main.ts` 的 `BLOCK_RULER_W` 同值）、spacer 加 `min-width:0` + `overflow:hidden`、网格列显式 `border-right: none`（去掉紧凑流继承来的双线），并把滚动条补偿抽成 `syncHeaderGutter()`（rAF 首帧 + `ResizeObserver` 持续同步，两个渲染器共用）。`scripts/dev/preview-real-dom.mjs` 复刻真实 DOM 且**故意不定义**那些 `-rgb` 变量，页面底部探针会输出 7 列的 left/width 偏差与各类 computed background-color。
+- **按天自动配色（DEC-016）**：同一天的时间块默认颜色两两不同。调色板 = Obsidian 官方 8 个扩展色 `purple/blue/cyan/green/yellow/orange/red/pink`（`var(--color-*, #fallback)`，明暗主题自动适配、主题缺变量时也不会全透明）。`assignDayTints(items)` 是模块级纯函数（`main.ts` 的 `BLOCK_TINT_BEGIN/END` 区块）：显式指定先占位 → 未指定块以 `tintEntryKey()` 的 hash 为偏好色 → 当天已用过则顺延到下一个未用色 → 超过 8 个块时允许复用但不与相邻同色。调用前按「开始时间 → 行号 → 文本」稳定排序，保证重渲染不跳色、新块自动拿到当天未用色。**指定通道**：日记行写 `#color/blue`、`#色/绿` 或 `#color/#7c5cff`，`parseLine` 解析成 `entry.tint` 并从 `tags` 中剔除；CSS 侧统一用 `--tn-tint` 变量驱动背景/边框/左色条，任务块不再固定橙色（任务语义由复选框表达）。ALL DAY chip 与紧凑流不参与配色。
 - 唯一数据源：周期日记 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md`（`periodicNotesFolder` 可配置）；可选聚合 Blinko（`includeBlinko`）。
 - 7 种视图：`day` / `3day` / `week` / `month` / `quarter` / `year` / `timeline`；默认设置见 `main.ts` 的 `DEFAULT_SETTINGS`。月 / 季 / 年仍只显示计数，不画块。
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
-- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前分支为 1.0.5）；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=6` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 复核），已与目标态一致；改默认值不会影响它。
+- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.6）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=6` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 复核），已与目标态一致；改默认值不会影响它。
 - **版本号规则（DEC-010）**：**每次提交 patch +1**（`1.0.1` → `1.0.2`），用 `npm run bump` 自动同步 `manifest.json` / `package.json` / `versions.json`（后者为版本→`minAppVersion` 映射，社区发布必需）。bump 后必须 `npm run build` 再提交；`versions.json` 已被 Obsidian 校验，勿手改单处。
 
 ## 常用命令
@@ -35,9 +36,10 @@
   - `npm run preview:timeline` —— 生成静态对比预览到 `scripts/dev/out/timeline-preview.html`（等距 vs 弹性）；加 `-- --compare=clip` 换成「块被截短 vs 块铺满跨度」。
   - `npm run test:drag` —— 拖拽吸附与 `updateEntryTime` 回写 23 项（只改目标行、保留复选框 / 缩进 / 列表符 / 标签；另含 DEC-014 的「任意块高都有三段命中区、源码无把手 DOM / 无 `< 30px` 退化分支」断言）。
   - `npm run preview:target` —— 生成目标态视觉稿到 `scripts/dev/out/target-design.html`（加 `-- --dark` 生成深色版）。稿子里的块可交互：光标移到上/下沿会变 ns-resize，用来核对「无把手」的手感。
-  - `npm run test:visual` —— 17 项视觉回归静态断言（无失效 `-rgb` 写法、双声明兜底、刻度列宽 CSS/TS 一致、spacer 不撑宽、网格无双线、`syncHeaderGutter` 两处调用）。
-  - `npm run preview:real` —— 生成 `scripts/dev/out/real-dom.html` / `real-dom-dark.html`：复刻真实 DOM + 内联真实 `styles.css`，变量环境对齐 Obsidian（不补 `-rgb`）。用浏览器打开可看底部探针（列偏差应为 0px、背景色非空）；这是「预览好看但真机没色」这类问题的第一排查入口。
-  - `npm test` —— 上面三套测试一起跑。
+  - `npm run test:visual` —— 20 项视觉回归静态断言（无失效 `-rgb` 写法、双声明兜底、刻度列宽 CSS/TS 一致、spacer 不撑宽、网格无双线、`syncHeaderGutter` 两处调用、块色由 `--tn-tint` 驱动）。
+  - `npm run test:tints` —— 25 项按天配色断言（同天互异、8 色用满、重渲染稳定、新块拿未用色、显式指定优先、跨天独立、超容量不撞相邻、`parseLine` 指定通道）。
+  - `npm run preview:real` —— 生成 `scripts/dev/out/real-dom.html` / `real-dom-dark.html`：复刻真实 DOM + 内联真实 `styles.css`，变量环境对齐 Obsidian（不补 `-rgb`）。用浏览器打开可看底部探针（列偏差应为 0px、背景色非空、同一天块色互异）；这是「预览好看但真机没色」这类问题的第一排查入口。
+  - `npm test` —— 上面四套测试一起跑（33+23+20+25）。
   - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；拖拽测试则直接从 `main.ts` 抽函数源码。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
@@ -56,4 +58,5 @@
 11. **不画拖拽把手、任意块高都能改起止**：禁止再往块里塞 edge / grip DOM，也禁止恢复「块高 < N px 只允许平移」的退化分支；边缘命中区按当前 `rect.height / 3` 实时算（2–9px 夹取），光标变化是唯一提示（DEC-014）。
 12. **颜色禁用 `rgba(var(--*-rgb), a)`**：Obsidian 没定义 `--color-accent-rgb`，1.13 起 `-rgb` 系列弃用；一律用「固定 rgba 兜底 + `color-mix(in srgb, var(--color-accent 等) N%, transparent)`」双声明。预览脚本**不许**自行补 `-rgb` 变量来「修好」画面，那只会掩盖真机问题（DEC-015）。
 13. **表头与网格列必须逐列对齐**：刻度列宽由 `--tn-ruler-w`（CSS）与 `BLOCK_RULER_W`（TS）常量同步；spacer 必须 `min-width:0` + `overflow:hidden`（flex item 的 `min-width:auto` 会被文字撑宽）；网格列必须显式 `border-right: none`；滚动条补偿统一走 `syncHeaderGutter()`，禁止只在首帧 `requestAnimationFrame` 量一次（DEC-015）。
-14. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
+14. **块颜色只能由 `assignDayTints()` 决定**：禁止给 `.timenote-event-block` 按 `is-task` / `is-memo` 写死单一颜色，也禁止用未定义或已弃用的 `--*-rgb` 变量拼 `rgba()`；调色板色值必须带固定色 fallback。新增 / 删除块允许重新分配当天颜色，但同一天渲染结果必须两两不同、且重渲染可复现（DEC-016）。
+15. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。

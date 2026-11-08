@@ -46,6 +46,87 @@ var DEFAULT_SETTINGS = {
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
 };
+var BLOCK_TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
+var TINT_FALLBACKS = {
+  purple: "#7852ee",
+  blue: "#086ddd",
+  cyan: "#00bfbc",
+  green: "#08b94e",
+  yellow: "#e0ac00",
+  orange: "#ec7500",
+  red: "#e93147",
+  pink: "#d53984"
+};
+var TINT_ALIASES = {
+  \u7D2B: "purple",
+  \u84DD: "blue",
+  \u9752: "cyan",
+  \u7EFF: "green",
+  \u9EC4: "yellow",
+  \u6A59: "orange",
+  \u7EA2: "red",
+  \u7C89: "pink"
+};
+function tintCssOf(index) {
+  const name = BLOCK_TINTS[index];
+  return `var(--color-${name}, ${TINT_FALLBACKS[name]})`;
+}
+function hashTintKey(key) {
+  let hash = 0;
+  const s = String(key);
+  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+  return Math.abs(hash);
+}
+function tintEntryKey(entry, dateStr) {
+  return entry.id || `${dateStr}#${entry.lineNum || 0}#${entry.text || ""}`;
+}
+function resolveTint(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const lower = raw.toLowerCase();
+  const idx = BLOCK_TINTS.indexOf(TINT_ALIASES[raw] || lower);
+  if (idx >= 0) return { css: tintCssOf(idx), index: idx };
+  if (/^(#|hsl\(|rgb\(|var\()/i.test(raw)) return { css: raw, index: -1 };
+  const fallback = hashTintKey(raw) % BLOCK_TINTS.length;
+  return { css: tintCssOf(fallback), index: fallback };
+}
+function assignDayTints(items) {
+  const used = /* @__PURE__ */ new Set();
+  const result = new Array(items.length);
+  items.forEach((it, i) => {
+    const resolved = resolveTint(it.tint);
+    if (!resolved) return;
+    result[i] = resolved.css;
+    if (resolved.index >= 0) used.add(resolved.index);
+  });
+  const n = BLOCK_TINTS.length;
+  items.forEach((it, i) => {
+    if (result[i]) return;
+    const preferred = hashTintKey(it.key) % n;
+    let chosen = -1;
+    for (let k = 0; k < n; k++) {
+      const c = (preferred + k) % n;
+      if (!used.has(c)) {
+        chosen = c;
+        break;
+      }
+    }
+    if (chosen < 0) {
+      const prev = i > 0 ? result[i - 1] : null;
+      for (let k = 0; k < n; k++) {
+        const c = (preferred + k) % n;
+        if (tintCssOf(c) !== prev) {
+          chosen = c;
+          break;
+        }
+      }
+      if (chosen < 0) chosen = preferred;
+    }
+    used.add(chosen);
+    result[i] = tintCssOf(chosen);
+  });
+  return result;
+}
 function getTagColor(tag) {
   let hash = 0;
   for (let i = 0; i < tag.length; i++) {
@@ -320,6 +401,11 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   content = content.replace(/\s*\^[a-zA-Z0-9_-]+\s*$/, "").trim();
   content = content.replace(/✅\s*\d{4}-\d{2}-\d{2}/, "").trim();
   const tags = [];
+  let tint = null;
+  content = content.replace(/#(?:color|色)\/(#?[\w\u4e00-\u9fa5-]+)/gi, (_, v) => {
+    tint = v;
+    return "";
+  }).trim();
   content = content.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (_, t) => {
     tags.push(t);
     return "";
@@ -347,6 +433,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     timeStr,
     text: displayText,
     tags,
+    tint,
     subItems: [],
     source: "daily"
   };
@@ -1299,10 +1386,19 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
     const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
     const clustersByDay = /* @__PURE__ */ new Map();
+    const tintsByDay = /* @__PURE__ */ new Map();
     const scaleEntries = [];
     days.forEach((d) => {
       const ds = d.format("YYYY-MM-DD");
-      const timed = this.filterEntries(this.entriesMap.get(ds) || []).filter((e) => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const dayTimed = this.filterEntries(this.entriesMap.get(ds) || []).filter((e) => e.hasTime);
+      const ordered = dayTimed.slice().sort(
+        (a, b) => (a.startSeconds || 0) - (b.startSeconds || 0) || (a.lineNum || 0) - (b.lineNum || 0) || String(a.text || "").localeCompare(String(b.text || ""))
+      );
+      const tintCss = assignDayTints(ordered.map((e) => ({ key: tintEntryKey(e, ds), tint: e.tint })));
+      const dayTints = /* @__PURE__ */ new Map();
+      ordered.forEach((e, i) => dayTints.set(tintEntryKey(e, ds), tintCss[i]));
+      tintsByDay.set(ds, dayTints);
+      const timed = dayTimed.filter((e) => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
       const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
       clustersByDay.set(ds, clusters);
       if (!elastic) return;
@@ -1375,6 +1471,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       clusters.forEach((cluster) => {
         const laneWidth = colWidth / Math.max(1, cluster.laneCount);
         cluster.items.forEach((it) => {
+          var _a2;
           const e = it.entry;
           const top = scale.yOf(it.s);
           const spanH = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
@@ -1387,6 +1484,10 @@ var TimenoteView = class extends import_obsidian.ItemView {
           block.style.height = `${height}px`;
           block.style.left = `${it.lane * widthPct}%`;
           block.style.width = `calc(${widthPct}% - 6px)`;
+          block.style.setProperty(
+            "--tn-tint",
+            ((_a2 = tintsByDay.get(dateStr)) == null ? void 0 : _a2.get(tintEntryKey(e, dateStr))) || "var(--color-accent)"
+          );
           if (height < 34) block.addClass("is-dense");
           if (height < 24) block.addClass("is-tiny");
           const title = block.createEl("div", { cls: "timenote-event-block-title" });

@@ -31,7 +31,7 @@ ok("所有半透明色都有 color-mix 主题色版本",
 ok("color-mix 只引用官方存在的颜色变量",
   [...cssCode.matchAll(/color-mix\(in srgb, var\((--[\w-]+)/g)]
     .every(m => ["--color-accent", "--color-orange", "--color-green",
-                 "--color-purple", "--background-modifier-border"].includes(m[1])));
+                 "--color-purple", "--background-modifier-border", "--tn-tint"].includes(m[1])));
 const cssLines = cssCode.split("\n");
 const mixLines = cssLines
   .map((l, i) => ({ l, i }))
@@ -43,8 +43,14 @@ ok("每个 color-mix 声明前一行都有同属性的固定 rgba 兜底",
     return prev.trim().startsWith(`${prop}:`) && /rgba\(/.test(prev);
   }));
 ok("时间块是实色底（20%）且带边框",
-  /\.timenote-event-block \{[\s\S]*?color-mix\(in srgb, var\(--color-accent[^\n]*20%, transparent\)/.test(cssCode) &&
+  /\.timenote-event-block \{[\s\S]*?color-mix\(in srgb, var\(--tn-tint[^\n]*20%, transparent\)/.test(cssCode) &&
   /\.timenote-event-block \{[\s\S]*?border: 1px solid/.test(cssCode));
+ok("时间块颜色由 --tn-tint 变量驱动（含兜底值）",
+  /--tn-tint:\s*var\(--color-accent/.test(rule(".timenote-event-block")));
+ok("任务块不再固定橙色（颜色统一走按天分配）",
+  !/\.timenote-event-block\.is-task\s*\{/.test(cssCode));
+ok("渲染时为每个块写入当天颜色",
+  /setProperty\(\s*"--tn-tint"/.test(ts) && /assignDayTints\(/.test(ts));
 ok("今日列表头 / 网格底色浓度一致",
   (cssCode.match(/var\(--color-accent, #7c5cff\) 5%, transparent\)/g) || []).length === 2);
 

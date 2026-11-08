@@ -23,12 +23,16 @@ const themeVars = dark
      --text-normal:#dadada;--text-muted:#999;--text-faint:#666;--text-on-accent:#fff;
      --color-accent:#a882ff;--color-accent-1:#9570ff;--color-accent-2:#7c5cff;
      --color-orange:#e9973f;--color-green:#44cf6e;--color-purple:#a882ff;
+     --color-red:#fb464c;--color-yellow:#e0de71;--color-cyan:#53dfdd;
+     --color-blue:#027aff;--color-pink:#fa99cd;
      --interactive-accent:#a882ff;--font-interface:-apple-system,"Segoe UI",sans-serif;`
   : `--background-primary:#ffffff;--background-secondary:#fcfcfc;--background-secondary-alt:#f6f6f6;
      --background-primary-alt:#fafafa;--background-modifier-border:#e4e4e4;--background-modifier-hover:#efefef;
      --text-normal:#222222;--text-muted:#707070;--text-faint:#ababab;--text-on-accent:#fff;
      --color-accent:#7c5cff;--color-accent-1:#6a48f0;--color-accent-2:#5636d8;
      --color-orange:#ec7500;--color-green:#08b94e;--color-purple:#7852ee;
+     --color-red:#e93147;--color-yellow:#e0ac00;--color-cyan:#00bfbc;
+     --color-blue:#086ddd;--color-pink:#d53984;
      --interactive-accent:#7c5cff;--font-interface:-apple-system,"Segoe UI",sans-serif;`;
 
 const DAYS = [
@@ -45,6 +49,9 @@ const SLOT = 36;
 const START = 6;
 const END = 24;
 const H = (h) => h * 3600;
+// 与 main.ts 的 BLOCK_TINTS 一致；预览里按「天 + 当天序号」给不同色，
+// 用来直观看到「同一天的时间块互不撞色」（真实插件由 assignDayTints 分配）。
+const TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
 const rows = END - START;
 const totalHeight = rows * SLOT;
 const yOf = (hour) => (hour - START) * SLOT;
@@ -77,11 +84,12 @@ const hourLines = Array.from({ length: rows + 1 }, (_, i) =>
 ).join("");
 
 const gridCol = (d, idx) => {
-  const blocks = BLOCKS.filter((b) => b.day === idx).map((b) => {
+  const blocks = BLOCKS.filter((b) => b.day === idx).map((b, bi) => {
     const top = yOf(b.s);
     const height = yOf(b.e) - top;
     const dense = height < 34 ? "is-dense" : "";
-    return `<div class="timenote-event-block ${b.task ? "is-task" : "is-memo"} ${dense}" style="top:${top}px;height:${height}px;left:0;width:calc(100% - 6px)">
+    const tint = TINTS[(idx * 3 + bi) % TINTS.length];
+    return `<div class="timenote-event-block ${b.task ? "is-task" : "is-memo"} ${dense}" style="top:${top}px;height:${height}px;left:0;width:calc(100% - 6px);--tn-tint:var(--color-${tint})">
       <div class="timenote-event-block-title">${b.task ? '<input type="checkbox" class="timenote-card-checkbox">' : ""}<span>${b.text}</span></div>
       <div class="timenote-event-block-meta">${fmt(b.s)} – ${fmt(b.e)}</div>
       <div class="timenote-event-block-duration">${b.e - b.s}h</div>
@@ -108,7 +116,7 @@ ${css}
 </style></head>
 <body>
 <div class="note">复刻插件 <b>renderBlockGrid 的真实 DOM</b> + 仓库里真实的 <code>styles.css</code>，变量环境对齐 Obsidian（<b>不提供 --color-accent-rgb</b>）。
-这里用等距 36px/行只为了看清竖线与颜色，行高策略以插件设置为准。表头与滚动区的宽度补偿由脚本按 <code>syncHeaderGutter</code> 的同一逻辑模拟。</div>
+这里用等距 36px/行只为了看清竖线与颜色，行高策略以插件设置为准；时间块按天自动分配 8 种不同颜色。表头与滚动区的宽度补偿由脚本按 <code>syncHeaderGutter</code> 的同一逻辑模拟。</div>
 <div class="frame">
   <div class="timenote-container">
     <div class="timenote-timegrid-wrapper" id="wrapper">
@@ -157,10 +165,19 @@ const bg = (sel) => {
   const el = document.querySelector(sel);
   return el ? getComputedStyle(el).backgroundColor : 'MISSING';
 };
+const allBgs = [...document.querySelectorAll('.timenote-event-block')]
+  .map(el => getComputedStyle(el).backgroundColor);
+const firstCol = document.querySelector('.timenote-column.timenote-block-column');
+const dayBgs = firstCol
+  ? [...firstCol.querySelectorAll('.timenote-event-block')].map(el => getComputedStyle(el).backgroundColor)
+  : [];
 const out = [
   '滚动条补偿: ' + gutter + 'px（表头 padding-right）',
   '列对齐: ' + (worst < 0.6 ? 'PASS' : 'FAIL') + '  最大偏差 ' + worst + 'px',
   rows.map(r => '  第' + (r.i + 1) + '列 左偏移 ' + r.dLeft + 'px / 宽度差 ' + r.dWidth + 'px').join('\\n'),
+  '时间块颜色: ' + new Set(allBgs).size + ' 种 / ' + allBgs.length + ' 个块',
+  '同一天互不撞色: ' + (dayBgs.length > 1 && new Set(dayBgs).size === dayBgs.length ? 'PASS' : 'FAIL')
+    + '（第 1 天 ' + dayBgs.length + ' 块）',
   '时间块背景: ' + bg('.timenote-event-block'),
   '任务块背景: ' + bg('.timenote-event-block.is-task'),
   '全天 chip 背景: ' + bg('.timenote-all-day-chip'),

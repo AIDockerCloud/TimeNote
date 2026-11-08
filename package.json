@@ -1,6 +1,6 @@
 {
   "name": "timenote",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "Obsidian 插件：基于周期日记的时间轴与全周期日历视图",
   "main": "main.js",
@@ -16,7 +16,8 @@
     "preview:real": "node scripts/dev/preview-real-dom.mjs && node scripts/dev/preview-real-dom.mjs --dark",
     "test:drag": "node scripts/dev/test-drag-writeback.mjs",
     "test:visual": "node scripts/dev/test-visual-regression.mjs",
-    "test": "npm run test:timeline && npm run test:drag && npm run test:visual"
+    "test:tints": "node scripts/dev/test-block-tints.mjs",
+    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints"
   },
   "keywords": [
     "obsidian",

@@ -40,6 +40,93 @@ const DEFAULT_SETTINGS = {
   elasticTimeline: true
 };
 
+// --- BLOCK_TINT_BEGIN ---
+// 同一天的时间块默认使用互不相同的颜色（DEC-016）。
+// 调色板直接借用 Obsidian 官方扩展色变量：明暗主题自动适配，不必维护两套色值。
+// 「指定」通道：日记行里写 #color/blue 或 #色/蓝；未指定则由本模块按天自动分配。
+const BLOCK_TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
+// 主题若没定义某个扩展色，也不能让块变成全透明（DEC-015 的教训）
+const TINT_FALLBACKS = {
+  purple: "#7852ee", blue: "#086ddd", cyan: "#00bfbc", green: "#08b94e",
+  yellow: "#e0ac00", orange: "#ec7500", red: "#e93147", pink: "#d53984"
+};
+const TINT_ALIASES = {
+  紫: "purple", 蓝: "blue", 青: "cyan", 绿: "green",
+  黄: "yellow", 橙: "orange", 红: "red", 粉: "pink"
+};
+
+function tintCssOf(index) {
+  const name = BLOCK_TINTS[index];
+  return `var(--color-${name}, ${TINT_FALLBACKS[name]})`;
+}
+
+function hashTintKey(key) {
+  let hash = 0;
+  const s = String(key);
+  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+  return Math.abs(hash);
+}
+
+function tintEntryKey(entry, dateStr) {
+  return entry.id || `${dateStr}#${entry.lineNum || 0}#${entry.text || ""}`;
+}
+
+// 把 #color/blue、#色/绿、#7c5cff、未知名字都解析成一个确定的 CSS 颜色值。
+// 返回 index 仅用于「占位」：显式指定的调色板色不应再被自动分配的块占用。
+function resolveTint(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const lower = raw.toLowerCase();
+  const idx = BLOCK_TINTS.indexOf(TINT_ALIASES[raw] || lower);
+  if (idx >= 0) return { css: tintCssOf(idx), index: idx };
+  if (/^(#|hsl\(|rgb\(|var\()/i.test(raw)) return { css: raw, index: -1 };
+  const fallback = hashTintKey(raw) % BLOCK_TINTS.length;
+  return { css: tintCssOf(fallback), index: fallback };
+}
+
+/**
+ * 为「一天」的所有定时块分配颜色，返回与 items 等长的 CSS 颜色值数组。
+ * - 显式指定的先占位；
+ * - 未指定的以 entry key 的 hash 作为偏好色，若当天已用过就顺延到下一个未用色；
+ * - 因此只要当天块数不超过调色板容量，颜色必然两两不同，新块自动拿到当天未用色；
+ * - 纯函数 + 稳定排序（由调用方保证），重渲染不会跳色。
+ */
+function assignDayTints(items) {
+  const used = new Set();
+  const result = new Array(items.length);
+
+  items.forEach((it, i) => {
+    const resolved = resolveTint(it.tint);
+    if (!resolved) return;
+    result[i] = resolved.css;
+    if (resolved.index >= 0) used.add(resolved.index);
+  });
+
+  const n = BLOCK_TINTS.length;
+  items.forEach((it, i) => {
+    if (result[i]) return;
+    const preferred = hashTintKey(it.key) % n;
+    let chosen = -1;
+    for (let k = 0; k < n; k++) {
+      const c = (preferred + k) % n;
+      if (!used.has(c)) { chosen = c; break; }
+    }
+    if (chosen < 0) {
+      // 超过调色板容量时允许复用，但至少不与相邻块同色
+      const prev = i > 0 ? result[i - 1] : null;
+      for (let k = 0; k < n; k++) {
+        const c = (preferred + k) % n;
+        if (tintCssOf(c) !== prev) { chosen = c; break; }
+      }
+      if (chosen < 0) chosen = preferred;
+    }
+    used.add(chosen);
+    result[i] = tintCssOf(chosen);
+  });
+  return result;
+}
+// --- BLOCK_TINT_END ---
+
 // Deterministic tag color generator
 function getTagColor(tag) {
   let hash = 0;
@@ -393,8 +480,14 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   // Remove task completion date ✅ 2026-02-24
   content = content.replace(/✅\s*\d{4}-\d{2}-\d{2}/, '').trim();
 
-  // Extract tags
+  // Extract tags。#color/blue、#色/蓝（或 #color/#7c5cff）是显式配色指令（DEC-016），
+  // 先摘出来，不算普通标签 —— 这样它不会出现在块内 meta、hover 标签列表里，却能决定块的颜色。
   const tags = [];
+  let tint = null;
+  content = content.replace(/#(?:color|色)\/(#?[\w\u4e00-\u9fa5-]+)/gi, (_, v) => {
+    tint = v;
+    return "";
+  }).trim();
   content = content.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (_, t) => {
     tags.push(t);
     return "";
@@ -426,6 +519,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     timeStr,
     text: displayText,
     tags,
+    tint,
     subItems: [],
     source: "daily"
   };
@@ -1589,11 +1683,26 @@ class TimenoteView extends ItemView {
     const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
 
     const clustersByDay = new Map();
+    const tintsByDay = new Map();
     const scaleEntries = [];
     days.forEach(d => {
       const ds = d.format("YYYY-MM-DD");
-      const timed = this.filterEntries(this.entriesMap.get(ds) || [])
-        .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const dayTimed = this.filterEntries(this.entriesMap.get(ds) || []).filter(e => e.hasTime);
+
+      // 按天独立配色（DEC-016）：稳定排序保证重渲染不跳色；新块插进序列后
+      // 会自动拿到当天尚未使用的颜色，不会和当天其它时间块撞色。
+      const ordered = dayTimed.slice().sort((a, b) =>
+        (a.startSeconds || 0) - (b.startSeconds || 0) ||
+        (a.lineNum || 0) - (b.lineNum || 0) ||
+        String(a.text || "").localeCompare(String(b.text || ""))
+      );
+      const tintCss = assignDayTints(ordered.map(e => ({ key: tintEntryKey(e, ds), tint: e.tint })));
+      const dayTints = new Map();
+      ordered.forEach((e, i) => dayTints.set(tintEntryKey(e, ds), tintCss[i]));
+      tintsByDay.set(ds, dayTints);
+
+      const timed = dayTimed
+        .filter(e => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
       const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
       clustersByDay.set(ds, clusters);
       if (!elastic) return;
@@ -1694,6 +1803,11 @@ class TimenoteView extends ItemView {
           block.style.height = `${height}px`;
           block.style.left = `${it.lane * widthPct}%`;
           block.style.width = `calc(${widthPct}% - 6px)`;
+          // 同一天的块各用一种颜色；#color/xxx 显式指定时优先保留
+          block.style.setProperty(
+            "--tn-tint",
+            tintsByDay.get(dateStr)?.get(tintEntryKey(e, dateStr)) || "var(--color-accent)"
+          );
           // 块高恒等于时间跨度，块矮时按可用高度收起次要信息，别让文字挤成一团
           if (height < 34) block.addClass("is-dense");
           if (height < 24) block.addClass("is-tiny");

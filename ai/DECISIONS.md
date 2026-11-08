@@ -1,6 +1,6 @@
 ---
 pcmp_version: "2.2"
-revision: 10
+revision: 11
 updated: 2026-11-09
 ---
 
@@ -187,3 +187,15 @@ updated: 2026-11-09
 - 理由 (Reason): 颜色失效是「预览环境比真机多几个变量」造成的假阳性，靠肉眼看设计稿永远发现不了，必须让预览与真机变量环境一致并用 computed style 断言。列错位不是视觉调参问题，而是 flex 自动最小尺寸把表头刻度列撑宽的结构性偏差 —— 只要 spacer 还能被内容撑宽，任何 padding 补偿都救不了；加宽到能容纳标签 + 显式禁止撑宽，才是一次性闭合。
 - 备选方案 (Alternatives): 在插件 CSS 里自行补 `--color-accent-rgb` 变量（等于继续粉饰预览/真机差异，且不会跟随主题）；改回 `var(--background-secondary)` 灰底表头（只是遮住问题，且推翻 DEC-014 已确认的表格化视觉）；把 ALL DAY 标签缩小到能塞进 52px（字重与可辨识度下降，且不同语言/字号仍可能撑宽）；表头与网格合并到同一滚动容器并用 sticky 定位（改动面大，涉及两个渲染器与拖拽坐标）；用 `scrollbar-gutter: stable` 纯 CSS 补偿（滚动条始终占位，但表头仍需同等 padding，且旧版 Electron 不支持）。
 - 影响 (Consequences): 本轮**不递增版本**（1.0.5 尚未提交，修复并入同一批次），但 `~/tmp/tn-v105-snapshot` 必须重新同步，否则五段式脚本第 4 段 `rsync --delete` 会把修复抹掉；真机 vault 的 `main.js` / `styles.css` 已重新覆盖，需 reload 插件。浏览器探针（浅色 / 深色）结果：7 列 left / width 偏差全部 0px，时间块 `color(srgb … / 0.2)`、任务块 `/ 0.22`、chip `/ 0.14`、今日列 `/ 0.05` 均非空；`npm test` 由 33+23 项扩为 33+23+17 项。
+
+## DEC-016 — 时间块按天自动配色，并合入 main 继续推进
+日期: 2026-11-09 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-09 02:03 指令「每天的时间块的颜色不应该相同，没有指定的情况下，请给新块安排一个和当天其他块不同的颜色，现在把特性分支合入main，并在main分支继续推进」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要用户可自定义调色板 / 按标签或项目固定配色、需要跨天保持同一记录同色、需要让 ALL DAY chip 或紧凑流也参与配色、或块数长期超过 8 个需要更大调色板时复审
+- 背景 (Context): ① [事实] DEC-014 把块的颜色收敛为「备忘 = 主题紫、任务 = 橙」两套固定色，于是同一天里所有普通块长得一模一样，密集时段难以区分不同记录。② [事实] 插件此前没有任何「指定颜色」通道，`parseLine` 只解析时间与标签。③ [事实] DEC-015 刚修过「主题变量未定义导致整条声明失效、真机全透明」，新配色若沿用 `rgba(var(--*-rgb), a)` 或未带 fallback 的 `var(--color-*)` 会重蹈覆辙。④ [事实] `feat/elastic-timeline` 上 1.0.1–1.0.5 五个签名提交已由用户本地执行完毕，工作区干净，`main` 仍是 `e5285db`（`feat` 的祖先），具备快进合并条件。
+- 决策 (Decision): ① **调色板**用 Obsidian 官方 8 个扩展色 `purple / blue / cyan / green / yellow / orange / red / pink`，以 `var(--color-NAME, #fallback)` 形式提供 —— 明暗主题自动适配，且主题缺变量时仍有固定色兜底。② **分配算法** `assignDayTints(items)`（模块级纯函数）：显式指定先占位 → 未指定块以 `tintEntryKey()` 的 hash 为偏好色 → 若当天已用过就顺延到下一个未用色 → 超过 8 个块时允许复用但不与相邻同色。调用方按「开始时间 → 行号 → 文本」稳定排序，因此重渲染不跳色，新块自动拿到当天未用色，各天独立分配。③ **指定通道**：日记行写 `#color/blue`、`#色/绿` 或 `#color/#7c5cff`，`parseLine` 解析为 `entry.tint` 并从 `tags` 中剔除（不污染块内 meta / hover 标签）；`updateEntryTime` 只改行首时间前缀，指令原样保留。④ CSS 统一用 `--tn-tint` 驱动背景 / 边框 / 左色条，删除 `.is-task` 固定橙色规则（任务语义由复选框表达），`is-blinko` 灰左条、`is-completed` 透明度保留；ALL DAY chip 与紧凑流不参与配色。⑤ **分支**：`git checkout main && git merge --ff-only feat/elastic-timeline` 把 1.0.1–1.0.5 快进合入 `main`（不产生新提交，无需签名），后续一律在 `main` 上推进；版本 `1.0.5 → 1.0.6`。
+- 理由 (Reason): 「同一天不同色」若靠随机或按渲染顺序取色，重渲染就会跳色、拖拽后颜色乱变，用户无法建立颜色记忆；用「内容 hash 偏好 + 当天冲突消解」既保证确定性，又天然让新块落到空位。调色板直接借官方扩展色变量，比自造一套 HSL 色板更贴主题，也避免 DEC-015 那类「预览有、真机无」的环境差异。指定通道用标签形态而不是新字段或 frontmatter，是为了不改动日记数据格式、且回写时不会被破坏。
+- 备选方案 (Alternatives): 按 `getTagColor(tag)` 的标签 hash 上色（不同标签可能撞色、无标签的块仍同色，且不满足「新块一定不同」）；按 `isTask` 继续分两类色（就是当前被否掉的方案）；渲染时随机取色（重渲染跳色，无法复现）；把颜色写进日记文件持久化（每次新建块都要改写用户数据，且回写复杂度高，用户只要求「没有指定时自动安排」）；自造 8 组 HSL 常量（明暗主题要维护两套，且不跟随用户主题）；用 `--no-ff` 生成合并提交（沙箱 GPG 签名不可用，快进合并不产生新提交，正好绕开限制）。
+- 影响 (Consequences): `main.ts` 新增 `BLOCK_TINT_BEGIN/END` 纯函数区块（测试按标记抽取）、`parseLine` 增加 `tint` 字段、`renderBlockGrid` 每天构建 `tintsByDay` 并给块 `setProperty("--tn-tint", …)`；`styles.css` 块颜色规则改为变量驱动；新增 `scripts/dev/test-block-tints.mjs`（25 项）并接入 `npm test`（33+23+20+25）；`preview-real-dom.mjs` 补齐 8 个扩展色变量并展示多色块（探针新增「同一天互不撞色」）。`npm run bump` 到 1.0.6，真机 vault 已重新部署。**签名提交仍需用户本地执行**（沙箱里 `gpg` 无法创建 lock 文件），交付 `~/tn-main-commit.sh`；`git push origin main` 在会话内超时，也一并交给该脚本。`scripts/dev/out/` 下的预览 HTML 曾随早期提交误入库（`.gitignore` 已声明忽略），提交脚本会用 `git rm --cached` 让它们退出版本库、本地文件保留。

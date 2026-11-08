@@ -1,13 +1,13 @@
 ---
 pcmp_version: "2.2"
-revision: 18
+revision: 19
 updated: 2026-11-09
 ---
 
 # 项目当前状态与活动任务快照 (STATE.md — Lite)
 
 - **Last Updated**: 2026-11-09
-- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010），当前版本 **1.0.5**（在实验分支 `feat/elastic-timeline` 上，对应 DEC-013 的「内容定高」自适应轴 + DEC-014 的目标态表格视觉与无把手任意尺寸边缘拖拽 + DEC-015 的真机颜色与列对齐修复，后者因 1.0.5 尚未提交而并入同一批次）。仍无 LICENSE / 自动化测试。
+- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010）。**`feat/elastic-timeline` 的 1.0.1–1.0.5 五个签名提交已于 2026-11-09 快进合入 `main`（`5a2909a`），后续一律在 `main` 上推进**；当前版本 **1.0.6**（DEC-016 按天自动配色，工作区改动待签名提交）。仍无 LICENSE / 自动化测试。
 - **档位**：PCMP Lite（活动任务合并维护于此，无 `TASK.md` / `PLAN.md` / `sessions/`）。
 
 ---
@@ -31,7 +31,9 @@ updated: 2026-11-09
   - [x] 去掉所有把手：删除 `.timenote-block-edge` / `.grip` 与 `< 30px` 退化分支，命中区按 `clamp(h/3, 2, 9)` 自适应，最短 16px 块也能改起止，光标 `ns-resize` / `grab` / `grabbing` 切换；拖拽结果夹在可见轴内；`tickNowLine` 删除手写等距 fallback；
   - [x] `npm run build` / 33+23 项开发脚本测试 / `python3 scripts/pcmp_index.py --check` / `node --check main.js` 全部通过；版本 `1.0.4` → `1.0.5` 并部署真机 vault；
   - [x] 真机反馈修复（DEC-015）：29 处失效 `rgba(var(--*-rgb), a)` → 「固定 rgba 兜底 + `color-mix` 主题色」双声明，背景色恢复且跟随明暗主题；刻度列 52→64px 并与 `BLOCK_RULER_W` 同步、spacer 禁止被 `ALL DAY` 标签撑宽、网格列去 `border-right`、滚动条补偿改 `syncHeaderGutter()` 持续同步。浏览器探针（浅/深色）7 列偏差全部 0px；新增 `test:visual` 17 项断言与 `preview:real`，`npm test` 扩为 33+23+17 项；`~/tmp/tn-v105-snapshot` 已重新同步；
-  - [ ] **肉眼验收**：等用户 reload 插件后确认「整张表格浑然一体、块上下沿与刻度对齐、无把手也能拖任意大小的块」，据此微调 `ELASTIC_EMPTY_RATIO` / `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数，通过后 DEC-013 / DEC-014 合回 `main`。
+  - [x] 按天自动配色（DEC-016）：8 个官方扩展色 + `assignDayTints()` 确定性分配，同天互异、新块拿未用色、重渲染不跳色；`#color/blue` / `#色/绿` / `#color/#7c5cff` 指定通道；CSS 改 `--tn-tint` 变量驱动、任务块不再固定橙色；新增 `test:tints` 25 项，`npm test` 扩为 33+23+20+25 项；浏览器探针（浅/深）确认同天块色互异、7 列偏差 0px；版本 `1.0.5` → `1.0.6` 并部署真机 vault；
+  - [x] 分支合并：`git checkout main && git merge --ff-only feat/elastic-timeline` 完成（不产生新提交、无需签名），DEC-013 / DEC-014 / DEC-015 全部进入 `main`；
+  - [ ] **肉眼验收**：等用户 reload 插件后确认「同一天的时间块颜色互不相同、指定色生效、整张表格浑然一体、块上下沿与刻度对齐、无把手也能拖任意大小的块」，据此微调 `ELASTIC_EMPTY_RATIO` / `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数。
 
 ---
 
@@ -51,7 +53,7 @@ updated: 2026-11-09
 - [事实][已部署] 2026-11-08 22:56 覆盖部署到真机 vault `/home/inverstar/文档/Time/.obsidian/plugins/timenote/`：三件套 + README 全部 md5 与仓库一致；同时修正该目录 `manifest.json`（旧 id `time-notes` / name `Time Notes (时间笔记)` / author `Antigravity` → `timenote` / `TimeNote` / `AIDockerCloud`）与 `.obsidian/community-plugins.json`（`time-notes` → `timenote`）。旧文件备份在 `/home/inverstar/tmp/timenote-plugin-backup-20261108-225620`。该 vault 无 `data.json`，无需迁移。
 
 ## 进行中 (In Progress)
-- [进行中] [Git 状态] 工作区当前叠加了**四批未提交改动**：v1.0.2（全天区拖拽 + 拖拽创建/调范围，DEC-011）、v1.0.3（弹性时间轴，DEC-012）、v1.0.4（内容定高 + 视觉统一，DEC-013）、v1.0.5（目标态表格视觉 + 无把手任意尺寸边缘拖拽，DEC-014）。分支 `feat/elastic-timeline` 从 `main` 的 `e5285db` 切出；暂存区仍是 v1.0.1 的快照。`~/tn-split-commit.sh` 已升级为**五段式**（新增 `~/tmp/tn-v105-snapshot` 快照与第 5 段），按「1.0.1 → 1.0.2 → 1.0.3 → 1.0.4 → 1.0.5」拆成五个签名提交；DEC-015 的修复已并入第 5 段并在 2026-11-09 重新同步 `~/tmp/tn-v105-snapshot`。**之后若再改代码，跑脚本前必须再次同步 v105 快照**，否则第 4 段的 `rsync --delete` 会把新改动抹回 1.0.4。
+- [进行中] [Git 状态] 当前在 **`main`**（本地 `5a2909a`，1.0.1–1.0.5 已由用户本地执行五段式脚本完成签名提交并快进合入）；`origin/main` 仍停在 `e5285db`，会话内 `git push origin main` 超时未成功。工作区叠加 **v1.0.6 一批未提交改动**（DEC-016 配色 + 文档 + 测试），等待用户本地执行 `bash ~/tn-main-commit.sh` 完成签名提交与推送。旧的 `~/tn-split-commit.sh` 与 `~/tmp/tn-v10*-snapshot` 已完成使命，**不要再跑**。
 - [进行中] [DEC-012] 弹性时间轴已构建、已部署真机 vault，等肉眼验收。
 
 ## 阻塞项 (Blocked)
@@ -82,7 +84,7 @@ updated: 2026-11-09
 - [未决] 是否实现 P2（拖拽创建与调整、月/季/年时长统计）？
 
 ## 下一步即时动作 (Immediate Next Action)
-- 用户侧：在真机 Obsidian 里 reload TimeNote（设置 → 第三方插件 → 关闭再开启），**先核对这次修复**：时间块 / 全天 chip / 今日列是否都有底色、7 个日期列与下面的时间列是否逐列对齐（不再偏 6px）；再核对整张表格是否浑然一体、时间刻度是否够醒目、任意大小的块能否不靠把手直接拖上下沿。若「背景色没了」指的是表头原本那层灰底，需明确告知 —— DEC-014 按批准的效果图把表头与网格改成同底了。真机 `data.json` 复核为 `6–24` 时 / `slotHeight=36` / `allDayHeight=32` / 自适应开，已与目标态一致，无需再调；设置页「自适应时间轴」开关可 A/B 对比内容驱动 / 等距 36px。
-- 我这边：按验收反馈调 `ELASTIC_MIN_EMPTY_ROW`（空档压缩下限）/ `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数；确认后 DEC-013 / DEC-014 合回 `main`。
-- Git：执行**五段式**脚本 `bash ~/tn-split-commit.sh` 完成 1.0.1 / 1.0.2 / 1.0.3 / 1.0.4 / 1.0.5 五次签名提交，之后由我 `git push -u origin feat/elastic-timeline`。
+- 用户侧：① 在真机 Obsidian 里 reload TimeNote（设置 → 第三方插件 → 关闭再开启），核对**同一天的时间块颜色互不相同**、`#color/blue` 指定色生效、表格列对齐与背景色正常；② 本地执行 `bash ~/tn-main-commit.sh` 完成 v1.0.6 的签名提交并把 `main` 推到远端（会话内 GPG 不可用、push 超时）。真机 `data.json` 为 `6–24` 时 / `slotHeight=36` / `allDayHeight=32` / 自适应开，已与目标态一致；设置页「自适应时间轴」开关可 A/B 对比内容驱动 / 等距 36px。
+- 我这边：按验收反馈调 `ELASTIC_MIN_EMPTY_ROW`（空档压缩下限）/ `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数；**后续所有改动都在 `main` 上做**，不再开实验分支。
+- Git：远端 `origin/main` 落后 5 个提交，由 `~/tn-main-commit.sh` 一并推送；确认推送成功后再继续下一个特性。
 - 仍需裁决 LICENSE 与自动化测试（vitest）。

@@ -1258,18 +1258,20 @@
   white-space: nowrap;
 }
 
-/* ---- 时间块卡片：实色但不遮字，文字一律用正文色 ---- */
+/* ---- 时间块卡片：实色但不遮字，颜色由 --tn-tint 按天分配（DEC-016） ---- */
 .timenote-event-block {
+  /* 兜底值；renderBlockGrid 会给每个块写入当天分配到的颜色 */
+  --tn-tint: var(--color-accent, #7c5cff);
   position: absolute;
   box-sizing: border-box;
   overflow: hidden;
   padding: 7px 8px 6px 10px;
   border-radius: 7px;
   background-color: rgba(124, 92, 255, 0.2);
-  background-color: color-mix(in srgb, var(--color-accent, #7c5cff) 20%, transparent);
+  background-color: color-mix(in srgb, var(--tn-tint) 20%, transparent);
   border: 1px solid rgba(124, 92, 255, 0.42);
-  border: 1px solid color-mix(in srgb, var(--color-accent, #7c5cff) 42%, transparent);
-  border-left: 4px solid var(--color-accent);
+  border: 1px solid color-mix(in srgb, var(--tn-tint) 42%, transparent);
+  border-left: 4px solid var(--tn-tint);
   color: var(--text-normal);
   cursor: pointer;
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
@@ -1277,22 +1279,11 @@
 }
 .timenote-event-block:hover {
   background-color: rgba(124, 92, 255, 0.24);
-  background-color: color-mix(in srgb, var(--color-accent, #7c5cff) 24%, transparent);
-  border-color: var(--color-accent);
+  background-color: color-mix(in srgb, var(--tn-tint) 24%, transparent);
+  border-color: var(--tn-tint);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
 }
-.timenote-event-block.is-task {
-  background-color: rgba(236, 117, 0, 0.22);
-  background-color: color-mix(in srgb, var(--color-orange, #ec7500) 22%, transparent);
-  border-color: rgba(236, 117, 0, 0.45);
-  border-color: color-mix(in srgb, var(--color-orange, #ec7500) 45%, transparent);
-  border-left-color: var(--color-orange);
-}
-.timenote-event-block.is-task:hover {
-  background-color: rgba(236, 117, 0, 0.26);
-  background-color: color-mix(in srgb, var(--color-orange, #ec7500) 26%, transparent);
-  border-color: var(--color-orange);
-}
+/* 任务块不再固定橙色：颜色统一走按天分配，任务语义由复选框表达 */
 .timenote-event-block.is-blinko { border-left-color: var(--text-muted); }
 .timenote-event-block.is-completed { opacity: 0.6; }
 .timenote-event-block.is-range { border-left-width: 4px; }
@@ -1452,7 +1443,7 @@
 .timenote-event-block:hover { cursor: grab; }
 .timenote-event-block.is-dragging {
   opacity: 0.95;
-  border-color: var(--interactive-accent);
+  border-color: var(--tn-tint);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   z-index: 8;
   cursor: grabbing;
