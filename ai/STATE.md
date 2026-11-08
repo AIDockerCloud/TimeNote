@@ -1,13 +1,13 @@
 ---
 pcmp_version: "2.2"
-revision: 8
+revision: 11
 updated: 2026-11-08
 ---
 
 # 项目当前状态与活动任务快照 (STATE.md — Lite)
 
 - **Last Updated**: 2026-11-08
-- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在先前提交（`8b110bd`）中入库。本轮改动已暂存，因会话内 GPG 签名不可用，提交由用户在本地终端执行 `bash ~/tn-commit.sh` 完成（**未绕过签名**）。仍无 `versions.json` / LICENSE / 自动化测试。
+- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010），当前版本 **1.0.1**。仍无 LICENSE / 自动化测试。
 - **档位**：PCMP Lite（活动任务合并维护于此，无 `TASK.md` / `PLAN.md` / `sessions/`）。
 
 ---
@@ -31,8 +31,14 @@ updated: 2026-11-08
   - [x] 块布局加入当前时间指示线：按分钟定位、左侧 `HH:mm` 胶囊、30s 刷新、越界隐藏、仅在所显示日期含今天时创建（DEC-009）；
   - [x] 定时器三处收口：`renderTimeGrid` 重渲染前 `stopNowClock()`、`onClose()` 停表、`isConnected=false` 静默返回；
   - [x] 指示线逻辑 7 个用例通过（全天 754px / 06:00 起 510px / 09-18 内可见 / 早于起点隐藏 / 晚于终点隐藏 / 24:00 边界 1248px / DOM 移除安全返回）；
-  - [ ] 本地终端执行 `bash ~/tn-commit.sh` 完成 GPG 签名提交；
-  - [ ] 剩余 3 项 [未决] 等待人类裁决。
+  - [x] 本地终端执行 `bash ~/tn-commit.sh` 完成 GPG 签名提交（`e5285db`）；
+  - [x] 推送到远端 `origin/main`（`3ee3025..e5285db`，远端已核实同一 SHA）；
+  - [x] 块布局上下留白：`BLOCK_TOP_GUTTER=12` / `BLOCK_BOTTOM_GUTTER=14`，刻度标签 / 小时线 / 时间块 / 当前时间线 / 落点层统一偏移，起始与结束时刻标签完整可见（DEC-010）；
+  - [x] 末行贴近底部（容器底距最后一行 14px）且标签完整；全天区加高至 56–180px 承接释放的空间（DEC-010）；
+  - [x] 落点层只覆盖网格本体，点击留白区不再误建记录；
+  - [x] 补 `versions.json` + `scripts/bump-version.mjs`（`npm run bump`），版本 `1.0.0` → `1.0.1`，三处版本一致（DEC-010）；
+  - [x] 12 个用例通过（指示线 7 项 + 几何自洽 5 项：容器高 1274 / 首标签不裁切 / 末标签在容器内 / 末行距底 14px / 首块不贴表头）；
+  - [ ] LICENSE 与自动化测试仍待人类裁决。
 
 ---
 
@@ -42,11 +48,14 @@ updated: 2026-11-08
 - [已确认] [DEC-007] 时间块作为共享渲染层融入现有视图，块布局默认、紧凑流可切换、只做实际记录（用户 2026-11-08 22:28 指令）。
 - [已确认] [DEC-008] 时间轴默认保持 `00:00-24:00` 不改，补齐设置页起止时间控件，README 同步更正（用户 2026-11-08 22:41 指令）。
 - [已确认] [DEC-009] 暴露每小时槽高滑块；块布局新增当前时间指示线（用户 2026-11-08 22:47 指令）。设置页共 10 项。
+- [已确认] [DEC-010] 补 `versions.json` 与 patch 版号规则；块布局上下留白修复、全天区加高（用户 2026-11-08 23:14 指令）。版本 1.0.1。
 - [事实] 块布局落地后，README 原先宣称的「时间网格 / 并发重叠智能避让」首次与实现对齐。
-- [事实] 本轮改动已 `git add` 暂存；提交信息写入 `~/tn-commit.sh`（保留 GPG 签名）；`.workbuddy/`、`.Trash-*/`、`node_modules/` 已忽略。
+- [事实] 已签名提交 `e5285db`（三件事合并：PCMP 初始化 + 标识统一 + 时间块），并由用户确认；`.workbuddy/`、`.Trash-*/`、`node_modules/` 已忽略。
+- [事实][已推送] 2026-11-08 23:06 推送 `origin/main`（`3ee3025..e5285db`，2 个提交），远端 `refs/heads/main` 与本地 HEAD 同为 `e5285db894499a24ee518946ba2836c911187f0f`。
+- [事实][已部署] 2026-11-08 22:56 覆盖部署到真机 vault `/home/inverstar/文档/Time/.obsidian/plugins/timenote/`：三件套 + README 全部 md5 与仓库一致；同时修正该目录 `manifest.json`（旧 id `time-notes` / name `Time Notes (时间笔记)` / author `Antigravity` → `timenote` / `TimeNote` / `AIDockerCloud`）与 `.obsidian/community-plugins.json`（`time-notes` → `timenote`）。旧文件备份在 `/home/inverstar/tmp/timenote-plugin-backup-20261108-225620`。该 vault 无 `data.json`，无需迁移。
 
 ## 进行中 (In Progress)
-- [进行中] 等待本地终端完成签名提交；剩余 [未决] 项待裁决。
+- [进行中] 仅剩文档同步（本文件的 revision 10 与 `AGENTS.md` 部署说明）待签名提交；产品代码已全部提交并推送。
 
 ## 阻塞项 (Blocked)
 - [事实][环境] 会话沙箱内 `gpg-agent` 无法在 `~/.gnupg` 创建锁文件（EPERM），全局 `commit.gpgsign=true` 导致会话内提交失败；用户已选择「本地终端提交」，非业务阻塞。
@@ -55,18 +64,20 @@ updated: 2026-11-08
 - [事实][中] **渐进类型化**：6 个类仍用 `[key: string]: any` 索引签名（标 `TODO(types)`），类型检查通过但类型安全有限。
 - [事实][中] `createEl` / `createDiv` 传入 `style` 不在 Obsidian `DomElementInfo` 定义内，本轮仅通过全局类型扩展放行类型检查，**运行时该样式可能未生效**；新块布局已改用直接 `el.style.*` 设置，不受影响。
 - [事实][中] `main.js` 是生成文件，提交前必须先 `npm run build`。
+- [事实][低] 网格留白写死为常量（12 / 14px），未开设置项；若刻度字号变化需同步调（DEC-010 复审触发条件）。
 - [事实][低] 跨零点范围（如 `23:00-01:00`）一期不支持，解析时兜底为 30 分钟块；拖拽创建 / 块边缘调整起止尚未实现（P2）。
 - [事实][低] 月 / 季 / 年视图仍只显示计数，不画块、不显示时长统计（P2）。
 - [事实][已收敛] 时间轴默认值差异已由 DEC-008 裁决：保留代码 `00:00-24:00`，**并补上设置页起止时间控件**（此前 README 宣称可调但 UI 不存在）；README 已同步为「默认 00:00 - 24:00，可按作息收窄」。`slotHeight` 已由 DEC-009 开成滑块（28–96px，默认 52）。
 - [事实][低] 当前时间线只画在块布局；默认 `00:00-24:00` + 52px 时线高约 1183px（22:47），**首屏之外需滚动才可见**；未实现「自动滚动到当前时间」（与「文件修改即重渲染」会互相打架，列为复审触发条件）。
 - [事实][低] 调 `slotHeight` 会重建网格并重置滚动位置（防抖后只重渲染一次）。
-- [事实][中] 缺 `versions.json`、LICENSE、自动化测试，尚不满足社区插件发布要求。
+- [事实][中] 缺 LICENSE、自动化测试，尚不满足社区插件发布要求（`versions.json` 已补，版本机制见 DEC-010）。
 - [事实][提醒] 本机若已有旧插件目录 `.../plugins/time-notes/`，需改名 `timenote/` 并迁移 `data.json`；项目根目录 `.Trash-0/`（系统回收站）已忽略，未做任何删除操作。
 
 ## 未决问题 (Open Questions)
 - [未决] 是否确认采用 PCMP **Lite** 档位，或升级为 Full？见 DEC-002。
 - [未决] `createEl({ style })` 是否改为受支持的 `attr: { style }` 以让内联样式生效？
-- [未决] 是否补 `versions.json` / LICENSE / 自动化测试，并实现 P2（拖拽创建与调整、月/季/年时长统计）？
+- [未决] LICENSE 采用哪种协议（MIT / Apache-2.0 / 其他）？自动化测试是否引入（vitest）？
+- [未决] 是否实现 P2（拖拽创建与调整、月/季/年时长统计）？
 
 ## 下一步即时动作 (Immediate Next Action)
-- 执行 `bash ~/tn-commit.sh` 完成 GPG 签名提交（`git log -1` 确认）；提交后本快照「待提交」描述应在下一次会话收尾时刷新。随后裁决剩余 3 项 [未决]；同步远端用 `git push origin main`（本轮未推送）。
+- 本地终端执行 `bash ~/tn-commit.sh` 完成 1.0.1 的签名提交（脚本已更新，含版号、留白修复与部署说明），提交后我这边负责 `git push`。随后在真机 Obsidian 验证：起始/结束时刻标签是否完整、末行是否贴底、全天区高度是否合适。仍需裁决 LICENSE 与测试。

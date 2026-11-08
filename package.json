@@ -1,6 +1,6 @@
 {
   "name": "timenote",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Obsidian 插件：基于周期日记的时间轴与全周期日历视图",
   "main": "main.js",
@@ -8,7 +8,8 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "typecheck": "tsc -noEmit -skipLibCheck",
-    "check": "npm run typecheck && python3 scripts/pcmp_index.py --check"
+    "check": "npm run typecheck && python3 scripts/pcmp_index.py --check",
+    "bump": "node scripts/bump-version.mjs"
   },
   "keywords": [
     "obsidian",

@@ -11,17 +11,20 @@
 - **时间块（DEC-007）**：不新增视图模式。`renderTimeGrid` 按 `settings.layoutMode` 分发到 `renderBlockGrid`（块布局，**默认**）或 `renderCompactGrid`（原压缩流 / 紧凑流）；块布局在 day / 3day / week 共用，绝对定位 `top/height` 由 `startSeconds`/`endSeconds` 换算，仅重叠簇内分 lane。工具栏可切换，设置项 `layoutMode`、`defaultDuration`（默认 60 分钟）。
 - **时间块数据**：日记行内 `HH:mm-HH:mm`（也支持 `~`、`至`、`到`、`/`）、`30m`/`1h`/`45min` 时长标签；`parseLine` 给每条定时记录都算 `startSeconds`/`endSeconds`（单时间默认 30 分钟），并返回 `isRange`；`addEntry` 支持 `endTimeStr` 生成范围行。跨零点范围一期不支持（兜底为 30 分钟块）。
 - **时间块边界**：只做「实际记录」（记录一段时间做了什么）；不做计划排程、容量规划、计时器、计划/实际区分；勾选任务待办是原有功能，不算排程。
+- **块布局网格留白（DEC-010）**：`colsContainer` / 每个 `col` 高度为 `totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER`（12 / 14 px）；刻度标签、小时线、时间块、当前时间线、落点层的 `top` **一律加 `BLOCK_TOP_GUTTER`**，落点层的点击换算 `y` **一律减 `BLOCK_TOP_GUTTER`**。原因：刻度标签用 `translateY(-50%)` 居中，`top:0` 时上半截会被滚动区裁掉，视觉上像被全天区压住。**新增任何绝对定位元素都必须套用这个偏移**，否则会和刻度错位。
 - **当前时间线（DEC-009）**：仅块布局绘制。`renderBlockGrid` 在 `colsContainer`（已加 `position: relative`）末尾创建 `.timenote-now-line`，`left: 52px` 起（让开刻度列）横跨整行，左侧 `.timenote-now-label` 显示 `HH:mm`；`tickNowLine()` 按 `(now-startHour)/3600*slotHeight` 定位，当前时刻早于 `startHour` 或晚于 `endHour` 时 `display:none`，DOM 已被移除（`isConnected=false`）则直接返回。视图 `onOpen` 后由 `startNowClock()` 起 30s 定时器，`renderTimeGrid` 每次重渲染先 `stopNowClock()` 再重建，`onClose()` 兜底停表 —— **新增定时器务必在这三处收口**。
 - 唯一数据源：周期日记 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md`（`periodicNotesFolder` 可配置）；可选聚合 Blinko（`includeBlinko`）。
 - 7 种视图：`day` / `3day` / `week` / `month` / `quarter` / `year` / `timeline`；默认设置见 `main.ts` 的 `DEFAULT_SETTINGS`。月 / 季 / 年仍只显示计数，不画块。
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
-- `manifest.json`：`version 1.0.0`、`minAppVersion 1.0.0`、`isDesktopOnly=false`；用户设置存于插件目录 `data.json`，不入库。
+- `manifest.json`：`version 1.0.1`、`minAppVersion 1.0.0`、`isDesktopOnly=false`；用户设置存于插件目录 `data.json`，不入库。
+- **版本号规则（DEC-010）**：**每次提交 patch +1**（`1.0.1` → `1.0.2`），用 `npm run bump` 自动同步 `manifest.json` / `package.json` / `versions.json`（后者为版本→`minAppVersion` 映射，社区发布必需）。bump 后必须 `npm run build` 再提交；`versions.json` 已被 Obsidian 校验，勿手改单处。
 
 ## 常用命令
 - 安装依赖：`npm install`（首次 / 更新 lock 后）。
 - 开发：`npm run dev`（watch，自动重建 `main.js`）；生产构建：`npm run build`（含 `tsc` 类型检查）。**改完 `main.ts` 必须先 build 再提交**。
 - 校验：`npm run typecheck`、`npm run check`（类型检查 + PCMP 合规）、`node --check main.js`、`python3 scripts/pcmp_index.py --check`。
-- 本地试用：复制三件套到 `<vault>/.obsidian/plugins/timenote/`，在 Obsidian 中启用。
+- 本地部署（真机 vault）：`/home/inverstar/文档/Time/.obsidian/plugins/timenote/`，只需覆盖 `manifest.json` + `main.js` + `styles.css`（README 可一并覆盖）。**Obsidian 要求文件夹名 == `manifest.id`**，故该目录必须是 `timenote/`，且 `.obsidian/community-plugins.json` 里要列 `"timenote"`（旧值是 `"time-notes"`，改 id 时务必一起换，否则插件不加载）。该 vault 目前**没有** `data.json`，改 id 无配置迁移风险；覆盖前把旧文件备份到 `~/tmp/`。
+- 版本递增：`npm run bump`（自动 +0.0.1，也可 `npm run bump -- 1.2.0` 指定），随后 `npm run build`。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
 
@@ -32,5 +35,6 @@
 4. **日记是用户数据**：写回必须走 `app.vault.modify` 且只改目标行，保持其余内容、缩进与顺序不变；禁止批量重写用户笔记。
 5. **时间块边界**：不得把时间块扩展成计划排程 / 容量规划 / 计时器，也不得引入 frontmatter 或独立笔记文件作为时间块数据源（DEC-007）。
 6. **重大变更先留痕**：升级 TS / esbuild 主版本、增删依赖、改变产物入库策略前，在 `ai/DECISIONS.md` 追加 ADR，未经人类确认一律标 `Proposed`。
-7. **收尾更新**：实质变更后递增 `ai/STATE.md` 的 `revision`，同步 `Last Updated` 与 Immediate Next Action；Lite 档位不建 TASK.md / sessions/。
+7. **版本号先于提交**：任何进 Git 的功能/修复提交都必须先 `npm run bump`（patch +1）并重新 build（DEC-010）。
+8. **收尾更新**：实质变更后递增 `ai/STATE.md` 的 `revision`，同步 `Last Updated` 与 Immediate Next Action；Lite 档位不建 TASK.md / sessions/。
 8. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。

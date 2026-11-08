@@ -1,6 +1,6 @@
 ---
 pcmp_version: "2.2"
-revision: 6
+revision: 7
 updated: 2026-11-08
 ---
 
@@ -115,3 +115,15 @@ updated: 2026-11-08
 - 理由 (Reason): 槽高是同一维度（时间轴显示范围 / 密度）的最后一块拼图，收进设置页才能和不暴露 `data.json` 的普通用户对齐；当前时间线是日历类产品的默认预期（TaskNotes / OpenTodo / Google Calendar 皆有），且实现只需一个绝对定位元素 + 30s 定时器，不触碰数据层。
 - 备选方案 (Alternatives): 槽高用下拉档位（30/40/52/64/80）——不如滑块细粒度；当前时间线做成每秒刷新的 `requestAnimationFrame`（无必要，分钟级足够，还费电）；在紧凑流里也画（时间轴已折叠，位置会误导）；首帧自动滚动到当前时刻（会与「文件修改即重渲染」冲突，用户滚动位置被反复夺走，故不做）。
 - 影响 (Consequences): 设置页共 10 项；块布局 DOM 多 1 个元素 + 1 个 30s 定时器（紧凑流不起表）；`slotHeight` 改动会重建网格并重置滚动位置（防抖后一次）；默认全天 + 52px 时当前时间线可能在首屏之外，需要滚动才能看到；未实现「自动滚动到当前时间」。
+
+## DEC-010 — 补 versions.json 与 patch 版号规则；块布局上下留白修复
+日期: 2026-11-08 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-08 23:14 指令「补一下，并按每次提交递进0.0.1递进，目前时间块视图最上面一行，应该是全天任务块把开始时间遮住了，解决这个问题就到1.0.1版本，同时最后一行要尽可能贴近底部，留一点空间方便看到时间，多出来的空间用于全天任务块的高度增加」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要自定义留白像素、改为「首屏自动滚动到当前时间」、或版本号规则改为语义化 minor / major 时复审
+- 背景 (Context): ① [事实] 仓库缺 `versions.json`（社区插件发布必需），且 `manifest.json` / `package.json` 版本停在 `1.0.0`，功能迭代后版本号无变化，本地与远端无法区分新旧构建。② [事实][缺陷] 块布局中所有刻度标签用 `transform: translateY(-50%)` 垂直居中，起始小时标签 `top = 0`，其上半截落在滚动内容区之外被裁切 —— 视觉上「00:00」紧贴表头下方并只剩一半，用户描述为「全天任务块把开始时间遮住了」；同理末行 `24:00` 标签下半截超出容器，底部无余量可看。全天区仅 `min-height: 40px / max-height: 120px`，条目稍多即滚动。
+- 决策 (Decision): ① 新增 `versions.json`（`1.0.0` → 映射 `minAppVersion 1.0.0`）与 `scripts/bump-version.mjs`（`npm run bump`，默认 patch +1，也可 `npm run bump -- x.y.z` 指定），一次同步 `manifest.json` / `package.json` / `versions.json` 三处并保持 `versions.json` 按版本号升序；确立「每次提交 patch +1」的版本规则（本次 `1.0.0` → `1.0.1`）。② 块布局引入 `BLOCK_TOP_GUTTER = 12` / `BLOCK_BOTTOM_GUTTER = 14`：容器与每列高度改为 `totalHeight + 12 + 14`，刻度标签 / 小时线 / 时间块 / 当前时间线 / 落点层的 `top` 统一加 12，落点层点击换算的 `y` 统一减 12 且落点层只覆盖网格本体（`top=12`、`height=totalHeight`、`bottom=auto`）；全天区调整为 `min-height: 56px` / `max-height: 180px`、`padding: 6px`。③ 文档同步：AGENTS 写入「新增绝对定位元素必须套用留白偏移」的约定与版本规则，README 增「版本号」小节与留白说明。
+- 理由 (Reason): 刻度标签是半小时高的视觉锚点，被裁一半会让「最上面一行是几点」判断失真，也让人误以为是全天区压住了网格；统一用一个偏移量包住所有绝对定位元素，比逐个微调 `top` 更不容易错位。`versions.json` 是社区发布硬门槛，补齐后 `npm run bump` 把「记得改三个文件」变成一条命令，避免版本漂移。底部留白 14px 刚好容纳半个标签高度（约 6px）再留 8px 呼吸，末行既完整可见又贴近底部；全天区用释放的余量加高到 56–180px，能多显示 1–3 条全天条目。
+- 备选方案 (Alternatives): 用 `padding-top` 撑开滚动区（绝对定位元素仍以 padding box 为参考，`top:0` 依然贴边，不解决问题）；把刻度标签改成 `translateY(-100%)` 贴底对齐（起始标签会整体跑到容器外，更糟）；给 `startHour` 默认值加半小时偏移（污染数据语义）；版本号用 `npm version`（会创建 tag 并触发 npm 语义，与 Obsidian 插件发布流程不符）。
+- 影响 (Consequences): 网格总高 +26px（全天 52px 槽高下 1248 → 1274）；落点层不再覆盖上下留白，点击留白区不会误建记录；`versions.json` 需随每次提交追加，忘记 bump 会导致版本回退风险（已写入 AGENTS 红线 7）；`package-lock.json` 由 `npm install --package-lock-only` 同步；LICENSE 仍未补（授权协议需人类确认，未擅自选定）。

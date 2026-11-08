@@ -61,6 +61,8 @@ function formatSecondsToTime(sec) {
   const m = Math.floor(clamped % 3600 / 60);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
+var BLOCK_TOP_GUTTER = 12;
+var BLOCK_BOTTOM_GUTTER = 14;
 function formatDuration(seconds) {
   const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
   const h = Math.floor(mins / 60);
@@ -1112,14 +1114,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
     scrollArea.onscroll = () => this.hideHoverTooltip();
     const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
-    colsContainer.style.height = `${totalHeight}px`;
+    colsContainer.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
     const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
     for (let h = startHour; h <= endHour; h++) {
       const label = ruler.createEl("div", {
         cls: "timenote-block-ruler-label",
         text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
       });
-      label.style.top = `${(h - startHour) * slotHeight}px`;
+      label.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
     }
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
@@ -1127,15 +1129,18 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const col = colsContainer.createEl("div", {
         cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
       });
-      col.style.height = `${totalHeight}px`;
+      col.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
       for (let h = startHour; h <= endHour; h++) {
         const line = col.createEl("div", { cls: "timenote-block-hour-line" });
-        line.style.top = `${(h - startHour) * slotHeight}px`;
+        line.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
       }
       const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
+      slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
+      slotLayer.style.height = `${totalHeight}px`;
+      slotLayer.style.bottom = "auto";
       slotLayer.onclick = (ev) => {
         const rect = col.getBoundingClientRect();
-        const y = Math.max(0, ev.clientY - rect.top);
+        const y = Math.max(0, ev.clientY - rect.top - BLOCK_TOP_GUTTER);
         const rawSec = dayStartSec + y / slotHeight * 3600;
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
         const startStr = formatSecondsToTime(snapped);
@@ -1148,7 +1153,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       clusters.forEach((cluster) => {
         cluster.items.forEach((it) => {
           const e = it.entry;
-          const top = (it.s - dayStartSec) / 3600 * slotHeight;
+          const top = BLOCK_TOP_GUTTER + (it.s - dayStartSec) / 3600 * slotHeight;
           const height = Math.max(22, (it.en - it.s) / 3600 * slotHeight);
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
@@ -1239,7 +1244,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       return;
     }
     el.style.display = "";
-    el.style.top = `${(nowSec - startSec) / 3600 * slotHeight}px`;
+    el.style.top = `${BLOCK_TOP_GUTTER + (nowSec - startSec) / 3600 * slotHeight}px`;
     if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
   }
   // ==========================================================================

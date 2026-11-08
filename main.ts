@@ -58,6 +58,13 @@ function formatSecondsToTime(sec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+// 块布局网格的上下留白（px）：
+// 顶部 —— 起始小时的刻度标签用 translateY(-50%) 居中，top=0 时上半截会被滚动区裁掉，
+//          留出余量后「00:00」等起始时刻才完整可见，首条时间块也不会紧贴表头。
+// 底部 —— 结束小时的刻度标签同理需要半行余量，同时让最后一行尽量贴近底部。
+const BLOCK_TOP_GUTTER = 12;
+const BLOCK_BOTTOM_GUTTER = 14;
+
 function formatDuration(seconds) {
   const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
   const h = Math.floor(mins / 60);
@@ -1343,7 +1350,7 @@ class TimenoteView extends ItemView {
     const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
     scrollArea.onscroll = () => this.hideHoverTooltip();
     const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
-    colsContainer.style.height = `${totalHeight}px`;
+    colsContainer.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
 
     const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
     for (let h = startHour; h <= endHour; h++) {
@@ -1351,7 +1358,7 @@ class TimenoteView extends ItemView {
         cls: "timenote-block-ruler-label",
         text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
       });
-      label.style.top = `${(h - startHour) * slotHeight}px`;
+      label.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
     }
 
     days.forEach(d => {
@@ -1360,18 +1367,21 @@ class TimenoteView extends ItemView {
       const col = colsContainer.createEl("div", {
         cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
       });
-      col.style.height = `${totalHeight}px`;
+      col.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
 
       for (let h = startHour; h <= endHour; h++) {
         const line = col.createEl("div", { cls: "timenote-block-hour-line" });
-        line.style.top = `${(h - startHour) * slotHeight}px`;
+        line.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
       }
 
       // 点击空白槽：按位置换算时间，预填起止后快速记录（只做实际记录，不做排程）
       const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
+      slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
+      slotLayer.style.height = `${totalHeight}px`;
+      slotLayer.style.bottom = "auto";
       slotLayer.onclick = (ev) => {
         const rect = col.getBoundingClientRect();
-        const y = Math.max(0, ev.clientY - rect.top);
+        const y = Math.max(0, ev.clientY - rect.top - BLOCK_TOP_GUTTER);
         const rawSec = dayStartSec + (y / slotHeight) * 3600;
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - 1800, Math.floor(rawSec / 1800) * 1800));
         const startStr = formatSecondsToTime(snapped);
@@ -1387,7 +1397,7 @@ class TimenoteView extends ItemView {
       clusters.forEach(cluster => {
         cluster.items.forEach(it => {
           const e = it.entry;
-          const top = ((it.s - dayStartSec) / 3600) * slotHeight;
+          const top = BLOCK_TOP_GUTTER + ((it.s - dayStartSec) / 3600) * slotHeight;
           const height = Math.max(22, ((it.en - it.s) / 3600) * slotHeight);
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
@@ -1486,7 +1496,7 @@ class TimenoteView extends ItemView {
       return;
     }
     el.style.display = "";
-    el.style.top = `${((nowSec - startSec) / 3600) * slotHeight}px`;
+    el.style.top = `${BLOCK_TOP_GUTTER + ((nowSec - startSec) / 3600) * slotHeight}px`;
     if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
   }
 
