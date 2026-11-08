@@ -1,0 +1,27 @@
+{
+  "name": "timenote",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Obsidian 插件：基于周期日记的时间轴与全周期日历视图",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck",
+    "check": "npm run typecheck && python3 scripts/pcmp_index.py --check"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "daily-notes",
+    "calendar",
+    "timeline"
+  ],
+  "author": "AIDockerCloud",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "obsidian": "^1.14.4",
+    "typescript": "^7.0.2"
+  }
+}

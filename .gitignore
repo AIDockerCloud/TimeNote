@@ -1,0 +1,23 @@
+# Obsidian 插件运行时数据（由 Obsidian 生成，不入库）
+data.json
+.obsidian/
+
+# 依赖与构建产物
+node_modules/
+*.js.map
+# 注意：main.js 是 esbuild 产物，但必须入库以支持零构建安装，故不忽略
+
+# 桌面环境回收站目录（非项目文件，勿提交）
+.Trash-*/
+
+# PCMP 派生索引：Markdown 才是权威，缓存可随时删除重建
+ai/.cache/
+
+# AI 协作本地记忆与工作数据（不入库）
+.workbuddy/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
