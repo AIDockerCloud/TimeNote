@@ -1192,6 +1192,45 @@
 }
 .timenote-event-block-sub { font-size: 0.72rem; color: var(--text-muted); cursor: pointer; }
 .timenote-event-block-sub:hover { color: var(--text-normal); }
+
+/* ==========================================================================
+   Elastic Timeline — 弹性时间轴（自适应槽高）
+   ========================================================================== */
+/* 被压缩的空档行：刻度字号缩小、淡化，避免整列标签糊成一片 */
+.timenote-block-ruler-label.is-dense {
+  font-size: 0.6rem;
+  opacity: 0.5;
+  letter-spacing: -0.02em;
+}
+/* 弹性模式下块有富余高度，标题允许折行，把内容真正显示出来 */
+.timenote-block-columns.is-elastic .timenote-event-block-title {
+  align-items: flex-start;
+  white-space: normal;
+  text-overflow: clip;
+  word-break: break-word;
+}
+.timenote-block-columns.is-elastic .timenote-event-block-title > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.timenote-block-columns.is-elastic .timenote-event-block-title > input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+/* 块高度不足以同时放下标题与时间：先收时间行，再收内边距 */
+.timenote-event-block.is-dense .timenote-event-block-meta { display: none; }
+.timenote-event-block.is-tiny {
+  padding: 1px 6px;
+  border-left-width: 2px;
+  border-radius: 4px;
+}
+.timenote-event-block.is-tiny .timenote-event-block-title {
+  font-size: 0.7rem;
+  line-height: 1.15;
+}
+.timenote-event-block.is-tiny .timenote-event-block-sub { display: none; }
 .timenote-layout-toggle {
   font-size: 0.75rem;
   padding: 3px 10px;

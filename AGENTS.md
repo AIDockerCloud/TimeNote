@@ -40,4 +40,5 @@
 6. **重大变更先留痕**：升级 TS / esbuild 主版本、增删依赖、改变产物入库策略前，在 `ai/DECISIONS.md` 追加 ADR，未经人类确认一律标 `Proposed`。
 7. **版本号先于提交**：任何进 Git 的功能/修复提交都必须先 `npm run bump`（patch +1）并重新 build（DEC-010）。
 8. **收尾更新**：实质变更后递增 `ai/STATE.md` 的 `revision`，同步 `Last Updated` 与 Immediate Next Action；Lite 档位不建 TASK.md / sessions/。
-8. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
+9. **时间轴换算只能走 `buildTimeScale()`**：块的 `top/height`、整点刻度线、当前时间线、拖拽创建/调节的像素↔时间换算，一律经 `scale.yOf()` / `scale.secOf()`；**禁止**再手写 `BLOCK_TOP_GUTTER + (sec - dayStartSec)/3600 * slotHeight`。弹性时间轴下行高不等距，散落的旧公式不会报错、只会静默错位（DEC-012）。
+10. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。

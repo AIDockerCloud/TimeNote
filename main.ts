@@ -35,7 +35,9 @@ const DEFAULT_SETTINGS = {
   quickAddSection: "灵感闪念",
   layoutMode: "block",
   defaultDuration: 60,
-  allDayHeight: 56
+  allDayHeight: 56,
+  // 弹性时间轴：空档行压缩、有内容的行撑开，轴总高不变（DEC-012）
+  elasticTimeline: true
 };
 
 // Deterministic tag color generator
@@ -138,6 +140,137 @@ function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
     c.laneCount = Math.max(1, laneEnds.length);
   });
   return clusters;
+}
+
+// ============================================================================
+// Elastic Time Scale（弹性时间轴）
+// ============================================================================
+// 把「每小时等距」换成「按内容量分配行高」，但轴总高度恒等于 rowCount * slotHeight：
+//   - 空档行压到 ELASTIC_MIN_EMPTY_ROW，不再白占一屏
+//   - 有记录的行按「覆盖时长 / 条目数 / 文本量」撑开，块越高越能显示完整文字
+//   - 富余空间按水位（water-filling）分配，永远不改变总高
+//
+// 关键约束：sec -> y 的映射必须在整条轴上严格单调递增且连续 ——
+// 时间块的 top/height、整点刻度线、当前时间线、拖拽的像素↔时间换算全部依赖它。
+// 一旦出现高度为 0 的行，映射就不再是一一对应，拖拽会直接失效。
+const ELASTIC_MIN_EMPTY_ROW = 14;    // 空档行压缩下限（再矮刻度标签就糊成一团）
+const ELASTIC_MIN_CONTENT_ROW = 30;  // 有内容行的下限（够放标题 + 时间一行）
+const ELASTIC_MAX_GROWTH = 1.9;      // 有内容行相对自身理想高度最多再放大几倍
+const ELASTIC_HARD_CAP = 4.2;        // 有内容行绝对上限 = slotHeight * 该系数
+const MIN_RENDER_BLOCK_PX = 20;      // 时间块最小渲染高度
+
+function buildTimeScale(opts) {
+  const { startHour, endHour, slotHeight, top, entries, elastic } = opts;
+  const rowCount = Math.max(1, endHour - startHour);
+  const totalHeight = rowCount * slotHeight;
+  const heights: number[] = [];
+
+  if (!elastic) {
+    // 等距模式：与原实现完全一致，出问题可一键退回
+    for (let i = 0; i < rowCount; i++) heights.push(slotHeight);
+  } else {
+    const covered = new Array(rowCount).fill(0);
+    const counts = new Array(rowCount).fill(0);
+    const textLens = new Array(rowCount).fill(0);
+
+    (entries || []).forEach(e => {
+      const s = Math.max(Number(e.s) || 0, startHour * 3600);
+      const en = Math.min(Number(e.en) || 0, endHour * 3600);
+      if (en <= s) return;
+      for (let i = 0; i < rowCount; i++) {
+        const rs = (startHour + i) * 3600;
+        const re = rs + 3600;
+        const overlap = Math.min(en, re) - Math.max(s, rs);
+        if (overlap <= 0) continue;
+        covered[i] += overlap;
+        // 条目只归属到「起点落在本小时」的行，跨行条目不会被重复计数
+        if (s >= rs && s < re) {
+          counts[i] += 1;
+          textLens[i] += e.entry && e.entry.text ? String(e.entry.text).length : 0;
+        }
+      }
+    });
+
+    const mins = [];
+    const desires = [];
+    const maxes = [];
+    for (let i = 0; i < rowCount; i++) {
+      if (covered[i] <= 0) {
+        // 空档行：下限 = 理想 = 目标高度，不参与富余瓜分，才能真正被压扁
+        mins.push(ELASTIC_MIN_EMPTY_ROW);
+        desires.push(ELASTIC_MIN_EMPTY_ROW);
+        maxes.push(ELASTIC_MIN_EMPTY_ROW);
+      } else {
+        const cov = Math.min(1, covered[i] / 3600);
+        const extraItems = Math.min(3, Math.max(0, counts[i] - 1));
+        const textBoost = Math.min(1, textLens[i] / 48);
+        const base = Math.max(ELASTIC_MIN_CONTENT_ROW, slotHeight * 0.55);
+        const desire = Math.max(base, slotHeight * (1 + cov * 0.65 + extraItems * 0.18 + textBoost * 0.3));
+        mins.push(base);
+        desires.push(desire);
+        // 上限：随内容量浮动（相对放大），否则撞上固定封顶后「条目多就更高」会失效；
+        // 再叠加一个绝对封顶，避免只有一条记录时块胖得离谱
+        maxes.push(Math.min(desire * ELASTIC_MAX_GROWTH, slotHeight * ELASTIC_HARD_CAP));
+      }
+    }
+
+    const sumMin = mins.reduce((a, b) => a + b, 0);
+    const sumDesire = desires.reduce((a, b) => a + b, 0);
+    const sumMax = maxes.reduce((a, b) => a + b, 0);
+    const EPS = 1e-9;
+
+    if (totalHeight <= sumMin + EPS) {
+      // 内容太满，连下限都放不下：整体等比压缩，总高依旧不变
+      const k = totalHeight / sumMin;
+      mins.forEach(v => heights.push(v * k));
+    } else if (totalHeight <= sumDesire + EPS) {
+      // 常规情形一：min 与 desire 之间线性插值，解出水位数 λ
+      const lambda = (totalHeight - sumMin) / Math.max(EPS, sumDesire - sumMin);
+      for (let i = 0; i < rowCount; i++) heights.push(mins[i] + (desires[i] - mins[i]) * lambda);
+    } else if (totalHeight <= sumMax + EPS && sumMax - sumDesire > EPS) {
+      // 常规情形二：先满足各自理想高度，再把富余优先喂给有内容的行（直到上限）
+      const lambda = (totalHeight - sumDesire) / Math.max(EPS, sumMax - sumDesire);
+      for (let i = 0; i < rowCount; i++) heights.push(desires[i] + (maxes[i] - desires[i]) * lambda);
+    } else {
+      // 内容很少：内容行已到上限，剩下的空间只能均分（此时整体趋近等距）
+      const extra = (totalHeight - Math.max(sumMax, sumDesire)) / rowCount;
+      for (let i = 0; i < rowCount; i++) heights.push(Math.max(maxes[i], desires[i]) + extra);
+    }
+  }
+
+  const bounds = [0];
+  for (let i = 0; i < rowCount; i++) bounds.push(bounds[i] + heights[i]);
+  // 收口浮点累积误差，保证最后一行正好落在轴底
+  heights[rowCount - 1] += totalHeight - bounds[rowCount];
+  bounds[rowCount] = totalHeight;
+
+  const dayStartSec = startHour * 3600;
+  const dayEndSec = endHour * 3600;
+
+  const yOf = (sec) => {
+    const rel = Math.max(0, Math.min(rowCount, ((Number(sec) || 0) - dayStartSec) / 3600));
+    const i = Math.min(rowCount - 1, Math.floor(rel));
+    return top + bounds[i] + (rel - i) * heights[i];
+  };
+
+  const secOf = (y) => {
+    const rel = Math.max(0, Math.min(totalHeight, (Number(y) || 0) - top));
+    let lo = 0;
+    let hi = rowCount - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rel < bounds[mid + 1]) hi = mid;
+      else lo = mid + 1;
+    }
+    const frac = heights[lo] > 0 ? (rel - bounds[lo]) / heights[lo] : 0;
+    return dayStartSec + (lo + frac) * 3600;
+  };
+
+  return {
+    yOf, secOf, top, totalHeight, rowCount, heights, bounds,
+    startHour, endHour, dayStartSec, dayEndSec,
+    elastic: !!elastic
+  };
 }
 
 // ============================================================================
@@ -1094,6 +1227,7 @@ class TimenoteView extends ItemView {
     this.stopNowClock();
     this.nowLineEl = null;
     this.nowLabelEl = null;
+    this.currentTimeScale = null;
     if (this.getLayoutMode() === "compact") {
       return this.renderCompactGrid(container, days);
     }
@@ -1397,6 +1531,29 @@ class TimenoteView extends ItemView {
     const dayEndSec = endHour * 3600;
     const totalHeight = Math.max(slotHeight, (endHour - startHour) * slotHeight);
 
+    // 时间轴：弹性模式按每小时的记录量重新分配行高，总高不变（DEC-012）
+    // 所有「秒 ↔ 像素」换算一律经 scale，禁止再手写 (sec - dayStart)/3600*slotHeight
+    const elastic = this.plugin.settings.elasticTimeline !== false;
+    const collectTimed = () => {
+      const out = [];
+      days.forEach(d => {
+        const ds = d.format("YYYY-MM-DD");
+        this.filterEntries(this.entriesMap.get(ds) || [])
+          .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec)
+          .forEach(e => {
+            const s = Math.max(dayStartSec, e.startSeconds || 0);
+            const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
+            out.push({ entry: e, s, en: Math.min(dayEndSec, Math.max(s + 60, rawEnd)) });
+          });
+      });
+      return out;
+    };
+    const scale = buildTimeScale({
+      startHour, endHour, slotHeight, top: BLOCK_TOP_GUTTER,
+      entries: elastic ? collectTimed() : [], elastic
+    });
+    this.currentTimeScale = scale;
+
     // 全天区与时间网格之间的可拖拽分隔条
     const resizer = wrapper.createEl("div", {
       cls: "timenote-header-resizer",
@@ -1406,7 +1563,9 @@ class TimenoteView extends ItemView {
 
     const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
     scrollArea.onscroll = () => this.hideHoverTooltip();
-    const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container timenote-block-columns" });
+    const colsContainer = scrollArea.createEl("div", {
+      cls: `timenote-columns-container timenote-block-columns ${elastic ? "is-elastic" : ""}`
+    });
     colsContainer.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
 
     const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
@@ -1415,7 +1574,10 @@ class TimenoteView extends ItemView {
         cls: "timenote-block-ruler-label",
         text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
       });
-      label.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
+      label.style.top = `${scale.yOf(h * 3600)}px`;
+      // 被压扁的空档行：标签缩小淡化，避免一行行糊在一起
+      const rowH = scale.heights[Math.min(scale.rowCount - 1, h - startHour)];
+      if (scale.elastic && rowH < slotHeight * 0.5) label.addClass("is-dense");
     }
 
     days.forEach(d => {
@@ -1428,7 +1590,7 @@ class TimenoteView extends ItemView {
 
       for (let h = startHour; h <= endHour; h++) {
         const line = col.createEl("div", { cls: "timenote-block-hour-line" });
-        line.style.top = `${BLOCK_TOP_GUTTER + (h - startHour) * slotHeight}px`;
+        line.style.top = `${scale.yOf(h * 3600)}px`;
       }
 
       // 空白槽：按住拖动选择时间范围创建（TaskNotes 手感）；单击仍按默认时长预填
@@ -1436,7 +1598,7 @@ class TimenoteView extends ItemView {
       slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
       slotLayer.style.height = `${totalHeight}px`;
       slotLayer.style.bottom = "auto";
-      this.attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight);
+      this.attachSlotDrag(col, slotLayer, dateStr, scale);
 
       const timed = this.filterEntries(this.entriesMap.get(dateStr) || [])
         .filter(e => e.hasTime && (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
@@ -1445,8 +1607,8 @@ class TimenoteView extends ItemView {
       clusters.forEach(cluster => {
         cluster.items.forEach(it => {
           const e = it.entry;
-          const top = BLOCK_TOP_GUTTER + ((it.s - dayStartSec) / 3600) * slotHeight;
-          const height = Math.max(22, ((it.en - it.s) / 3600) * slotHeight);
+          const top = scale.yOf(it.s);
+          const height = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
             cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
@@ -1455,6 +1617,9 @@ class TimenoteView extends ItemView {
           block.style.height = `${height}px`;
           block.style.left = `${it.lane * widthPct}%`;
           block.style.width = `calc(${widthPct}% - 6px)`;
+          // 弹性轴下块高可能很矮：按可用高度收起次要信息，别让文字挤成一团
+          if (height < 34) block.addClass("is-dense");
+          if (height < 24) block.addClass("is-tiny");
 
           const title = block.createEl("div", { cls: "timenote-event-block-title" });
           if (e.isTask) {
@@ -1486,7 +1651,7 @@ class TimenoteView extends ItemView {
           }
 
           // 上下边缘拖动改起止、中部拖动整体平移（TaskNotes 手感）
-          this.attachBlockDrag(block, e, meta, dayStartSec, dayEndSec, slotHeight);
+          this.attachBlockDrag(block, e, meta, scale);
 
           block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
           block.onmouseleave = () => this.hideHoverTooltip();
@@ -1522,11 +1687,13 @@ class TimenoteView extends ItemView {
   // ==========================================================================
   // Drag Interactions（拖拽创建 / 调节范围 / 全天区高度）
   // ==========================================================================
-  attachSlotDrag(col, slotLayer, dateStr, dayStartSec, dayEndSec, slotHeight) {
+  attachSlotDrag(col, slotLayer, dateStr, scale) {
+    const dayStartSec = scale.dayStartSec;
+    const dayEndSec = scale.dayEndSec;
+    // 指针 y -> 秒：弹性轴下必须走 scale 反函数，否则压缩区会被算成错误时刻
     const secAt = (clientY) => {
       const rect = col.getBoundingClientRect();
-      const y = Math.max(0, clientY - rect.top - BLOCK_TOP_GUTTER);
-      return dayStartSec + (y / slotHeight) * 3600;
+      return scale.secOf(clientY - rect.top);
     };
 
     slotLayer.onpointerdown = (ev: PointerEvent) => {
@@ -1546,8 +1713,8 @@ class TimenoteView extends ItemView {
         s = Math.max(dayStartSec, Math.min(s, dayEndSec - MIN_BLOCK_SECONDS));
         en = Math.min(dayEndSec, Math.max(en, s + MIN_BLOCK_SECONDS));
         if (!ghost) ghost = col.createEl("div", { cls: "timenote-block-ghost" });
-        ghost.style.top = `${BLOCK_TOP_GUTTER + ((s - dayStartSec) / 3600) * slotHeight}px`;
-        ghost.style.height = `${Math.max(16, ((en - s) / 3600) * slotHeight)}px`;
+        ghost.style.top = `${scale.yOf(s)}px`;
+        ghost.style.height = `${Math.max(16, scale.yOf(en) - scale.yOf(s))}px`;
         ghost.dataset.start = String(s);
         ghost.dataset.end = String(en);
         ghost.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} · ${formatDuration(en - s)}`;
@@ -1583,15 +1750,20 @@ class TimenoteView extends ItemView {
     ).open();
   }
 
-  attachBlockDrag(block, entry, meta, dayStartSec, dayEndSec, slotHeight) {
+  attachBlockDrag(block, entry, meta, scale) {
     // 视觉把手（不拦截事件，命中区按 offsetY 判定）
     block.createEl("div", { cls: "timenote-block-edge is-top" });
     block.createEl("div", { cls: "timenote-block-edge is-bottom" });
 
     // 跨出可见时间轴范围的记录不参与拖拽，避免把隐藏部分裁掉
-    if (entry.startSeconds < dayStartSec || entry.endSeconds > dayEndSec) return;
+    if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
 
-    const pxToSec = (px) => (px / slotHeight) * 3600;
+    // 位移 -> 时间增量：弹性轴的斜率逐行不同，用「原位置 + dy」查反函数比
+    // 直接 dy/slotHeight 更准；上边缘用起点基准、下边缘用终点基准，手感才不会跳
+    const origStart = Number(entry.startSeconds) || 0;
+    const origEnd = Number(entry.endSeconds) || origStart + 1800;
+    const baseStartY = scale.yOf(origStart);
+    const baseEndY = scale.yOf(origEnd);
 
     block.onpointerdown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
@@ -1606,15 +1778,14 @@ class TimenoteView extends ItemView {
       else if (!compact && rect.height - offsetY <= 8) mode = "end";
 
       const startY = ev.clientY;
-      const origStart = Number(entry.startSeconds) || 0;
-      const origEnd = Number(entry.endSeconds) || origStart + 1800;
       let moved = false;
       let curStart = origStart;
       let curEnd = origEnd;
 
       const paint = () => {
-        block.style.top = `${BLOCK_TOP_GUTTER + ((curStart - dayStartSec) / 3600) * slotHeight}px`;
-        block.style.height = `${Math.max(22, ((curEnd - curStart) / 3600) * slotHeight)}px`;
+        const top = scale.yOf(curStart);
+        block.style.top = `${top}px`;
+        block.style.height = `${Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top)}px`;
         meta.textContent = `${formatSecondsToTime(curStart)} - ${formatSecondsToTime(curEnd)} · ${formatDuration(curEnd - curStart)}`;
       };
 
@@ -1626,16 +1797,17 @@ class TimenoteView extends ItemView {
           block.addClass("is-dragging");
           this.hideHoverTooltip();
         }
-        const delta = snapSeconds(pxToSec(dy));
+        const deltaStart = snapSeconds(scale.secOf(baseStartY + dy) - origStart);
+        const deltaEnd = snapSeconds(scale.secOf(baseEndY + dy) - origEnd);
         if (mode === "move") {
           const dur = origEnd - origStart;
-          curStart = Math.max(0, Math.min(86400 - dur, origStart + delta));
+          curStart = Math.max(0, Math.min(86400 - dur, origStart + deltaStart));
           curEnd = curStart + dur;
         } else if (mode === "start") {
-          curStart = Math.max(0, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + delta));
+          curStart = Math.max(0, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + deltaStart));
           curEnd = origEnd;
         } else {
-          curEnd = Math.min(86400, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + delta));
+          curEnd = Math.min(86400, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + deltaEnd));
           curStart = origStart;
         }
         paint();
@@ -1728,8 +1900,9 @@ class TimenoteView extends ItemView {
     const el = this.nowLineEl;
     if (!el || !el.isConnected) return;
     const now = window.moment();
-    const startHour = Number(this.plugin.settings.startHour ?? 0);
-    const endHour = Number(this.plugin.settings.endHour ?? 24);
+    const scale = this.currentTimeScale;
+    const startHour = scale ? scale.startHour : Number(this.plugin.settings.startHour ?? 0);
+    const endHour = scale ? scale.endHour : Number(this.plugin.settings.endHour ?? 24);
     const slotHeight = Number(this.plugin.settings.slotHeight ?? 52);
     const startSec = startHour * 3600;
     const endSec = endHour * 3600;
@@ -1739,7 +1912,9 @@ class TimenoteView extends ItemView {
       return;
     }
     el.style.display = "";
-    el.style.top = `${BLOCK_TOP_GUTTER + ((nowSec - startSec) / 3600) * slotHeight}px`;
+    el.style.top = scale
+      ? `${scale.yOf(nowSec)}px`
+      : `${BLOCK_TOP_GUTTER + ((nowSec - startSec) / 3600) * slotHeight}px`;
     if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
   }
 
@@ -2487,6 +2662,18 @@ class TimenoteSettingTab extends PluginSettingTab {
             this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
               .forEach(leaf => (leaf.view as TimenoteView).renderView());
           }, 150);
+        }));
+
+    new Setting(containerEl)
+      .setName("自适应槽高（弹性时间轴）")
+      .setDesc("有记录的小时按内容量撑高、空档小时自动压扁，轴总高度保持不变，一屏同时兼顾内容显示与全天概览。关闭则回到每小时等距的传统时间轴。")
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.elasticTimeline !== false)
+        .onChange(async (val) => {
+          this.plugin.settings.elasticTimeline = val;
+          await this.plugin.saveSettings();
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+            .forEach(leaf => (leaf.view as TimenoteView).renderView());
         }));
 
     new Setting(containerEl)
