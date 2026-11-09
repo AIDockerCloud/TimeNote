@@ -5,6 +5,9 @@ data.json
 # 依赖与构建产物
 node_modules/
 *.js.map
+
+# 发布包（npm run pack / dist → timenote-<version>.zip，由 Release 重新生成，不入库）
+dist/
 # 注意：main.js 是 esbuild 产物，但必须入库以支持零构建安装，故不忽略
 
 # 桌面环境回收站目录（非项目文件，勿提交）

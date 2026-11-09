@@ -25,6 +25,7 @@
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
 - `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.7）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=0` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 11:55 复核；此前记的 `startHour=6` 已过时）；改默认值不会影响它。
 - **版本号规则（DEC-010）**：**每次提交 patch +1**（`1.0.1` → `1.0.2`），用 `npm run bump` 自动同步 `manifest.json` / `package.json` / `versions.json`（后者为版本→`minAppVersion` 映射，社区发布必需）。bump 后必须 `npm run build` 再提交；`versions.json` 已被 Obsidian 校验，勿手改单处。
+- **快速记录插入标题（DEC-020）**：设置项 `quickAddSection` 默认 `"## 灵感闪念"`，值本身就是 Markdown 标题 —— 写 `### 随手记` 即三级标题。模块级纯函数 `parseQuickAddSection()`（`SECTION_HEADING_BEGIN/END` 区块）解析出 `{level,title,heading}`，1–6 级夹取、无 `#` 按二级兼容旧 `data.json`；`sectionHeaderRegex(title)` 按标题名匹配任意层级的标题行。四处调用：`DailyNoteService.addEntry`（新建用 `heading`、已有日记逐行找同名标题插在其下，找不到才追加）、`openDailyNoteForDate`（新建日记）、`parseDailyFile` 的 `memoTitle` 随手记区判定、设置页 UI。**已有日记沿用原有层级**，不按配置重建标题，避免同一天出现两个同名不同层级的节。
 
 ## 常用命令
 - 安装依赖：`npm install`（首次 / 更新 lock 后）。
@@ -32,6 +33,8 @@
 - 校验：`npm run typecheck`、`npm run check`（类型检查 + PCMP 合规）、`node --check main.js`、`python3 scripts/pcmp_index.py --check`。
 - 本地部署（真机 vault）：`/home/inverstar/文档/Time/.obsidian/plugins/timenote/`，只需覆盖 `manifest.json` + `main.js` + `styles.css`（README 可一并覆盖）。**Obsidian 要求文件夹名 == `manifest.id`**，故该目录必须是 `timenote/`，且 `.obsidian/community-plugins.json` 里要列 `"timenote"`（旧值是 `"time-notes"`，改 id 时务必一起换，否则插件不加载）。该 vault 自 2026-11-09 起**已有** `data.json`（用户设置，部署时勿覆盖；只有再改插件 id 才需迁移）；覆盖前把旧文件备份到 `~/tmp/`。
 - 版本递增：`npm run bump`（自动 +0.0.1，也可 `npm run bump -- 1.2.0` 指定），随后 `npm run build`。
+- 发布打包：`npm run pack` → `dist/timenote-<version>.zip`（zip 根目录即三件套，**不套目录**；纯 Node 实现，不依赖系统 `zip`）；`npm run dist` = build + pack。`dist/` 已 gitignore，产物不入库。
+- 发版：`git tag -s v<version> -m "v<version>"` + `git push origin v<version>` → GitHub Actions（`.github/workflows/release.yml`）自动 `npm ci` / build / pack，并把三件套 + zip 挂到 Release；tag 与 `manifest.json` 版本不一致会直接失败。
 - 开发脚本（都在 `scripts/dev/`，需要先 `npm run build`，测的是产物里的真实实现）：
   - `npm run test:timeline` —— 弹性时间轴数学与分配 33 项断言（单调、互逆、空档压缩、内容单调、视口封顶、等距回退等）。
   - `npm run preview:timeline` —— 生成静态对比预览到 `scripts/dev/out/timeline-preview.html`（等距 vs 弹性）；加 `-- --compare=clip` 换成「块被截短 vs 块铺满跨度」。
@@ -43,7 +46,8 @@
   - `npm run test:open` —— 16 项日期标题跳转断言（DEC-017：统一入口、三种周期共用渲染器、两张表标题都接到入口、不再切日视图、时间线链接同效、产物与 CSS）。
   - `npm run test:points` —— 57 项时间点线断言（DEC-018：解析判定、15 分钟分簇堆叠、弹性轴 `pointNeeds` 与映射互逆、只改时刻不生成范围的行内回写、点拖拽无边缘模式 / 无把手、样式与产物）。
   - `npm run preview:points` —— 生成 `scripts/dev/out/point-lines.html` / `point-lines-dark.html`：真实 DOM + 真实 `styles.css`，第 1 天信息线下、第 2 天 `.is-above` 线上对照、第 3 天只读 / 已完成态；底部探针核对每条线 top 与刻度 y 偏差、横线颜色、同簇 20px 堆叠。
-  - `npm test` —— 上面六套测试一起跑（33+23+20+25+16+57 = 174 项）。
+  - `npm run test:section` —— 44 项插入标题断言（DEC-020：`##`/`###` 层级解析、旧纯文本配置兼容、标题行精确匹配、addEntry 假 vault 端到端插入 / 新建日记、四处调用点无写死二级）。
+  - `npm test` —— 上面七套测试一起跑（33+23+20+25+16+57+44 = 218 项）。
   - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed` / `layoutPointLines` / `isPointEntry`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；回写测试则直接从 `main.ts` 抽方法源码。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
@@ -67,3 +71,5 @@
 16. **日期标题点击 = 打开当天日记（DEC-017）**：日 / 3天 / 周视图里 `ALL DAY` 行上方的 `.timenote-day-title-row`（块布局与紧凑流两处）和时间线视图的「打开日记 ↗」都必须调用 `openDailyNoteForDate(dateStr)`；**禁止**改回「切到日视图」。该 helper 先清 5 秒索引缓存再 `findDailyNoteFile`，不存在时按 `<periodicNotesFolder>/YYYY/Daily/MM/YYYY-MM-DD.md` 逐级建目录并创建（`# 日期` + `## quickAddSection`），写回索引 + Notice，最后 `getLeaf(false).openFile`。下钻日视图仍由顶部「日」标签提供；月 / 季 / 年的日期格保持原下钻行为，未纳入本决策。
 17. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
 18. **时间点不是时间块（DEC-018）**：`isPointEntry()` 为真的记录在块布局里只能画 `.timenote-point-line`，禁止交给 `layoutTimeBlockClusters` / 画成 `.timenote-event-block` / 补复选框 / 补虚构 30m；点线拖拽禁止出现边缘命中区、`blockEdgeHit`、start/end 模式或任何把手 DOM，也禁止复用 `updateEntryTime`（会把单时间行改写成范围行）——必须走 `updateEntryPointTime`。判定只看 `hasTime && !isRange`：显式范围与「单时间 + 时长标签」仍是块，不得一并改成线。
+19. **发版只认 tag（DEC-019）**：Release 一律由 `v*` tag 触发 `.github/workflows/release.yml` 生成，tag 去 `v` 必须等于 `manifest.json` 的 `version`（workflow 会硬校验），**禁止**手工 `gh release create` / 网页上传临时产物绕过。打 zip 只走 `scripts/pack.mjs`（`npm run pack`）：zip **根目录**放 `manifest.json` / `main.js` / `styles.css`，不套文件夹、不带 README / 源码；`dist/` 不入库。
+20. **插入标题层级不许写死（DEC-020）**：禁止再出现 `` `## ${...quickAddSection}` `` 或任何硬编码二级的拼接；新增/修改插入点一律经 `parseQuickAddSection()`，匹配已有标题一律经 `sectionHeaderRegex(title)` 按标题名逐行匹配（**不许**退回 `fileText.includes(sectionHeader)` 子串匹配）。纯函数改动必须同步 `scripts/dev/test-quick-add-section.mjs` 的 `SECTION_HEADING` 区块切片标记。

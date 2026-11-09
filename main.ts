@@ -32,7 +32,8 @@ const DEFAULT_SETTINGS = {
   slotHeight: 52,
   firstDayOfWeek: 1, // 1: Monday, 0: Sunday
   parseAllBullets: true,
-  quickAddSection: "灵感闪念",
+  // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
+  quickAddSection: "## 灵感闪念",
   layoutMode: "block",
   defaultDuration: 60,
   allDayHeight: 36,
@@ -443,6 +444,31 @@ function layoutPointLines(entries, dayStartSec, dayEndSec) {
 }
 // --- POINT_LINE_END ---
 
+// --- SECTION_HEADING_BEGIN ---
+// 快速记录默认插入标题允许自带层级：设置里写 "## 灵感闪念" / "### 随手记"
+// 就用二级 / 三级标题；写纯文本（旧 data.json 里的值）时按二级标题兼容。
+// 两个纯函数供下面各处与 scripts/dev/test-quick-add-section.mjs 共用。
+function parseQuickAddSection(raw) {
+  const FALLBACK_TITLE = "灵感闪念";
+  const text = String(raw == null ? "" : raw).trim();
+  let level = 2;
+  let title = text;
+  const m = /^(#+)\s*(.*)$/.exec(text);
+  if (m) {
+    level = Math.min(m[1].length, 6); // Markdown 标题最多 6 级
+    title = (m[2] || "").trim();
+  }
+  // ATX 标题也允许行尾闭合井号，如 "## 灵感闪念 ##"
+  title = title.replace(/\s+#+\s*$/, "").trim() || FALLBACK_TITLE;
+  return { level, title, heading: `${"#".repeat(level)} ${title}` };
+}
+
+function sectionHeaderRegex(title) {
+  const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
+}
+// --- SECTION_HEADING_END ---
+
 // ============================================================================
 // Parser & Data Engine
 // ============================================================================
@@ -636,6 +662,8 @@ class DailyNoteService {
     const entries = [];
     let currentParent = null;
     let currentSection = "";
+    // 自定义标题也要能被识别为「随手记区」；旧的关键词启发式保留，兼容已有日记
+    const memoTitle = parseQuickAddSection(this.settings.quickAddSection).title;
 
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i];
@@ -649,7 +677,7 @@ class DailyNoteService {
 
       // Track section headings (e.g. ## 灵感闪念, ## 任务计划)
       if (trimmed.startsWith("#")) {
-        currentSection = trimmed.replace(/^#+\s*/, '').trim();
+        currentSection = trimmed.replace(/^#+\s*/, '').replace(/\s+#+\s*$/, '').trim();
         currentParent = null;
         continue;
       }
@@ -669,7 +697,9 @@ class DailyNoteService {
       }
 
       // Top-level main item
-      const inMemoSection = currentSection.includes("灵感") || currentSection.includes("闪念") || currentSection.includes("Inspirations") || currentSection.includes("Memos");
+      const inMemoSection = currentSection === memoTitle ||
+        currentSection.includes("灵感") || currentSection.includes("闪念") ||
+        currentSection.includes("Inspirations") || currentSection.includes("Memos");
       const entry = parseLine(rawLine, i + 1, dateStr, file.path, inMemoSection);
       if (entry) {
         entries.push(entry);
@@ -881,6 +911,9 @@ class DailyNoteService {
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : '';
     const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    // 层级与标题都来自设置，不再写死 "## "
+    const section = parseQuickAddSection(this.settings.quickAddSection);
+    const headerRe = sectionHeaderRegex(section.title);
 
     if (!file) {
       const m = window.moment(dateStr);
@@ -898,16 +931,20 @@ class DailyNoteService {
       }
 
       const newPath = `${targetFolder}/${dateStr}.md`;
-      const initialText = `# ${dateStr}\n\n## ${this.settings.quickAddSection}\n${newLine}\n`;
+      const initialText = `# ${dateStr}\n\n${section.heading}\n${newLine}\n`;
       file = await this.app.vault.create(newPath, initialText);
       this.dailyNoteIndex.set(dateStr, file);
     } else {
       let fileText = await this.app.vault.read(file);
-      const sectionHeader = `## ${this.settings.quickAddSection}`;
-      if (fileText.includes(sectionHeader)) {
-        fileText = fileText.replace(sectionHeader, `${sectionHeader}\n${newLine}`);
+      const lines = fileText.split('\n');
+      // 已有同名标题（任意层级）就插在它下面、不新建重复标题；
+      // 完全没有才按配置层级在文末追加一节。逐行精确匹配，避免正文里的同名文字误命中。
+      const headerIdx = lines.findIndex(l => headerRe.test(l));
+      if (headerIdx >= 0) {
+        lines.splice(headerIdx + 1, 0, newLine);
+        fileText = lines.join('\n');
       } else {
-        fileText = fileText.trimEnd() + `\n\n${sectionHeader}\n${newLine}\n`;
+        fileText = fileText.trimEnd() + `\n\n${section.heading}\n${newLine}\n`;
       }
       await this.app.vault.modify(file, fileText);
     }
@@ -2852,7 +2889,8 @@ class TimenoteView extends ItemView {
         }
       }
       const notePath = normalizePath(`${folder}/${dateStr}.md`);
-      file = await this.app.vault.create(notePath, `# ${dateStr}\n\n## ${this.plugin.settings.quickAddSection}\n`);
+      const heading = parseQuickAddSection(this.plugin.settings.quickAddSection).heading;
+      file = await this.app.vault.create(notePath, `# ${dateStr}\n\n${heading}\n`);
       svc.dailyNoteIndex.set(dateStr, file);
       new Notice(`已创建并打开 ${dateStr} 日记`);
     }
@@ -3181,12 +3219,12 @@ class TimenoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("快速记录默认插入标题")
-      .setDesc("快捷记录添加新条目时，日记中默认追加在哪个二级标题下方。")
+      .setDesc("写带 # 的标题即可同时指定层级与标题，如「## 灵感闪念」或「### 随手记」；不写 # 时按二级标题处理。已有日记里存在同名标题（任意层级）时沿用那一节，不会重复建标题。")
       .addText(text => text
-        .setPlaceholder("灵感闪念")
+        .setPlaceholder("## 灵感闪念")
         .setValue(this.plugin.settings.quickAddSection)
         .onChange(async (val) => {
-          this.plugin.settings.quickAddSection = val.trim() || "灵感闪念";
+          this.plugin.settings.quickAddSection = val.trim() || DEFAULT_SETTINGS.quickAddSection;
           await this.plugin.saveSettings();
         }));
   }

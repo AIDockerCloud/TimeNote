@@ -47,7 +47,7 @@
 
 ## 🚀 快速上手
 
-1. **安装**：将 `manifest.json`、`main.js`、`styles.css` 放入 `<vault>/.obsidian/plugins/timenote/`，重启 Obsidian 并在「社区插件」中启用 **TimeNote**。
+1. **安装**：从 [Releases](https://github.com/AIDockerCloud/TimeNote/releases) 下载最新的 `timenote-<version>.zip`，解压到 `<vault>/.obsidian/plugins/timenote/`（zip 根目录就是三件套，不要再套一层文件夹）；也可以手动把 `manifest.json`、`main.js`、`styles.css` 放进去。重启 Obsidian 并在「社区插件」中启用 **TimeNote**。
 2. 在 Obsidian 左侧功能区点击时钟日历图标 `calendar-clock`，或在命令面板输入：
    `TimeNote: 打开时间笔记日历视图`
 3. 在插件设置中可配置：
@@ -55,6 +55,7 @@
    - 是否聚合展示 `Blinko` 微闪念；
    - 默认视图模式、时间轴起止时间（默认 00:00 - 24:00 全天，可按作息收窄，如 06:00 - 24:00）、一周起始日等；
    - 时间网格布局（块布局 / 紧凑流）、新建时间块默认时长、每小时槽高（默认 52px，也是自适应轴的行高基准）、自适应时间轴开关、ALL DAY 行高度（默认 36px）。
+   - **快速记录默认插入标题**：直接写带 `#` 的标题，如 `## 灵感闪念` 或 `### 随手记`，即可同时指定层级与标题名（不写 `#` 时按二级处理）。新建日记按该层级建节；已有日记里若存在同名标题（任意层级）就沿用那一节，不会重复建标题。旧配置里的纯文本值（如 `灵感闪念`）自动按 `## 灵感闪念` 兼容。
 
 ---
 
@@ -121,6 +122,15 @@ npm run build         # 产物 main.js 必须一起重建
 
 `versions.json` 记录 版本 → `minAppVersion` 映射，是社区插件发布的必需文件。
 
+**发版靠 tag**：构建、打包、建 Release 全部由 GitHub Actions（`.github/workflows/release.yml`）完成。
+
+```bash
+git tag -s v1.0.8 -m "v1.0.8"
+git push origin v1.0.8
+```
+
+tag 名去掉 `v` 必须与 `manifest.json` 的 `version` 完全一致，否则 workflow 直接失败（防版本漂移）。Release 产物 = `manifest.json` + `main.js` + `styles.css` + `timenote-<version>.zip`；zip 内不套目录，可直接解压进插件目录或交给 BRAT。
+
 ---
 
 ## 🛠 本地开发
@@ -133,6 +143,8 @@ npm run dev        # watch 模式，改动 main.ts 自动重建 main.js
 npm run build      # tsc 类型检查 + 生产构建
 npm run typecheck  # 仅类型检查
 npm run check      # 类型检查 + PCMP 合规校验
+npm run pack       # 打包三件套 → dist/timenote-<version>.zip（不构建，先 build）
+npm run dist       # build + pack 一步到位
 ```
 
 构建链：TypeScript 7 + esbuild 0.28（CJS / browser，`obsidian` 保持 external，产物不压缩便于审阅）。改完代码先 `npm run build`，确保 `main.js` 与 `main.ts` 同步再提交。

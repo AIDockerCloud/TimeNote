@@ -39,7 +39,8 @@ var DEFAULT_SETTINGS = {
   firstDayOfWeek: 1,
   // 1: Monday, 0: Sunday
   parseAllBullets: true,
-  quickAddSection: "\u7075\u611F\u95EA\u5FF5",
+  // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
+  quickAddSection: "## \u7075\u611F\u95EA\u5FF5",
   layoutMode: "block",
   defaultDuration: 60,
   allDayHeight: 36,
@@ -367,6 +368,23 @@ function layoutPointLines(entries, dayStartSec, dayEndSec) {
   });
   return out;
 }
+function parseQuickAddSection(raw) {
+  const FALLBACK_TITLE = "\u7075\u611F\u95EA\u5FF5";
+  const text = String(raw == null ? "" : raw).trim();
+  let level = 2;
+  let title = text;
+  const m = /^(#+)\s*(.*)$/.exec(text);
+  if (m) {
+    level = Math.min(m[1].length, 6);
+    title = (m[2] || "").trim();
+  }
+  title = title.replace(/\s+#+\s*$/, "").trim() || FALLBACK_TITLE;
+  return { level, title, heading: `${"#".repeat(level)} ${title}` };
+}
+function sectionHeaderRegex(title) {
+  const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
+}
 function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("---") || trimmed.startsWith("```")) {
@@ -517,6 +535,7 @@ var DailyNoteService = class {
     const entries = [];
     let currentParent = null;
     let currentSection = "";
+    const memoTitle = parseQuickAddSection(this.settings.quickAddSection).title;
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i];
       const trimmed = rawLine.trim();
@@ -525,7 +544,7 @@ var DailyNoteService = class {
         continue;
       }
       if (trimmed.startsWith("#")) {
-        currentSection = trimmed.replace(/^#+\s*/, "").trim();
+        currentSection = trimmed.replace(/^#+\s*/, "").replace(/\s+#+\s*$/, "").trim();
         currentParent = null;
         continue;
       }
@@ -539,7 +558,7 @@ var DailyNoteService = class {
         }
         continue;
       }
-      const inMemoSection = currentSection.includes("\u7075\u611F") || currentSection.includes("\u95EA\u5FF5") || currentSection.includes("Inspirations") || currentSection.includes("Memos");
+      const inMemoSection = currentSection === memoTitle || currentSection.includes("\u7075\u611F") || currentSection.includes("\u95EA\u5FF5") || currentSection.includes("Inspirations") || currentSection.includes("Memos");
       const entry = parseLine(rawLine, i + 1, dateStr, file.path, inMemoSection);
       if (entry) {
         entries.push(entry);
@@ -715,6 +734,8 @@ var DailyNoteService = class {
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : "";
     const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const section = parseQuickAddSection(this.settings.quickAddSection);
+    const headerRe = sectionHeaderRegex(section.title);
     if (!file) {
       const m = window.moment(dateStr);
       const year = m.format("YYYY");
@@ -731,21 +752,22 @@ var DailyNoteService = class {
       const newPath = `${targetFolder}/${dateStr}.md`;
       const initialText = `# ${dateStr}
 
-## ${this.settings.quickAddSection}
+${section.heading}
 ${newLine}
 `;
       file = await this.app.vault.create(newPath, initialText);
       this.dailyNoteIndex.set(dateStr, file);
     } else {
       let fileText = await this.app.vault.read(file);
-      const sectionHeader = `## ${this.settings.quickAddSection}`;
-      if (fileText.includes(sectionHeader)) {
-        fileText = fileText.replace(sectionHeader, `${sectionHeader}
-${newLine}`);
+      const lines = fileText.split("\n");
+      const headerIdx = lines.findIndex((l) => headerRe.test(l));
+      if (headerIdx >= 0) {
+        lines.splice(headerIdx + 1, 0, newLine);
+        fileText = lines.join("\n");
       } else {
         fileText = fileText.trimEnd() + `
 
-${sectionHeader}
+${section.heading}
 ${newLine}
 `;
       }
@@ -2338,9 +2360,10 @@ var TimenoteView = class extends import_obsidian.ItemView {
         }
       }
       const notePath = (0, import_obsidian.normalizePath)(`${folder}/${dateStr}.md`);
+      const heading = parseQuickAddSection(this.plugin.settings.quickAddSection).heading;
       file = await this.app.vault.create(notePath, `# ${dateStr}
 
-## ${this.plugin.settings.quickAddSection}
+${heading}
 `);
       svc.dailyNoteIndex.set(dateStr, file);
       new import_obsidian.Notice(`\u5DF2\u521B\u5EFA\u5E76\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
@@ -2554,8 +2577,8 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.firstDayOfWeek = parseInt(val, 10);
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u5FEB\u901F\u8BB0\u5F55\u9ED8\u8BA4\u63D2\u5165\u6807\u9898").setDesc("\u5FEB\u6377\u8BB0\u5F55\u6DFB\u52A0\u65B0\u6761\u76EE\u65F6\uFF0C\u65E5\u8BB0\u4E2D\u9ED8\u8BA4\u8FFD\u52A0\u5728\u54EA\u4E2A\u4E8C\u7EA7\u6807\u9898\u4E0B\u65B9\u3002").addText((text) => text.setPlaceholder("\u7075\u611F\u95EA\u5FF5").setValue(this.plugin.settings.quickAddSection).onChange(async (val) => {
-      this.plugin.settings.quickAddSection = val.trim() || "\u7075\u611F\u95EA\u5FF5";
+    new import_obsidian.Setting(containerEl).setName("\u5FEB\u901F\u8BB0\u5F55\u9ED8\u8BA4\u63D2\u5165\u6807\u9898").setDesc("\u5199\u5E26 # \u7684\u6807\u9898\u5373\u53EF\u540C\u65F6\u6307\u5B9A\u5C42\u7EA7\u4E0E\u6807\u9898\uFF0C\u5982\u300C## \u7075\u611F\u95EA\u5FF5\u300D\u6216\u300C### \u968F\u624B\u8BB0\u300D\uFF1B\u4E0D\u5199 # \u65F6\u6309\u4E8C\u7EA7\u6807\u9898\u5904\u7406\u3002\u5DF2\u6709\u65E5\u8BB0\u91CC\u5B58\u5728\u540C\u540D\u6807\u9898\uFF08\u4EFB\u610F\u5C42\u7EA7\uFF09\u65F6\u6CBF\u7528\u90A3\u4E00\u8282\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u6807\u9898\u3002").addText((text) => text.setPlaceholder("## \u7075\u611F\u95EA\u5FF5").setValue(this.plugin.settings.quickAddSection).onChange(async (val) => {
+      this.plugin.settings.quickAddSection = val.trim() || DEFAULT_SETTINGS.quickAddSection;
       await this.plugin.saveSettings();
     }));
   }

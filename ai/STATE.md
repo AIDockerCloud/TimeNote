@@ -1,13 +1,13 @@
 ---
 pcmp_version: "2.2"
-revision: 23
+revision: 25
 updated: 2026-11-09
 ---
 
 # 项目当前状态与活动任务快照 (STATE.md — Lite)
 
 - **Last Updated**: 2026-11-09
-- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010）。**`feat/elastic-timeline` 的 1.0.1–1.0.5 五个签名提交已于 2026-11-09 快进合入 `main`（`5a2909a`），后续一律在 `main` 上推进**；当前版本 **1.0.7**（DEC-017 日期标题直接打开当天日记 + DEC-018 时间点线合并为一次提交），已 build / 174 项测试 / PCMP check 通过并部署真机 vault，**2026-11-09 14:2x 已在会话内完成签名提交并经 SSH 推送到 `origin/main`**，本地与远端同一 SHA。`origin` 为 `git@github.com:AIDockerCloud/TimeNote.git`（SSH）。DEC-018 时间点线把单时间点记录从 30 分钟任务块改成精确时刻的横线（线下信息、整条拖动只改时刻、无边缘拉伸）；三件套 + README 已备份后覆盖到真机 vault（备份 `~/tmp/timenote-backup-20261109-1245`，四个文件 md5 与仓库一致），待 reload 肉眼验收。仍无 LICENSE / 自动化测试。
+- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010）。**`feat/elastic-timeline` 的 1.0.1–1.0.5 五个签名提交已于 2026-11-09 快进合入 `main`（`5a2909a`），后续一律在 `main` 上推进**；当前版本 **1.0.7**（DEC-017 日期标题直接打开当天日记 + DEC-018 时间点线合并为一次提交），已 build / 174 项测试 / PCMP check 通过并部署真机 vault，**2026-11-09 14:2x 已在会话内完成签名提交并经 SSH 推送到 `origin/main`**，本地与远端同一 SHA。`origin` 为 `git@github.com:AIDockerCloud/TimeNote.git`（SSH）。DEC-018 时间点线把单时间点记录从 30 分钟任务块改成精确时刻的横线（线下信息、整条拖动只改时刻、无边缘拉伸）；三件套 + README 已备份后覆盖到真机 vault（备份 `~/tmp/timenote-backup-20261109-1245`，四个文件 md5 与仓库一致），待 reload 肉眼验收。仍无 LICENSE / 自动化测试。**发版链路已补（DEC-019）**：`.github/workflows/release.yml` 由 `v*` tag 触发 `npm ci` / build / `npm run pack`，把三件套 + `timenote-<version>.zip` 挂到 Release，并硬校验 tag 与 `manifest.json` 版本一致；`scripts/pack.mjs` 纯 Node 打 zip（根目录三件套、`dist/` 不入库）。版本已 `1.0.7 → 1.0.8`，本地 `dist/timenote-1.0.8.zip` 校验通过，**首次发版只差用户推 tag**（DEC-019）。**同批未提交的还有 DEC-020**：快速记录插入标题改由配置值指定层级与名称（`## 灵感闪念` / `### 随手记`），纯函数 + 四处调用点 + 44 项新测试已完成、`npm test` 218 项全过，版本维持 1.0.8 不重复 bump，`dist/timenote-1.0.8.zip` 已重打；三件套 + README 已备份后部署真机 vault（备份 `~/tmp/timenote-backup-20261109-1711`，四文件 md5 与仓库一致，`data.json` 未动、仍是旧纯文本 `灵感闪念`，正好验兼容），待 reload 验收。
 - **档位**：PCMP Lite（活动任务合并维护于此，无 `TASK.md` / `PLAN.md` / `sessions/`）。
 
 ---
@@ -81,7 +81,8 @@ updated: 2026-11-09
 - [事实][已收敛] 时间轴默认值差异已由 DEC-008 裁决：保留代码 `00:00-24:00`，**并补上设置页起止时间控件**（此前 README 宣称可调但 UI 不存在）；README 已同步为「默认 00:00 - 24:00，可按作息收窄」。`slotHeight` 已由 DEC-009 开成滑块（28–96px，默认 52）。
 - [事实][低] 当前时间线只画在块布局；默认 `00:00-24:00` + 52px 时线高约 1183px（22:47），**首屏之外需滚动才可见**；未实现「自动滚动到当前时间」（与「文件修改即重渲染」会互相打架，列为复审触发条件）。
 - [事实][低] 调 `slotHeight` 会重建网格并重置滚动位置（防抖后只重渲染一次）。
-- [事实][中] 缺 LICENSE、自动化测试，尚不满足社区插件发布要求（`versions.json` 已补，版本机制见 DEC-010）。
+- [事实][中] 缺 LICENSE、自动化测试，尚不满足社区插件发布要求（`versions.json` 已补，版本机制见 DEC-010；发布产物链路见 DEC-019）。
+- [事实][中] Release 从此只能由 `v*` tag 触发（DEC-019）：tag 去 `v` 必须等于 `manifest.json.version`，否则 workflow 直接失败；手工 `gh release create` 或网页传包属于违规路径，首次真跑尚未验证过 Actions 全链路（本地只验到 `npm run pack` 产出合法 zip）。
 - [事实][提醒] 本机若已有旧插件目录 `.../plugins/time-notes/`，需改名 `timenote/` 并迁移 `data.json`；项目根目录 `.Trash-0/`（系统回收站）已忽略，未做任何删除操作。
 
 ## 未决问题 (Open Questions)
@@ -91,6 +92,10 @@ updated: 2026-11-09
 - [未决] 是否实现 P2（拖拽创建与调整、月/季/年时长统计）？
 
 ## 下一步即时动作 (Immediate Next Action)
+- 用户侧（真机验收 DEC-020，优先于发版）：reload TimeNote 后到设置页把「快速记录默认插入标题」填 `### 随手记` → 点某个空白日期的标题新建日记，应看到 `# 日期` 下面是 `### 随手记`；再从 QuickAdd 加一条，应紧插在该标题下方、不出现第二个同名标题；把配置改回 `## 灵感闪念`，旧日记里仍沿用原来的三级节。旧 `data.json` 里若存的是纯文本 `灵感闪念`，应仍按二级工作。
+- 用户侧（发版，DEC-019）：1.0.8 的改动提交并推送后，打签名 tag 触发第一次 Release ——
+  `git tag -s v1.0.8 -m "v1.0.8"` → `git push origin v1.0.8`。
+  之后在 Actions 页面确认 `Release` 任务通过，Release 页应出现 4 个资产：`timenote-1.0.8.zip`、`manifest.json`、`main.js`、`styles.css`。若 `npm ci` 或 `gh release create` 报错，把日志贴回来。**tag 与 `manifest.json` 版本必须一致**，不一致会直接红。
 - 用户侧：① 在真机 Obsidian 里 reload TimeNote（设置 → 第三方插件 → 关闭再开启），核对**点 `ALL DAY` 上方日期标题能直接打开当天日记**（日 / 3天 / 周、块布局与紧凑流都试一下；空白日期会新建一篇空日记并 Notice），顺带复核同一天块色互异、`#color/blue` 指定色、列对齐与背景色；② 签名提交 + SSH 推送已于 2026-11-09 14:2x 由会话内完成，无需再跑 `~/tn-main-commit.sh`。真机 `data.json` 复核为 `0–24` 时 / `slotHeight=36` / `allDayHeight=32` / 自适应开（此前记的 `6–24` 已过时）；设置页「自适应时间轴」开关可 A/B 对比内容驱动 / 等距 36px。
 - 用户侧（DEC-018）：先看 `scripts/dev/out/point-lines.html`（浅）/ `point-lines-dark.html`（深）确认「信息在线下」是否合意 —— 第 2 天是 `.is-above` 线上对照；三件套已覆盖真机 vault，**在 Obsidian 里 reload TimeNote 即可**，检查写 `- 09:23 到公司` 只出现一条线、上下拖动后日记行仍是 `- 10:xx 到公司`（没有变成范围）、范围记录仍是块、Blinko 闪念不可拖。
 - 版号与提交：DEC-017 + DEC-018 **合并成一个签名提交、一个 patch 版号 1.0.7**（manifest / package / versions.json 上一轮已从 1.0.6 bump 到 1.0.7，本次不再重复 bump，避免 1.0.6 → 1.0.8 跳号）；2026-11-09 14:2x 会话内 `git commit -S` + `git push origin main` 成功，工作区干净。会话内签名能力已复测可用，详见「阻塞项」环境条目。

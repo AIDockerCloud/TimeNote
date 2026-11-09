@@ -1,0 +1,80 @@
+name: Release
+
+# 发布口径（AGENTS.md 红线 19）：
+#   只有推 `v*` tag 才发版。tag 名去掉 v 后必须与 manifest.json 的 version 完全一致，
+#   否则直接失败 —— 防止「tag 说 1.0.9、插件其实是 1.0.8」这类漂移。
+#   workflow_dispatch 只构建并上传 artifact（试跑用），不建 Release。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check tag matches manifest.version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(node -p "require('./manifest.json').version")"
+          echo "tag=$tag manifest=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 manifest.json 的 version ${ver} 不一致，先 npm run bump 再打 tag"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack plugin zip
+        run: npm run pack
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: timenote-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            manifest.json
+            main.js
+            styles.css
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(dist/*.zip manifest.json main.js styles.css)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "TimeNote ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            -q '.assets[].name' | sed 's/^/  asset: /'
