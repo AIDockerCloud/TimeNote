@@ -1168,11 +1168,18 @@ class TimenoteView extends ItemView {
   async renderView() {
     this.hideHoverTooltip();
 
-    const container = this.containerEl.children[1];
+    // 一次写日记会同时触发两条渲染路径：vault.on("modify") 和 QuickAdd 的 onSaved()。
+    // 本方法是 async：两者都先 empty() 再 await refreshData()，等各自恢复后就会
+    // 往同一个容器 append 一整套 DOM —— 页面下方出现第二个日历视图（刷新才恢复）。
+    // 用递增代号做「只让最后一次渲染落地」，旧调用在 await 后直接丢弃。
+    const gen = (this.renderGeneration || 0) + 1;
+    this.renderGeneration = gen;
+    const container = this.contentEl;
     container.empty();
     container.addClass("timenote-container");
 
     await this.refreshData();
+    if (gen !== this.renderGeneration) return;
 
     // 1. Primary Header Bar
     this.renderHeader(container);

@@ -944,10 +944,13 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
   async renderView() {
     this.hideHoverTooltip();
-    const container = this.containerEl.children[1];
+    const gen = (this.renderGeneration || 0) + 1;
+    this.renderGeneration = gen;
+    const container = this.contentEl;
     container.empty();
     container.addClass("timenote-container");
     await this.refreshData();
+    if (gen !== this.renderGeneration) return;
     this.renderHeader(container);
     this.renderSubHeader(container);
     if (this.currentViewMode === "day") {

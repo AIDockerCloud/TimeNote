@@ -23,8 +23,9 @@
 - 唯一数据源：周期日记 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md`（`periodicNotesFolder` 可配置）；可选聚合 Blinko（`includeBlinko`）。
 - 7 种视图：`day` / `3day` / `week` / `month` / `quarter` / `year` / `timeline`；默认设置见 `main.ts` 的 `DEFAULT_SETTINGS`。月 / 季 / 年仍只显示计数，不画块。
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
-- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.7）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=0` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 11:55 复核；此前记的 `startHour=6` 已过时）；改默认值不会影响它。
+- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.9，未提交）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=0` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 11:55 复核；此前记的 `startHour=6` 已过时）；改默认值不会影响它。
 - **版本号规则（DEC-010）**：**每次提交 patch +1**（`1.0.1` → `1.0.2`），用 `npm run bump` 自动同步 `manifest.json` / `package.json` / `versions.json`（后者为版本→`minAppVersion` 映射，社区发布必需）。bump 后必须 `npm run build` 再提交；`versions.json` 已被 Obsidian 校验，勿手改单处。
+- **视图渲染并发防线（DEC-021）**：`TimenoteView.renderView()` 是 async，开头 `container.empty()` 后 `await this.refreshData()`，再同步 append 整套 DOM。写日记会**同时**触发 `vault.on("modify")` 与 QuickAdd 的 `onSaved()`，两次调用都先 empty 再 await，恢复后各 append 一整套 → 页面下方重复出现一个日历视图（刷新才恢复）。修复用递增 `this.renderGeneration`：`const gen = (this.renderGeneration || 0) + 1`，`await` 后 `if (gen !== this.renderGeneration) return;`，只让最后一次落地；容器统一用 `this.contentEl`（不再 `containerEl.children[1]`）。所有新增的异步渲染入口都必须遵守这条防线，不要靠删事件/删回调规避。
 - **快速记录插入标题（DEC-020）**：设置项 `quickAddSection` 默认 `"## 灵感闪念"`，值本身就是 Markdown 标题 —— 写 `### 随手记` 即三级标题。模块级纯函数 `parseQuickAddSection()`（`SECTION_HEADING_BEGIN/END` 区块）解析出 `{level,title,heading}`，1–6 级夹取、无 `#` 按二级兼容旧 `data.json`；`sectionHeaderRegex(title)` 按标题名匹配任意层级的标题行。四处调用：`DailyNoteService.addEntry`（新建用 `heading`、已有日记逐行找同名标题插在其下，找不到才追加）、`openDailyNoteForDate`（新建日记）、`parseDailyFile` 的 `memoTitle` 随手记区判定、设置页 UI。**已有日记沿用原有层级**，不按配置重建标题，避免同一天出现两个同名不同层级的节。
 
 ## 常用命令
@@ -47,7 +48,8 @@
   - `npm run test:points` —— 57 项时间点线断言（DEC-018：解析判定、15 分钟分簇堆叠、弹性轴 `pointNeeds` 与映射互逆、只改时刻不生成范围的行内回写、点拖拽无边缘模式 / 无把手、样式与产物）。
   - `npm run preview:points` —— 生成 `scripts/dev/out/point-lines.html` / `point-lines-dark.html`：真实 DOM + 真实 `styles.css`，第 1 天信息线下、第 2 天 `.is-above` 线上对照、第 3 天只读 / 已完成态；底部探针核对每条线 top 与刻度 y 偏差、横线颜色、同簇 20px 堆叠。
   - `npm run test:section` —— 44 项插入标题断言（DEC-020：`##`/`###` 层级解析、旧纯文本配置兼容、标题行精确匹配、addEntry 假 vault 端到端插入 / 新建日记、四处调用点无写死二级）。
-  - `npm test` —— 上面七套测试一起跑（33+23+20+25+16+57+44 = 218 项）。
+  - `npm run test:render` —— 18 项并发渲染断言（DEC-021：单次/串行/2–3 次并发与乱序完成只渲染一次，含「去掉代号检查即复现双份 DOM」对照组，抽真实 `renderView` 方法体 + 假 DOM）。
+  - `npm test` —— 上面八套测试一起跑（33+23+20+25+16+57+44+18 = 236 项）。
   - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed` / `layoutPointLines` / `isPointEntry`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；回写测试则直接从 `main.ts` 抽方法源码。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
@@ -73,3 +75,4 @@
 18. **时间点不是时间块（DEC-018）**：`isPointEntry()` 为真的记录在块布局里只能画 `.timenote-point-line`，禁止交给 `layoutTimeBlockClusters` / 画成 `.timenote-event-block` / 补复选框 / 补虚构 30m；点线拖拽禁止出现边缘命中区、`blockEdgeHit`、start/end 模式或任何把手 DOM，也禁止复用 `updateEntryTime`（会把单时间行改写成范围行）——必须走 `updateEntryPointTime`。判定只看 `hasTime && !isRange`：显式范围与「单时间 + 时长标签」仍是块，不得一并改成线。
 19. **发版只认 tag（DEC-019）**：Release 一律由 `v*` tag 触发 `.github/workflows/release.yml` 生成，tag 去 `v` 必须等于 `manifest.json` 的 `version`（workflow 会硬校验），**禁止**手工 `gh release create` / 网页上传临时产物绕过。打 zip 只走 `scripts/pack.mjs`（`npm run pack`）：zip **根目录**放 `manifest.json` / `main.js` / `styles.css`，不套文件夹、不带 README / 源码；`dist/` 不入库。
 20. **插入标题层级不许写死（DEC-020）**：禁止再出现 `` `## ${...quickAddSection}` `` 或任何硬编码二级的拼接；新增/修改插入点一律经 `parseQuickAddSection()`，匹配已有标题一律经 `sectionHeaderRegex(title)` 按标题名逐行匹配（**不许**退回 `fileText.includes(sectionHeader)` 子串匹配）。纯函数改动必须同步 `scripts/dev/test-quick-add-section.mjs` 的 `SECTION_HEADING` 区块切片标记。
+21. **异步渲染必须过 generation 防线（DEC-021）**：`renderView()` 里任何 `await` 之后要 append DOM 的代码，都必须先 `if (gen !== this.renderGeneration) return;`；**禁止**删除该检查、禁止在 `await refreshData()` 之前之外的地方无条件 append、禁止用 `containerEl.children[1]` 取容器。新增 `renderView` 调用点（事件、回调、定时器）不必去重，但不得绕过防线；改动必须同步 `scripts/dev/test-render-race.mjs` 的对照组。
