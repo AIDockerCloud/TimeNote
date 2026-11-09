@@ -13,6 +13,7 @@
 - **时间块边界**：只做「实际记录」（记录一段时间做了什么）；不做计划排程、容量规划、计时器、计划/实际区分；勾选任务待办是原有功能，不算排程。
 - **拖拽交互（DEC-011 / DEC-014）**：`attachSlotDrag` 负责空白槽拖拽创建（15 分钟吸附、最小 15 分钟、`timenote-block-ghost` 预览，拖动阈值 5px，未拖动则沿用单击默认时长）；`attachBlockDrag` 负责已有块「上/下边缘改起止、中部整体平移」（阈值 4px，**命中区按块高 1/3 取，2–9px，任何块高都能改边界，不再有 `< 30px` 退化分支**；起止一律夹在 `scale.dayStartSec`–`dayEndSec` 内），松手后经 `DailyNoteService.updateEntryTime` 回写并重渲染；`attachAllDayResizer` 负责拖动分隔条调 ALL DAY 行高度（32–320px，实时改内联样式，松手才存 `settings.allDayHeight`）。**拖拽结束浏览器会补一次 click**，块上用 `dataset.dragMoved` 标记吃掉，否则会误跳原笔记。
 - **回写边界**：`updateEntryTime` 只改目标行的行首时间前缀（`rangeRe` / `singleRe` 两个锚定正则），并删掉行尾与时长相冲突的 `30m`/`1h` 标签；其余文本、标签、缩进、复选框一律不动。跨出可见时间轴（`startHour`–`endHour`）的记录不参与拖拽，避免把隐藏部分裁掉。
+- **时间点线（DEC-018）**：`isPointEntry(e) = hasTime && !isRange`（模块级纯函数，位于 `buildTimeScale` 与 `parseLine` 之间的 `POINT_LINE_BEGIN/END` 区块，开发脚本按既有切片自动取到）。纯 `HH:mm` 记录（无结束时间、无 `30m`/`1h` 标签）**不是任务块**：块布局由 `layoutPointLines()` 按「时间 → 行号 → 文本」稳定排序、15 分钟窗口归簇，每条画一条 `top = scale.yOf(startSeconds)` 的水平线，圆点 + 线下标签（时刻 / 内容 / 标签），簇内按 `POINT_ROW_H = 20px` 逐行错开；**不创建时间块 DOM / 复选框**。点条目从 `layoutTimeBlockClusters` 剔除，改按小时汇总 `pointNeeds`（多天取最大值）传进 `buildTimeScale` 并加进该行总高；等距模式忽略。CSS 默认线下，`.timenote-point-line.is-above` 可靠 `--tn-label-offset` 零 JS 切到线上。**拖动**：`attachPointDrag` 整条上下拖、位移走 `scale.secOf` 反函数 + 1 分钟吸附，无边缘命中区 / 无把手 / 无 start-end 模式；Blinko 等外部来源标 `is-readonly` 不绑拖拽。**回写**：`updateEntryPointTime` 只换行首单时间（范围行 / 无时间行拒绝），`updateEntryTime` 原样保留供块使用 —— 两个入口绝不互相转换。时间线视图徽标 / QuickAdd 提示 / 紧凑流 `lastEndSec` 同步去掉虚构的 30m。拖动后带秒的原始时刻归一到分钟（1 分钟吸附），属已知取舍。
 - **块布局网格留白（DEC-013 修订 DEC-010）**：`colsContainer` / 每个 `col` 高度为 `totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER`，其中 **`BLOCK_TOP_GUTTER` 恒为 0**、`BLOCK_BOTTOM_GUTTER = 14`。**顶部留白一律不许加回来**：任何 > 0 的值都会在「全天区」和第一个整点之间多出一条空行（用户明确反馈过）。起始时刻的刻度标签改用 `.is-first`（`transform: translateY(0)`）贴住轴线，不再靠留白躲避裁切；底部留白保留，因为结束时刻的标签仍用 `translateY(-50%)` 居中、需要半行余量。全天区与网格之间的分隔条 `.timenote-header-resizer` 是**绝对定位**压在表头底边上的（8px 命中区），**不参与布局高度**，改成常规流元素会立刻多出一条空行。
 - **块高恒等于时间跨度（DEC-013）**：块渲染高度 = `yOf(end) - yOf(start)`（下限 `MIN_RENDER_BLOCK_PX = 16`），**块的上下沿必须与刻度精确对齐**，否则下沿就不再代表结束时间（用户 2026-11-09 明确要求「块的时间范围要和时间轴一致」，此前 `min(跨度, estimateBlockNeed)` 的做法已被否掉）。**「内容多就高」只能靠行高实现**：`buildTimeScale` 里按行聚合 `estimateBlockNeed`（中文按 2 个宽度单位、行高 15.5px、最多 6 行、上限 240px），内容多的行自然变高，块随跨度一起变高。因此**任何行高改动都会直接改变块高**，调参时两者不能分开想。
 - **表格化视觉 + 无把手边缘拖动（DEC-014）**：`renderBlockGrid` 的 `timenote-block-ruler-spacer` 拆成「日期行占位 + `ALL DAY` 行标签」两层 flex，标签随 `allDayHeight` 自动居中；表头 / ALL DAY 行 / 网格统一 `background-primary` + 同一套 `border-left` 竖线（表头列从 `border-right` 改 `border-left`），`ALL DAY` 行不加底色、不加粗线、chip 横向 wrap；刻度 0.72rem/600/正文色 + `text-shadow` 描边断线，当前小时加 `.is-now`（主色 + 9px 引出线），当前时间线也改主色；块 20% 底 / 42% 边 / 4px 左色条 / 7px 圆角，文字一律正文色，meta 只写起止时刻，时长在右下角 `.timenote-event-block-duration`。**不创建任何 `.timenote-block-edge` / grip DOM**：边缘命中判定与 `cursor`（ns-resize / grab / grabbing）全在 `attachBlockDrag` 里按 `getBoundingClientRect()` 实时算；`.timenote-header-resizer::after` 也改为仅 hover 时浮现，静态表格里看不到把手。
@@ -22,14 +23,14 @@
 - 唯一数据源：周期日记 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md`（`periodicNotesFolder` 可配置）；可选聚合 Blinko（`includeBlinko`）。
 - 7 种视图：`day` / `3day` / `week` / `month` / `quarter` / `year` / `timeline`；默认设置见 `main.ts` 的 `DEFAULT_SETTINGS`。月 / 季 / 年仍只显示计数，不画块。
 - **时间轴范围（DEC-008）**：`startHour` / `endHour` 默认 `0` / `24`（全天，**不改默认**），设置页有「时间轴起始/结束时间」两个下拉，块布局与紧凑流共用，改动即保存并重渲染；起始 ≥ 结束时自动抬高结束时间（`起始+1`，上限 24）并提示，结束 ≤ 起始时拒绝并提示。`slotHeight`（每小时槽高，默认 52px）自 DEC-009 起有滑块 UI（28–96px，步长 4，拖动防抖 150ms 后重渲染）。
-- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.6）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=6` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 复核），已与目标态一致；改默认值不会影响它。
+- `manifest.json`：`minAppVersion 1.0.0`、`isDesktopOnly=false`，`version` 见文件本身（当前为 1.0.7）；**特性分支 `feat/elastic-timeline` 已于 2026-11-09 快进合入 `main`，后续一律在 `main` 上推进**；用户设置存于插件目录 `data.json`，不入库。真机 vault 的 `data.json` 当前为 `startHour=0` / `endHour=24` / `slotHeight=36` / `allDayHeight=32` / `elasticTimeline=true`（2026-11-09 11:55 复核；此前记的 `startHour=6` 已过时）；改默认值不会影响它。
 - **版本号规则（DEC-010）**：**每次提交 patch +1**（`1.0.1` → `1.0.2`），用 `npm run bump` 自动同步 `manifest.json` / `package.json` / `versions.json`（后者为版本→`minAppVersion` 映射，社区发布必需）。bump 后必须 `npm run build` 再提交；`versions.json` 已被 Obsidian 校验，勿手改单处。
 
 ## 常用命令
 - 安装依赖：`npm install`（首次 / 更新 lock 后）。
 - 开发：`npm run dev`（watch，自动重建 `main.js`）；生产构建：`npm run build`（含 `tsc` 类型检查）。**改完 `main.ts` 必须先 build 再提交**。
 - 校验：`npm run typecheck`、`npm run check`（类型检查 + PCMP 合规）、`node --check main.js`、`python3 scripts/pcmp_index.py --check`。
-- 本地部署（真机 vault）：`/home/inverstar/文档/Time/.obsidian/plugins/timenote/`，只需覆盖 `manifest.json` + `main.js` + `styles.css`（README 可一并覆盖）。**Obsidian 要求文件夹名 == `manifest.id`**，故该目录必须是 `timenote/`，且 `.obsidian/community-plugins.json` 里要列 `"timenote"`（旧值是 `"time-notes"`，改 id 时务必一起换，否则插件不加载）。该 vault 目前**没有** `data.json`，改 id 无配置迁移风险；覆盖前把旧文件备份到 `~/tmp/`。
+- 本地部署（真机 vault）：`/home/inverstar/文档/Time/.obsidian/plugins/timenote/`，只需覆盖 `manifest.json` + `main.js` + `styles.css`（README 可一并覆盖）。**Obsidian 要求文件夹名 == `manifest.id`**，故该目录必须是 `timenote/`，且 `.obsidian/community-plugins.json` 里要列 `"timenote"`（旧值是 `"time-notes"`，改 id 时务必一起换，否则插件不加载）。该 vault 自 2026-11-09 起**已有** `data.json`（用户设置，部署时勿覆盖；只有再改插件 id 才需迁移）；覆盖前把旧文件备份到 `~/tmp/`。
 - 版本递增：`npm run bump`（自动 +0.0.1，也可 `npm run bump -- 1.2.0` 指定），随后 `npm run build`。
 - 开发脚本（都在 `scripts/dev/`，需要先 `npm run build`，测的是产物里的真实实现）：
   - `npm run test:timeline` —— 弹性时间轴数学与分配 33 项断言（单调、互逆、空档压缩、内容单调、视口封顶、等距回退等）。
@@ -39,8 +40,11 @@
   - `npm run test:visual` —— 20 项视觉回归静态断言（无失效 `-rgb` 写法、双声明兜底、刻度列宽 CSS/TS 一致、spacer 不撑宽、网格无双线、`syncHeaderGutter` 两处调用、块色由 `--tn-tint` 驱动）。
   - `npm run test:tints` —— 25 项按天配色断言（同天互异、8 色用满、重渲染稳定、新块拿未用色、显式指定优先、跨天独立、超容量不撞相邻、`parseLine` 指定通道）。
   - `npm run preview:real` —— 生成 `scripts/dev/out/real-dom.html` / `real-dom-dark.html`：复刻真实 DOM + 内联真实 `styles.css`，变量环境对齐 Obsidian（不补 `-rgb`）。用浏览器打开可看底部探针（列偏差应为 0px、背景色非空、同一天块色互异）；这是「预览好看但真机没色」这类问题的第一排查入口。
-  - `npm test` —— 上面四套测试一起跑（33+23+20+25）。
-  - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；拖拽测试则直接从 `main.ts` 抽函数源码。
+  - `npm run test:open` —— 16 项日期标题跳转断言（DEC-017：统一入口、三种周期共用渲染器、两张表标题都接到入口、不再切日视图、时间线链接同效、产物与 CSS）。
+  - `npm run test:points` —— 57 项时间点线断言（DEC-018：解析判定、15 分钟分簇堆叠、弹性轴 `pointNeeds` 与映射互逆、只改时刻不生成范围的行内回写、点拖拽无边缘模式 / 无把手、样式与产物）。
+  - `npm run preview:points` —— 生成 `scripts/dev/out/point-lines.html` / `point-lines-dark.html`：真实 DOM + 真实 `styles.css`，第 1 天信息线下、第 2 天 `.is-above` 线上对照、第 3 天只读 / 已完成态；底部探针核对每条线 top 与刻度 y 偏差、横线颜色、同簇 20px 堆叠。
+  - `npm test` —— 上面六套测试一起跑（33+23+20+25+16+57 = 174 项）。
+  - `scripts/dev/lib/elastic.mjs` 负责从 `main.js` 切出 `buildTimeScale` / `estimateBlockNeed` / `layoutPointLines` / `isPointEntry`（产物不导出内部函数），改了常量名或函数顺序要同步这里的切分标记；回写测试则直接从 `main.ts` 抽方法源码。
 - 注意：本项目**无自动化测试框架**；`npm run check` 是类型 + 文档合规检查，不是单元测试。
 - **坑：查产物里的中文会假阴性**。esbuild 默认 `charset: "ascii"`，`main.js` 内的中文字符串被转义成**大写**十六进制 `\uXXXX`（如「时间轴」= `\u65F6\u95F4\u8F74`，只有 banner 是原样中文）。验证新文案是否进产物，请按大写转义序列 grep 或 `node -e "require('./main.js')"`，不要用 `grep 中文 main.js` 下结论。
 
@@ -59,4 +63,7 @@
 12. **颜色禁用 `rgba(var(--*-rgb), a)`**：Obsidian 没定义 `--color-accent-rgb`，1.13 起 `-rgb` 系列弃用；一律用「固定 rgba 兜底 + `color-mix(in srgb, var(--color-accent 等) N%, transparent)`」双声明。预览脚本**不许**自行补 `-rgb` 变量来「修好」画面，那只会掩盖真机问题（DEC-015）。
 13. **表头与网格列必须逐列对齐**：刻度列宽由 `--tn-ruler-w`（CSS）与 `BLOCK_RULER_W`（TS）常量同步；spacer 必须 `min-width:0` + `overflow:hidden`（flex item 的 `min-width:auto` 会被文字撑宽）；网格列必须显式 `border-right: none`；滚动条补偿统一走 `syncHeaderGutter()`，禁止只在首帧 `requestAnimationFrame` 量一次（DEC-015）。
 14. **块颜色只能由 `assignDayTints()` 决定**：禁止给 `.timenote-event-block` 按 `is-task` / `is-memo` 写死单一颜色，也禁止用未定义或已弃用的 `--*-rgb` 变量拼 `rgba()`；调色板色值必须带固定色 fallback。新增 / 删除块允许重新分配当天颜色，但同一天渲染结果必须两两不同、且重渲染可复现（DEC-016）。
-15. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
+15. **Git 远端一律走 SSH**：`origin` 必须是 `git@github.com:AIDockerCloud/TimeNote.git`；改用 `https://github.com/...` 会触发 GitHub 的「用户名/密码」凭据提示（2021-08 起 HTTPS 已禁用账号密码，只能 PAT/OAuth），且非交互环境会卡到超时。密钥 `~/.ssh/id_ed25519`、`~/.ssh/config` 已配置好（22 端口可通，`ssh -T git@github.com` 应返回 `Hi AIDockerCloud!`）。本地签名提交用 `bash ~/tn-main-commit.sh "提交信息"`，脚本会 `git add -A` + `git commit -S` + `git push origin main`。**2026-11-09 14:2x 复测：会话内也能直接做**（GPG 口令命中 agent 缓存、`git commit -S` 成功，SSH 22 认证返回 `Hi AIDockerCloud!`），口令缓存过期才必须交给本地终端。版号规则见 DEC-010：一次提交 patch +1，别在同一次提交前重复 bump 造成跳号。
+16. **日期标题点击 = 打开当天日记（DEC-017）**：日 / 3天 / 周视图里 `ALL DAY` 行上方的 `.timenote-day-title-row`（块布局与紧凑流两处）和时间线视图的「打开日记 ↗」都必须调用 `openDailyNoteForDate(dateStr)`；**禁止**改回「切到日视图」。该 helper 先清 5 秒索引缓存再 `findDailyNoteFile`，不存在时按 `<periodicNotesFolder>/YYYY/Daily/MM/YYYY-MM-DD.md` 逐级建目录并创建（`# 日期` + `## quickAddSection`），写回索引 + Notice，最后 `getLeaf(false).openFile`。下钻日视图仍由顶部「日」标签提供；月 / 季 / 年的日期格保持原下钻行为，未纳入本决策。
+17. **审阅授权**：审阅、审计或样式检查的材料由人类指定，未获许可不得擅自扫描全工程扩大范围。
+18. **时间点不是时间块（DEC-018）**：`isPointEntry()` 为真的记录在块布局里只能画 `.timenote-point-line`，禁止交给 `layoutTimeBlockClusters` / 画成 `.timenote-event-block` / 补复选框 / 补虚构 30m；点线拖拽禁止出现边缘命中区、`blockEdgeHit`、start/end 模式或任何把手 DOM，也禁止复用 `updateEntryTime`（会把单时间行改写成范围行）——必须走 `updateEntryPointTime`。判定只看 `hasTime && !isRange`：显式范围与「单时间 + 时长标签」仍是块，不得一并改成线。

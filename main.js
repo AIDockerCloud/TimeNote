@@ -239,7 +239,7 @@ function estimateBlockNeed(entry, widthPx) {
   return Math.max(28, Math.min(ELASTIC_MAX_BLOCK, h));
 }
 function buildTimeScale(opts) {
-  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight } = opts;
+  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight, pointNeeds } = opts;
   const rowCount = Math.max(1, endHour - startHour);
   const dayStartSec = startHour * 3600;
   const dayEndSec = endHour * 3600;
@@ -272,7 +272,11 @@ function buildTimeScale(opts) {
     });
     for (let i = 0; i < rowCount; i++) {
       const items = rowItems[i];
-      if (!items.length) continue;
+      const pointNeed = Math.max(0, Number(pointNeeds && pointNeeds[i] || 0));
+      if (!items.length) {
+        if (pointNeed > 0) heights[i] = Math.max(heights[i], contentH + pointNeed);
+        continue;
+      }
       if (heights[i] < contentH) heights[i] = contentH;
       items.sort((a, b) => a.s - b.s || a.en - b.en);
       const slots = [];
@@ -285,7 +289,7 @@ function buildTimeScale(opts) {
         slot.sum += it.need;
         slot.end = it.en;
       });
-      const need = Math.max(...slots.map((x) => x.sum)) + ELASTIC_ROW_PAD;
+      const need = Math.max(...slots.map((x) => x.sum)) + ELASTIC_ROW_PAD + pointNeed;
       if (need > heights[i]) heights[i] = need;
     }
     const sum = heights.reduce((a, b) => a + b, 0);
@@ -329,6 +333,39 @@ function buildTimeScale(opts) {
     dayEndSec,
     elastic: !!elastic
   };
+}
+var POINT_ROW_H = 20;
+var POINT_LABEL_GAP = 3;
+var POINT_CLUSTER_WINDOW_SEC = 15 * 60;
+var POINT_SNAP_MINUTES = 1;
+function isPointEntry(entry) {
+  return !!entry && !!entry.hasTime && !entry.isRange;
+}
+function layoutPointLines(entries, dayStartSec, dayEndSec) {
+  const list = (entries || []).filter((e) => isPointEntry(e)).map((e) => ({ entry: e, sec: Number(e.startSeconds) || 0 })).filter((p) => p.sec >= dayStartSec && p.sec <= dayEndSec).sort(
+    (a, b) => a.sec - b.sec || (a.entry.lineNum || 0) - (b.entry.lineNum || 0) || String(a.entry.text || "").localeCompare(String(b.entry.text || ""))
+  );
+  const clusters = [];
+  list.forEach((p) => {
+    const last = clusters[clusters.length - 1];
+    if (!last || p.sec - last.sec >= POINT_CLUSTER_WINDOW_SEC) {
+      clusters.push({ sec: p.sec, items: [] });
+    }
+    clusters[clusters.length - 1].items.push(p);
+  });
+  const out = [];
+  clusters.forEach((c, ci) => {
+    c.items.forEach((p, ri) => {
+      out.push({
+        entry: p.entry,
+        sec: p.sec,
+        clusterIndex: ci,
+        rowInCluster: ri,
+        clusterSize: c.items.length
+      });
+    });
+  });
+  return out;
 }
 function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   const trimmed = line.trim();
@@ -640,6 +677,30 @@ var DailyNoteService = class {
       return false;
     }
     newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+    if (newLine === line) return false;
+    lines[idx] = newLine;
+    await this.app.vault.modify(file, lines.join("\n"));
+    this.fileCache.delete(file.path);
+    return true;
+  }
+  // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
+  // 与 updateEntryTime 分开是为了让「点」永远不会被悄悄扩成「块」；
+  // 范围行、无时间行一律拒绝，缩进 / 复选框 / 列表符 / 标签 / 行尾文字全部原样保留。
+  async updateEntryPointTime(entry, startSec) {
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof import_obsidian.TFile)) return false;
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    const line = lines[idx];
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+    if (rangeRe.test(line) || !singleRe.test(line)) return false;
+    const newLine = line.replace(
+      singleRe,
+      (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp}`
+    );
     if (newLine === line) return false;
     lines[idx] = newLine;
     await this.app.vault.modify(file, lines.join("\n"));
@@ -1131,11 +1192,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
       titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
       titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      titleRow.onclick = () => {
-        this.currentDate = d;
-        this.currentViewMode = "day";
-        this.renderView();
-      };
+      titleRow.setAttribute("title", `\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
+      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
       const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
       const allDayEntries = entries.filter((e) => !e.hasTime);
@@ -1287,7 +1345,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           this.hideHoverTooltip();
           this.jumpToFileLine(entry);
         };
-        lastEndSec = entry.endSeconds || entryStartSec + 1800;
+        lastEndSec = isPointEntry(entry) ? entryStartSec : entry.endSeconds || entryStartSec + 1800;
       });
       if (dayEndSec - lastEndSec >= MIN_GAP_SECONDS) {
         const gapStartStr = formatSecondsToTime(lastEndSec);
@@ -1355,11 +1413,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
       titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
       titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      titleRow.onclick = () => {
-        this.currentDate = d;
-        this.currentViewMode = "day";
-        this.renderView();
-      };
+      titleRow.setAttribute("title", `\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
+      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
       allDayContainer.style.height = `${allDayHeight}px`;
       allDayContainer.style.minHeight = `${allDayHeight}px`;
@@ -1387,7 +1442,10 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
     const clustersByDay = /* @__PURE__ */ new Map();
     const tintsByDay = /* @__PURE__ */ new Map();
+    const pointLinesByDay = /* @__PURE__ */ new Map();
     const scaleEntries = [];
+    const rowCount = Math.max(1, endHour - startHour);
+    const pointNeeds = new Array(rowCount).fill(0);
     days.forEach((d) => {
       const ds = d.format("YYYY-MM-DD");
       const dayTimed = this.filterEntries(this.entriesMap.get(ds) || []).filter((e) => e.hasTime);
@@ -1398,7 +1456,17 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const dayTints = /* @__PURE__ */ new Map();
       ordered.forEach((e, i) => dayTints.set(tintEntryKey(e, ds), tintCss[i]));
       tintsByDay.set(ds, dayTints);
-      const timed = dayTimed.filter((e) => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
+      const points = layoutPointLines(dayTimed, dayStartSec, dayEndSec);
+      pointLinesByDay.set(ds, points);
+      const perDayPointNeeds = new Array(rowCount).fill(0);
+      points.forEach((p) => {
+        const idx = Math.floor((p.sec - dayStartSec) / 3600);
+        if (idx >= 0 && idx < rowCount) perDayPointNeeds[idx] += POINT_ROW_H;
+      });
+      perDayPointNeeds.forEach((v, i) => {
+        if (v > pointNeeds[i]) pointNeeds[i] = v;
+      });
+      const timed = dayTimed.filter((e) => !isPointEntry(e)).filter((e) => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
       const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
       clustersByDay.set(ds, clusters);
       if (!elastic) return;
@@ -1415,6 +1483,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       slotHeight,
       top: BLOCK_TOP_GUTTER,
       entries: scaleEntries,
+      pointNeeds,
       elastic,
       viewportHeight
     });
@@ -1529,6 +1598,46 @@ var TimenoteView = class extends import_obsidian.ItemView {
             this.jumpToFileLine(e);
           };
         });
+      });
+      (pointLinesByDay.get(dateStr) || []).forEach((p) => {
+        var _a2;
+        const e = p.entry;
+        const line = col.createEl("div", {
+          cls: `timenote-point-line ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""}`
+        });
+        line.style.top = `${scale.yOf(p.sec)}px`;
+        line.style.setProperty(
+          "--tn-tint",
+          ((_a2 = tintsByDay.get(dateStr)) == null ? void 0 : _a2.get(tintEntryKey(e, dateStr))) || "var(--color-accent)"
+        );
+        line.createEl("div", { cls: "timenote-point-line-hit" });
+        line.createEl("div", { cls: "timenote-point-line-bar" });
+        line.createEl("span", { cls: "timenote-point-line-dot" });
+        const label = line.createEl("div", { cls: "timenote-point-line-label" });
+        label.style.setProperty(
+          "--tn-label-offset",
+          `${POINT_LABEL_GAP + p.rowInCluster * POINT_ROW_H}px`
+        );
+        const timeBadge = label.createEl("span", {
+          cls: "timenote-point-line-time",
+          text: e.timeStr || formatSecondsToTime(p.sec)
+        });
+        label.createEl("span", { cls: "timenote-point-line-text", text: e.text });
+        if (e.tags && e.tags.length > 0) {
+          label.createEl("span", {
+            cls: "timenote-point-line-tags",
+            text: `#${e.tags.slice(0, 2).join(" #")}`
+          });
+        }
+        this.attachPointDrag(line, e, timeBadge, scale);
+        line.onmouseenter = (ev) => this.showHoverTooltip(e, line, ev);
+        line.onmouseleave = () => this.hideHoverTooltip();
+        line.onclick = (ev) => {
+          ev.stopPropagation();
+          this.hideHoverTooltip();
+          if (line.dataset.dragMoved === "1") return;
+          this.jumpToFileLine(e);
+        };
       });
     });
     if (hasToday) {
@@ -1697,6 +1806,65 @@ var TimenoteView = class extends import_obsidian.ItemView {
     new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
     this.renderView();
   }
+  // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
+  // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
+  attachPointDrag(line, entry, timeBadge, scale) {
+    if (entry.source && entry.source !== "daily") {
+      line.addClass("is-readonly");
+      return;
+    }
+    const origStart = Number(entry.startSeconds) || 0;
+    if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
+    const baseY = scale.yOf(origStart);
+    let curStart = origStart;
+    line.onpointerdown = (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const startY = ev.clientY;
+      let moved = false;
+      const onMove = (e) => {
+        const dy = e.clientY - startY;
+        if (!moved && Math.abs(dy) < 4) return;
+        if (!moved) {
+          moved = true;
+          line.addClass("is-dragging");
+          this.hideHoverTooltip();
+        }
+        const raw = scale.secOf(baseY + dy);
+        curStart = Math.max(
+          scale.dayStartSec,
+          Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES))
+        );
+        line.style.top = `${scale.yOf(curStart)}px`;
+        timeBadge.textContent = formatSecondsToTime(curStart);
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        line.removeClass("is-dragging");
+        if (!moved) return;
+        line.dataset.dragMoved = "1";
+        window.setTimeout(() => {
+          delete line.dataset.dragMoved;
+        }, 80);
+        if (curStart === origStart) return;
+        void this.commitEntryPoint(entry, curStart);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+  async commitEntryPoint(entry, startSec) {
+    const ok = await this.plugin.dailyNoteService.updateEntryPointTime(entry, startSec);
+    if (!ok) {
+      new import_obsidian.Notice("\u65F6\u95F4\u70B9\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.renderView();
+      return;
+    }
+    new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\u65F6\u95F4\u70B9\uFF1A${formatSecondsToTime(startSec)}`);
+    this.renderView();
+  }
   attachAllDayResizer(resizer, header) {
     resizer.onpointerdown = (ev) => {
       var _a;
@@ -1773,10 +1941,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const header = group.createEl("div", { cls: "timenote-timeline-date" });
     header.createEl("span", { text: `${this.currentDate.format("YYYY-MM-DD dddd")} (\u5171 ${entries.length} \u6761\u8BB0\u5F55)` });
     const openDailyLink = header.createEl("a", { text: "\u6253\u5F00\u65E5\u8BB0 \u2197" });
-    openDailyLink.onclick = () => {
-      const file = this.plugin.dailyNoteService.findDailyNoteFile(dateStr);
-      if (file) this.app.workspace.getLeaf().openFile(file);
-    };
+    openDailyLink.setAttribute("title", `\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
+    openDailyLink.onclick = () => this.openDailyNoteForDate(dateStr);
     if (entries.length === 0) {
       group.createEl("div", { text: "\u4ECA\u65E5\u6682\u65E0\u8BB0\u5F55\u6216\u65F6\u95F4\u6807\u8BB0", cls: "text-muted" });
       return;
@@ -1791,7 +1957,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const item = group.createEl("div", { cls: "timenote-timeline-item" });
       const spanSec = entry.hasTime ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0) : 0;
       item.createEl("div", {
-        text: entry.hasTime ? `${entry.timeStr} \xB7 ${formatDuration(spanSec)}` : "\u5168\u5929",
+        text: !entry.hasTime ? "\u5168\u5929" : isPointEntry(entry) ? entry.timeStr : `${entry.timeStr} \xB7 ${formatDuration(spanSec)}`,
         cls: "timenote-timeline-badge"
       });
       item.createEl("div", {
@@ -2155,6 +2321,33 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.openFile(file, { eState: { line: Math.max(0, entry.lineNum - 1) } });
   }
+  // 打开某一天的日记：存在则直接打开，不存在时按 QuickAdd 的目录规则创建后再打开（DEC-017）。
+  // 日 / 3 天 / 周视图的日期标题、时间线视图的「打开日记 ↗」共用这一入口。
+  async openDailyNoteForDate(dateStr) {
+    const svc = this.plugin.dailyNoteService;
+    svc.dailyNoteIndex.clear();
+    let file = svc.findDailyNoteFile(dateStr);
+    if (!file) {
+      const m = window.moment(dateStr);
+      const folder = `${this.plugin.settings.periodicNotesFolder}/${m.format("YYYY")}/Daily/${m.format("MM")}`;
+      let curr = "";
+      for (const part of folder.split("/")) {
+        curr = curr ? `${curr}/${part}` : part;
+        if (!await this.app.vault.adapter.exists(curr)) {
+          await this.app.vault.createFolder(curr);
+        }
+      }
+      const notePath = (0, import_obsidian.normalizePath)(`${folder}/${dateStr}.md`);
+      file = await this.app.vault.create(notePath, `# ${dateStr}
+
+## ${this.plugin.settings.quickAddSection}
+`);
+      svc.dailyNoteIndex.set(dateStr, file);
+      new import_obsidian.Notice(`\u5DF2\u521B\u5EFA\u5E76\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
+    }
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+  }
 };
 var QuickAddModal = class extends import_obsidian.Modal {
   constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = "") {
@@ -2191,7 +2384,7 @@ var QuickAddModal = class extends import_obsidian.Modal {
     const updateDurationHint = () => {
       const sSec = parseTimeToSeconds(this.timeStr);
       const eSec = parseTimeToSeconds(this.endTimeStr);
-      durationHint.textContent = sSec !== null && eSec !== null && eSec > sSec ? `\u65F6\u957F ${formatDuration(eSec - sSec)}` : this.endTimeStr ? "\u7ED3\u675F\u9700\u665A\u4E8E\u5F00\u59CB" : "\u6309\u9ED8\u8BA4 30m \u663E\u793A";
+      durationHint.textContent = sSec !== null && eSec !== null && eSec > sSec ? `\u65F6\u957F ${formatDuration(eSec - sSec)}` : this.endTimeStr ? "\u7ED3\u675F\u9700\u665A\u4E8E\u5F00\u59CB" : "\u65F6\u95F4\u70B9\uFF08\u4E0D\u6210\u5757\uFF09";
     };
     timeInput.oninput = (e) => {
       this.timeStr = e.target.value.trim();

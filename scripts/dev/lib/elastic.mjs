@@ -23,7 +23,8 @@ const END_MARK = "function parseLine";
  * 从产物里取出弹性时间轴的内部函数。
  * @param {string} [root] 项目根目录，默认自动推断
  * @param {Record<string, number>} [overrides] 临时覆盖常量值（仅用于预览里试参数，不改源码）
- * @returns {{ buildTimeScale: Function, estimateBlockNeed: Function }}
+ * @returns {{ buildTimeScale: Function, estimateBlockNeed: Function,
+ *            layoutPointLines: Function, isPointEntry: Function }}
  */
 export function loadElasticInternals(root = PROJECT_ROOT, overrides = null) {
   const bundlePath = path.join(root, "main.js");
@@ -49,8 +50,9 @@ export function loadElasticInternals(root = PROJECT_ROOT, overrides = null) {
     }
   }
   // 用 new Function 求值，函数内部引用的常量都在同一段源码里，作用域自洽
+  // POINT_LINE 区块位于 buildTimeScale 与 parseLine 之间，同属这段切片（DEC-018）。
   const factory = new Function(
-    `${source}\nreturn { buildTimeScale, estimateBlockNeed };`
+    `${source}\nreturn { buildTimeScale, estimateBlockNeed, layoutPointLines, isPointEntry };`
   );
   return factory();
 }

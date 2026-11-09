@@ -1,13 +1,13 @@
 ---
 pcmp_version: "2.2"
-revision: 19
+revision: 23
 updated: 2026-11-09
 ---
 
 # 项目当前状态与活动任务快照 (STATE.md — Lite)
 
 - **Last Updated**: 2026-11-09
-- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010）。**`feat/elastic-timeline` 的 1.0.1–1.0.5 五个签名提交已于 2026-11-09 快进合入 `main`（`5a2909a`），后续一律在 `main` 上推进**；当前版本 **1.0.6**（DEC-016 按天自动配色，工作区改动待签名提交）。仍无 LICENSE / 自动化测试。
+- **Overall Status**: [事实] 插件主体功能已实现（7 视图 + 日记解析 + 双向回写 + 设置页）；[已确认] 时间块记录按 DEC-007 落地——共享块布局渲染层、可切换、默认块布局、只做实际记录；TypeScript + esbuild 构建链与 PCMP v2.2 Lite 上下文体系已在 `8b110bd` 入库。截至 `e5285db` 的代码**已推送到 `origin/main`**（2026-11-08 23:06 核实，本地与远端同一 SHA）。`versions.json` 与 `npm run bump` 版号机制已补（DEC-010）。**`feat/elastic-timeline` 的 1.0.1–1.0.5 五个签名提交已于 2026-11-09 快进合入 `main`（`5a2909a`），后续一律在 `main` 上推进**；当前版本 **1.0.7**（DEC-017 日期标题直接打开当天日记 + DEC-018 时间点线合并为一次提交），已 build / 174 项测试 / PCMP check 通过并部署真机 vault，**2026-11-09 14:2x 已在会话内完成签名提交并经 SSH 推送到 `origin/main`**，本地与远端同一 SHA。`origin` 为 `git@github.com:AIDockerCloud/TimeNote.git`（SSH）。DEC-018 时间点线把单时间点记录从 30 分钟任务块改成精确时刻的横线（线下信息、整条拖动只改时刻、无边缘拉伸）；三件套 + README 已备份后覆盖到真机 vault（备份 `~/tmp/timenote-backup-20261109-1245`，四个文件 md5 与仓库一致），待 reload 肉眼验收。仍无 LICENSE / 自动化测试。
 - **档位**：PCMP Lite（活动任务合并维护于此，无 `TASK.md` / `PLAN.md` / `sessions/`）。
 
 ---
@@ -34,6 +34,8 @@ updated: 2026-11-09
   - [x] 按天自动配色（DEC-016）：8 个官方扩展色 + `assignDayTints()` 确定性分配，同天互异、新块拿未用色、重渲染不跳色；`#color/blue` / `#色/绿` / `#color/#7c5cff` 指定通道；CSS 改 `--tn-tint` 变量驱动、任务块不再固定橙色；新增 `test:tints` 25 项，`npm test` 扩为 33+23+20+25 项；浏览器探针（浅/深）确认同天块色互异、7 列偏差 0px；版本 `1.0.5` → `1.0.6` 并部署真机 vault；
   - [x] 分支合并：`git checkout main && git merge --ff-only feat/elastic-timeline` 完成（不产生新提交、无需签名），DEC-013 / DEC-014 / DEC-015 全部进入 `main`；
   - [ ] **肉眼验收**：等用户 reload 插件后确认「同一天的时间块颜色互不相同、指定色生效、整张表格浑然一体、块上下沿与刻度对齐、无把手也能拖任意大小的块」，据此微调 `ELASTIC_EMPTY_RATIO` / `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数。
+  - [x] DEC-018：单时间点记录改画精确时刻线（线下信息 / 同簇错开 / 整条拖动只改时刻 / 无边缘拉伸）、`updateEntryPointTime` 不生成范围、点线弹性轴需求、57 项新断言、浅/深预览；
+  - [ ] DEC-018 待肉眼验收：点线是否真的贴在对应时刻、拖动后日记行仍是单时间、Blinko 只读不可拖、信息放线下是否合意（线上已由 `.is-above` 预留）。
 
 ---
 
@@ -53,11 +55,13 @@ updated: 2026-11-09
 - [事实][已部署] 2026-11-08 22:56 覆盖部署到真机 vault `/home/inverstar/文档/Time/.obsidian/plugins/timenote/`：三件套 + README 全部 md5 与仓库一致；同时修正该目录 `manifest.json`（旧 id `time-notes` / name `Time Notes (时间笔记)` / author `Antigravity` → `timenote` / `TimeNote` / `AIDockerCloud`）与 `.obsidian/community-plugins.json`（`time-notes` → `timenote`）。旧文件备份在 `/home/inverstar/tmp/timenote-plugin-backup-20261108-225620`。该 vault 无 `data.json`，无需迁移。
 
 ## 进行中 (In Progress)
-- [进行中] [Git 状态] 当前在 **`main`**（本地 `5a2909a`，1.0.1–1.0.5 已由用户本地执行五段式脚本完成签名提交并快进合入）；`origin/main` 仍停在 `e5285db`，会话内 `git push origin main` 超时未成功。工作区叠加 **v1.0.6 一批未提交改动**（DEC-016 配色 + 文档 + 测试），等待用户本地执行 `bash ~/tn-main-commit.sh` 完成签名提交与推送。旧的 `~/tn-split-commit.sh` 与 `~/tmp/tn-v10*-snapshot` 已完成使命，**不要再跑**。
+- [事实][已完成] [Git 状态] 当前在 **`main`**，v1.0.7 已签名提交并推送，`origin/main` 与本地 HEAD 同一 SHA；该提交把 DEC-017（日期标题跳转）、DEC-018（时间点线）、两批测试与全部文档同步一次性带入，工作区干净。1.0.1–1.0.6 共 6 个签名提交已于 2026-11-09 全部推送。**HTTPS 凭据提示的根因**：`origin` 原为 `https://github.com/...`，GitHub 自 2021-08 起禁用账号密码（HTTPS push 需 PAT），脚本里的 `git push` 遂弹出「用户名/密码」，会话内非交互 push 也正是卡在这里超时（非网络故障）。已改为 SSH 地址，实测 `ssh -T git@github.com` 返回 `Hi AIDockerCloud!`，推送成功。旧的 `~/tn-split-commit.sh` 与 `~/tmp/tn-v10*-snapshot` 已完成使命，**不要再跑**；`~/tn-main-commit.sh` 已改造为可复用的通用签名提交+推送脚本。
 - [进行中] [DEC-012] 弹性时间轴已构建、已部署真机 vault，等肉眼验收。
+- [进行中] [DEC-017] 日期标题直接打开当天日记：日 / 3天 / 周 × 块布局 / 紧凑流 + 时间线共 7 个点击点统一走 `openDailyNoteForDate`，已 build / 16 项新断言 / 174 项全量测试 / PCMP check 通过并部署真机 vault，已随 v1.0.7 签名提交推送，待 reload 验收。
+- [进行中] [DEC-018] 时间点线：`main.ts` / `styles.css` / README / AGENTS / 本文件 / DEC-018 ADR 已改，新增 `test-point-lines.mjs`（57 项）与 `preview-point-lines.mjs`（浅+深预览 + 探针），`npm test` = 174 项全绿；已与 DEC-017 **合并成 v1.0.7 一次签名提交并推送**（版号沿用上一轮已 bump 的 1.0.7，不额外跳号）；已部署真机 vault（备份 + md5 核对完成），待 reload 验收。
 
 ## 阻塞项 (Blocked)
-- [事实][环境] 会话沙箱内 `gpg-agent` 无法在 `~/.gnupg` 创建锁文件（EPERM），全局 `commit.gpgsign=true` 导致会话内提交失败；用户已选择「本地终端提交」，非业务阻塞。
+- [事实][环境] 曾记录「会话沙箱内 `gpg-agent` 无法在 `~/.gnupg` 创建锁文件（EPERM），签名提交必须本地终端执行」；**2026-11-09 14:2x 复测该限制已解除**：`gpg --clearsign` 与 `git commit -S` 在会话内均成功（口令命中 agent 缓存），`ssh -T git@github.com` 返回 `Hi AIDockerCloud!`（22 端口），会话内可直接完成签名提交 + 推送。若日后口令缓存过期，仍需本地终端执行 `bash ~/tn-main-commit.sh "msg"`。
 
 ## 当前风险与焦点 (Risks & Focus)
 - [事实][中] **渐进类型化**：6 个类仍用 `[key: string]: any` 索引签名（标 `TODO(types)`），类型检查通过但类型安全有限。
@@ -68,7 +72,10 @@ updated: 2026-11-09
 - [事实][低] 拖拽落进压缩区时块会瞬间变矮（仍用旧 scale 渲染），松手重算后恢复；未做「拖拽中实时重算」。
 - [事实][低] `estimateBlockNeed` 是字数估算（中文按 2 个宽度单位、行高 15.5px），不同字体/主题下会有 ±1 行误差；未改用真实 DOM 测量。
 - [事实][低] 网格留白写死为常量（顶部恒 0 / 底部 14px），未开设置项；顶部**不允许**改回非 0（DEC-013）。
-- [事实][低] 拖拽吸附固定 15 分钟、最短 15 分钟，未开设置项；无跨日拖拽、无撤销；拖拽松手即写盘并整视图重渲染（DEC-011）。
+- [事实][低] 块拖拽吸附固定 15 分钟、最短 15 分钟，未开设置项；无跨日拖拽、无撤销；拖拽松手即写盘并整视图重渲染（DEC-011）。**点线拖拽另用 1 分钟吸附**（DEC-018）。
+- [事实][低] 点线标签默认线下，CSS 里的 `.is-above` 线上变体未接设置项；簇紧贴小时起点时线上标签可能向上溢到上一行，真机若启用需复核（DEC-018）。
+- [事实][低] 同一 15 分钟簇里点记录过多（>6 条）时，标签按 20px/条向下错开可能越出该小时行、盖到下一小时；`pointNeeds` 已按条数撑高该行，但簇内 y 仍按秒线性分布，未做二次堆叠收敛（DEC-018）。
+- [事实][低] 拖动点线后带秒的原始时刻会归一到分钟（1 分钟吸附 + `formatSecondsToTime` 只输出 `HH:mm`）；未拖动时仍按 `entry.timeStr` 原样显示秒（DEC-018）。
 - [事实][低] 跨零点范围（如 `23:00-01:00`）一期不支持，解析时兜底为 30 分钟块；拖拽创建 / 块边缘调整起止尚未实现（P2）。
 - [事实][低] 月 / 季 / 年视图仍只显示计数，不画块、不显示时长统计（P2）。
 - [事实][已收敛] 时间轴默认值差异已由 DEC-008 裁决：保留代码 `00:00-24:00`，**并补上设置页起止时间控件**（此前 README 宣称可调但 UI 不存在）；README 已同步为「默认 00:00 - 24:00，可按作息收窄」。`slotHeight` 已由 DEC-009 开成滑块（28–96px，默认 52）。
@@ -84,7 +91,9 @@ updated: 2026-11-09
 - [未决] 是否实现 P2（拖拽创建与调整、月/季/年时长统计）？
 
 ## 下一步即时动作 (Immediate Next Action)
-- 用户侧：① 在真机 Obsidian 里 reload TimeNote（设置 → 第三方插件 → 关闭再开启），核对**同一天的时间块颜色互不相同**、`#color/blue` 指定色生效、表格列对齐与背景色正常；② 本地执行 `bash ~/tn-main-commit.sh` 完成 v1.0.6 的签名提交并把 `main` 推到远端（会话内 GPG 不可用、push 超时）。真机 `data.json` 为 `6–24` 时 / `slotHeight=36` / `allDayHeight=32` / 自适应开，已与目标态一致；设置页「自适应时间轴」开关可 A/B 对比内容驱动 / 等距 36px。
+- 用户侧：① 在真机 Obsidian 里 reload TimeNote（设置 → 第三方插件 → 关闭再开启），核对**点 `ALL DAY` 上方日期标题能直接打开当天日记**（日 / 3天 / 周、块布局与紧凑流都试一下；空白日期会新建一篇空日记并 Notice），顺带复核同一天块色互异、`#color/blue` 指定色、列对齐与背景色；② 签名提交 + SSH 推送已于 2026-11-09 14:2x 由会话内完成，无需再跑 `~/tn-main-commit.sh`。真机 `data.json` 复核为 `0–24` 时 / `slotHeight=36` / `allDayHeight=32` / 自适应开（此前记的 `6–24` 已过时）；设置页「自适应时间轴」开关可 A/B 对比内容驱动 / 等距 36px。
+- 用户侧（DEC-018）：先看 `scripts/dev/out/point-lines.html`（浅）/ `point-lines-dark.html`（深）确认「信息在线下」是否合意 —— 第 2 天是 `.is-above` 线上对照；三件套已覆盖真机 vault，**在 Obsidian 里 reload TimeNote 即可**，检查写 `- 09:23 到公司` 只出现一条线、上下拖动后日记行仍是 `- 10:xx 到公司`（没有变成范围）、范围记录仍是块、Blinko 闪念不可拖。
+- 版号与提交：DEC-017 + DEC-018 **合并成一个签名提交、一个 patch 版号 1.0.7**（manifest / package / versions.json 上一轮已从 1.0.6 bump 到 1.0.7，本次不再重复 bump，避免 1.0.6 → 1.0.8 跳号）；2026-11-09 14:2x 会话内 `git commit -S` + `git push origin main` 成功，工作区干净。会话内签名能力已复测可用，详见「阻塞项」环境条目。
 - 我这边：按验收反馈调 `ELASTIC_MIN_EMPTY_ROW`（空档压缩下限）/ `ELASTIC_ROW_PAD` / `estimateBlockNeed` 的行高系数；**后续所有改动都在 `main` 上做**，不再开实验分支。
-- Git：远端 `origin/main` 落后 5 个提交，由 `~/tn-main-commit.sh` 一并推送；确认推送成功后再继续下一个特性。
+- Git：`origin/main` = 本地 HEAD = 本次 v1.0.7 签名提交；remote 为 SSH，不会再要密码。`~/tn-main-commit.sh` 保留为通用脚本（口令缓存过期时用），旧的历史提交脚本一律不要再跑。可选：若其它 GitHub 仓库也要免密码，可配全局 `url.git@github.com:.insteadOf`，未擅自改动全局配置。
 - 仍需裁决 LICENSE 与自动化测试（vitest）。

@@ -283,7 +283,7 @@ function estimateBlockNeed(entry, widthPx) {
 }
 
 function buildTimeScale(opts) {
-  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight } = opts;
+  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight, pointNeeds } = opts;
   const rowCount = Math.max(1, endHour - startHour);
   const dayStartSec = startHour * 3600;
   const dayEndSec = endHour * 3600;
@@ -325,7 +325,13 @@ function buildTimeScale(opts) {
 
     for (let i = 0; i < rowCount; i++) {
       const items = rowItems[i];
-      if (!items.length) continue;
+      // 时间点线不画块，但每条要占一行标签（DEC-018）。pointNeeds 由渲染层按小时
+      // 聚合好传进来；多天并排时各天取最大值，不能把 7 天累加成一条巨高的行。
+      const pointNeed = Math.max(0, Number((pointNeeds && pointNeeds[i]) || 0));
+      if (!items.length) {
+        if (pointNeed > 0) heights[i] = Math.max(heights[i], contentH + pointNeed);
+        continue;
+      }
       // 被记录覆盖到的小时（含跨行长条目的中间段）至少给最小内容行高：
       // 块高恒等于跨度，中间段若被压成空档高度，长条目会被掐成细细一条
       if (heights[i] < contentH) heights[i] = contentH;
@@ -337,7 +343,8 @@ function buildTimeScale(opts) {
         slot.sum += it.need;
         slot.end = it.en;
       });
-      const need = Math.max(...slots.map(x => x.sum)) + ELASTIC_ROW_PAD;
+      // 点线标签与块在同一列里纵向叠加，需求直接加进这一行的总高
+      const need = Math.max(...slots.map(x => x.sum)) + ELASTIC_ROW_PAD + pointNeed;
       if (need > heights[i]) heights[i] = need;
     }
 
@@ -380,6 +387,61 @@ function buildTimeScale(opts) {
     elastic: !!elastic
   };
 }
+
+// ============================================================================
+// Point Lines（时间点记录 — DEC-018）
+// ============================================================================
+// 只有 HH:mm、没有结束时间也没有 30m/1h 时长标签的记录是「时间点」，不是任务块：
+// 块布局里画成一条精确落在 yOf(startSeconds) 的水平线，信息列在线下。
+// 15 分钟内的点记录归为同一簇，簇内按行号向下错开标签，避免文字互相盖住。
+// 线整条上下拖动只改时刻，没有任何边缘命中区，也绝不会把点扩成时间块。
+const POINT_ROW_H = 20;                     // 簇内每条记录占的垂直高度
+const POINT_LABEL_GAP = 3;                  // 线到第一行标签的间距
+const POINT_CLUSTER_WINDOW_SEC = 15 * 60;   // 归簇窗口
+const POINT_SNAP_MINUTES = 1;               // 点线拖动按 1 分钟吸附（块仍是 15 分钟）
+// --- POINT_LINE_BEGIN ---
+// 判定放在模块级纯函数里：开发脚本可以直接从产物里切出来测，不依赖 DOM / Obsidian。
+function isPointEntry(entry) {
+  return !!entry && !!entry.hasTime && !entry.isRange;
+}
+
+// 把一天的点记录排好序、分簇，给出每条的簇号 / 簇内行号 / 簇大小。
+// 稳定排序保证重渲染不跳位；越出可见时间轴的点直接丢掉，避免线画到轴外。
+function layoutPointLines(entries, dayStartSec, dayEndSec) {
+  const list = (entries || [])
+    .filter(e => isPointEntry(e))
+    .map(e => ({ entry: e, sec: Number(e.startSeconds) || 0 }))
+    .filter(p => p.sec >= dayStartSec && p.sec <= dayEndSec)
+    .sort((a, b) =>
+      a.sec - b.sec ||
+      (a.entry.lineNum || 0) - (b.entry.lineNum || 0) ||
+      String(a.entry.text || "").localeCompare(String(b.entry.text || ""))
+    );
+
+  const clusters = [];
+  list.forEach(p => {
+    const last = clusters[clusters.length - 1];
+    if (!last || p.sec - last.sec >= POINT_CLUSTER_WINDOW_SEC) {
+      clusters.push({ sec: p.sec, items: [] });
+    }
+    clusters[clusters.length - 1].items.push(p);
+  });
+
+  const out = [];
+  clusters.forEach((c, ci) => {
+    c.items.forEach((p, ri) => {
+      out.push({
+        entry: p.entry,
+        sec: p.sec,
+        clusterIndex: ci,
+        rowInCluster: ri,
+        clusterSize: c.items.length
+      });
+    });
+  });
+  return out;
+}
+// --- POINT_LINE_END ---
 
 // ============================================================================
 // Parser & Data Engine
@@ -774,6 +836,35 @@ class DailyNoteService {
 
     // 旧的时长标签（30m / 1h）与新范围冲突，去掉行尾那一个
     newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, '');
+    if (newLine === line) return false;
+
+    lines[idx] = newLine;
+    await this.app.vault.modify(file, lines.join('\n'));
+    this.fileCache.delete(file.path);
+    return true;
+  }
+
+  // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
+  // 与 updateEntryTime 分开是为了让「点」永远不会被悄悄扩成「块」；
+  // 范围行、无时间行一律拒绝，缩进 / 复选框 / 列表符 / 标签 / 行尾文字全部原样保留。
+  async updateEntryPointTime(entry, startSec) {
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof TFile)) return false;
+
+    const content = await this.app.vault.read(file);
+    const lines = content.split('\n');
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+
+    const line = lines[idx];
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+    if (rangeRe.test(line) || !singleRe.test(line)) return false;
+
+    const newLine = line.replace(
+      singleRe,
+      (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp}`
+    );
     if (newLine === line) return false;
 
     lines[idx] = newLine;
@@ -1372,11 +1463,9 @@ class TimenoteView extends ItemView {
       const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
       titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
       titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      titleRow.onclick = () => {
-        this.currentDate = d;
-        this.currentViewMode = "day";
-        this.renderView();
-      };
+      // 日期标题直接打开当天的日记（DEC-017）；下钻到日视图仍可用顶部「日」标签
+      titleRow.setAttribute("title", `打开 ${dateStr} 日记`);
+      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
 
       // Bottom: Dedicated All-Day box strictly inside THIS day's column
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
@@ -1566,7 +1655,10 @@ class TimenoteView extends ItemView {
           this.jumpToFileLine(entry);
         };
 
-        lastEndSec = entry.endSeconds || (entryStartSec + 1800);
+        // 时间点不占时长：算空闲段时不能再把它当 30 分钟块（DEC-018）
+        lastEndSec = isPointEntry(entry)
+          ? entryStartSec
+          : (entry.endSeconds || (entryStartSec + 1800));
       });
 
       // Gap after last entry to end of day
@@ -1645,11 +1737,9 @@ class TimenoteView extends ItemView {
       const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
       titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
       titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      titleRow.onclick = () => {
-        this.currentDate = d;
-        this.currentViewMode = "day";
-        this.renderView();
-      };
+      // 日期标题直接打开当天的日记（DEC-017）；下钻到日视图仍可用顶部「日」标签
+      titleRow.setAttribute("title", `打开 ${dateStr} 日记`);
+      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
       const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
       allDayContainer.style.height = `${allDayHeight}px`;
       allDayContainer.style.minHeight = `${allDayHeight}px`;
@@ -1684,7 +1774,10 @@ class TimenoteView extends ItemView {
 
     const clustersByDay = new Map();
     const tintsByDay = new Map();
+    const pointLinesByDay = new Map();
     const scaleEntries = [];
+    const rowCount = Math.max(1, endHour - startHour);
+    const pointNeeds = new Array(rowCount).fill(0);
     days.forEach(d => {
       const ds = d.format("YYYY-MM-DD");
       const dayTimed = this.filterEntries(this.entriesMap.get(ds) || []).filter(e => e.hasTime);
@@ -1701,7 +1794,21 @@ class TimenoteView extends ItemView {
       ordered.forEach((e, i) => dayTints.set(tintEntryKey(e, ds), tintCss[i]));
       tintsByDay.set(ds, dayTints);
 
+      // 时间点（只有开始时刻）画成线，不参与块的分簇与行高内容估算（DEC-018）：
+      // 每条只占一行标签的高度，按小时汇总后交给弹性轴把该行撑开。
+      const points = layoutPointLines(dayTimed, dayStartSec, dayEndSec);
+      pointLinesByDay.set(ds, points);
+      const perDayPointNeeds = new Array(rowCount).fill(0);
+      points.forEach(p => {
+        const idx = Math.floor((p.sec - dayStartSec) / 3600);
+        if (idx >= 0 && idx < rowCount) perDayPointNeeds[idx] += POINT_ROW_H;
+      });
+      perDayPointNeeds.forEach((v, i) => {
+        if (v > pointNeeds[i]) pointNeeds[i] = v;
+      });
+
       const timed = dayTimed
+        .filter(e => !isPointEntry(e))
         .filter(e => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
       const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
       clustersByDay.set(ds, clusters);
@@ -1716,7 +1823,7 @@ class TimenoteView extends ItemView {
 
     const scale = buildTimeScale({
       startHour, endHour, slotHeight, top: BLOCK_TOP_GUTTER,
-      entries: scaleEntries, elastic, viewportHeight
+      entries: scaleEntries, pointNeeds, elastic, viewportHeight
     });
     this.currentTimeScale = scale;
     const totalHeight = scale.totalHeight;
@@ -1857,6 +1964,52 @@ class TimenoteView extends ItemView {
             this.jumpToFileLine(e);
           };
         });
+      });
+
+      // 时间点线：top 严格等于 yOf(startSeconds)，信息列在线下；同一簇逐行错开（DEC-018）。
+      // 这里绝不创建时间块 DOM、也不创建复选框 —— 时间点不是任务块。
+      (pointLinesByDay.get(dateStr) || []).forEach(p => {
+        const e = p.entry;
+        const line = col.createEl("div", {
+          cls: `timenote-point-line ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""}`
+        });
+        line.style.top = `${scale.yOf(p.sec)}px`;
+        line.style.setProperty(
+          "--tn-tint",
+          tintsByDay.get(dateStr)?.get(tintEntryKey(e, dateStr)) || "var(--color-accent)"
+        );
+        // 细线不好抓，给一条透明的 10px 命中带；标签本身也能冒泡触发拖动
+        line.createEl("div", { cls: "timenote-point-line-hit" });
+        line.createEl("div", { cls: "timenote-point-line-bar" });
+        line.createEl("span", { cls: "timenote-point-line-dot" });
+
+        const label = line.createEl("div", { cls: "timenote-point-line-label" });
+        label.style.setProperty(
+          "--tn-label-offset",
+          `${POINT_LABEL_GAP + p.rowInCluster * POINT_ROW_H}px`
+        );
+        // 时间点可以精确到秒，展示沿用解析出来的原始时间字符串
+        const timeBadge = label.createEl("span", {
+          cls: "timenote-point-line-time",
+          text: e.timeStr || formatSecondsToTime(p.sec)
+        });
+        label.createEl("span", { cls: "timenote-point-line-text", text: e.text });
+        if (e.tags && e.tags.length > 0) {
+          label.createEl("span", {
+            cls: "timenote-point-line-tags",
+            text: `#${e.tags.slice(0, 2).join(" #")}`
+          });
+        }
+
+        this.attachPointDrag(line, e, timeBadge, scale);
+        line.onmouseenter = (ev) => this.showHoverTooltip(e, line, ev);
+        line.onmouseleave = () => this.hideHoverTooltip();
+        line.onclick = (ev) => {
+          ev.stopPropagation();
+          this.hideHoverTooltip();
+          if (line.dataset.dragMoved === "1") return;
+          this.jumpToFileLine(e);
+        };
       });
     });
 
@@ -2053,6 +2206,69 @@ class TimenoteView extends ItemView {
     this.renderView();
   }
 
+  // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
+  // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
+  attachPointDrag(line, entry, timeBadge, scale) {
+    // Blinko 等外部来源没有可回写的行首时间前缀：允许查看 / 点击，但不允许拖
+    if (entry.source && entry.source !== "daily") {
+      line.addClass("is-readonly");
+      return;
+    }
+    const origStart = Number(entry.startSeconds) || 0;
+    if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
+
+    const baseY = scale.yOf(origStart);
+    let curStart = origStart;
+    line.onpointerdown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const startY = ev.clientY;
+      let moved = false;
+
+      const onMove = (e: PointerEvent) => {
+        const dy = e.clientY - startY;
+        if (!moved && Math.abs(dy) < 4) return;
+        if (!moved) {
+          moved = true;
+          line.addClass("is-dragging");
+          this.hideHoverTooltip();
+        }
+        // 弹性轴行高不等距，位移 → 时刻必须走 scale 反函数（AGENTS 红线 9）
+        const raw = scale.secOf(baseY + dy);
+        curStart = Math.max(scale.dayStartSec,
+          Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES)));
+        line.style.top = `${scale.yOf(curStart)}px`;
+        timeBadge.textContent = formatSecondsToTime(curStart);
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        line.removeClass("is-dragging");
+        if (!moved) return;
+        line.dataset.dragMoved = "1";
+        window.setTimeout(() => { delete line.dataset.dragMoved; }, 80);
+        if (curStart === origStart) return;
+        void this.commitEntryPoint(entry, curStart);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    };
+  }
+
+  async commitEntryPoint(entry, startSec) {
+    const ok = await this.plugin.dailyNoteService.updateEntryPointTime(entry, startSec);
+    if (!ok) {
+      new Notice("时间点未写入：找不到目标行，已恢复原状");
+      this.renderView();
+      return;
+    }
+    new Notice(`已更新时间点：${formatSecondsToTime(startSec)}`);
+    this.renderView();
+  }
+
   attachAllDayResizer(resizer, header) {
     resizer.onpointerdown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
@@ -2137,10 +2353,8 @@ class TimenoteView extends ItemView {
     header.createEl("span", { text: `${this.currentDate.format("YYYY-MM-DD dddd")} (共 ${entries.length} 条记录)` });
 
     const openDailyLink = header.createEl("a", { text: "打开日记 ↗" });
-    openDailyLink.onclick = () => {
-      const file = this.plugin.dailyNoteService.findDailyNoteFile(dateStr);
-      if (file) this.app.workspace.getLeaf().openFile(file);
-    };
+    openDailyLink.setAttribute("title", `打开 ${dateStr} 日记`);
+    openDailyLink.onclick = () => this.openDailyNoteForDate(dateStr);
 
     if (entries.length === 0) {
       group.createEl("div", { text: "今日暂无记录或时间标记", cls: "text-muted" });
@@ -2160,8 +2374,11 @@ class TimenoteView extends ItemView {
       const spanSec = entry.hasTime
         ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0)
         : 0;
+      // 时间点没有时长：不再补一句虚构的「30m」（DEC-018）
       item.createEl("div", {
-        text: entry.hasTime ? `${entry.timeStr} · ${formatDuration(spanSec)}` : "全天",
+        text: !entry.hasTime ? "全天"
+          : isPointEntry(entry) ? entry.timeStr
+          : `${entry.timeStr} · ${formatDuration(spanSec)}`,
         cls: "timenote-timeline-badge"
       });
 
@@ -2616,6 +2833,32 @@ class TimenoteView extends ItemView {
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.openFile(file, { eState: { line: Math.max(0, entry.lineNum - 1) } });
   }
+
+  // 打开某一天的日记：存在则直接打开，不存在时按 QuickAdd 的目录规则创建后再打开（DEC-017）。
+  // 日 / 3 天 / 周视图的日期标题、时间线视图的「打开日记 ↗」共用这一入口。
+  async openDailyNoteForDate(dateStr: string) {
+    const svc = this.plugin.dailyNoteService;
+    // 索引有 5 秒缓存，点击前强制重建，避免刚在别处创建的日记查不到
+    svc.dailyNoteIndex.clear();
+    let file: TFile | null = svc.findDailyNoteFile(dateStr);
+    if (!file) {
+      const m = window.moment(dateStr);
+      const folder = `${this.plugin.settings.periodicNotesFolder}/${m.format("YYYY")}/Daily/${m.format("MM")}`;
+      let curr = "";
+      for (const part of folder.split("/")) {
+        curr = curr ? `${curr}/${part}` : part;
+        if (!await this.app.vault.adapter.exists(curr)) {
+          await this.app.vault.createFolder(curr);
+        }
+      }
+      const notePath = normalizePath(`${folder}/${dateStr}.md`);
+      file = await this.app.vault.create(notePath, `# ${dateStr}\n\n## ${this.plugin.settings.quickAddSection}\n`);
+      svc.dailyNoteIndex.set(dateStr, file);
+      new Notice(`已创建并打开 ${dateStr} 日记`);
+    }
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file!);
+  }
 }
 
 // ============================================================================
@@ -2666,7 +2909,7 @@ class QuickAddModal extends Modal {
       const eSec = parseTimeToSeconds(this.endTimeStr);
       durationHint.textContent = (sSec !== null && eSec !== null && eSec > sSec)
         ? `时长 ${formatDuration(eSec - sSec)}`
-        : (this.endTimeStr ? "结束需晚于开始" : "按默认 30m 显示");
+        : (this.endTimeStr ? "结束需晚于开始" : "时间点（不成块）");
     };
     timeInput.oninput = (e) => {
       this.timeStr = (e.target as HTMLInputElement).value.trim();

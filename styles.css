@@ -1258,6 +1258,103 @@
   white-space: nowrap;
 }
 
+/* ---- 时间点线：单时间点记录不画成块，信息列在线下（DEC-018） ----
+   线的 top 恒等于 yOf(startSeconds)；容器 height:0，横线 / 圆点 / 标签全部绝对定位。
+   同簇多条靠 --tn-label-offset 逐行错开；想改成「线上」只需给容器加 .is-above。 */
+.timenote-point-line {
+  --tn-tint: var(--color-accent, #7c5cff);
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  z-index: 4;
+  cursor: ns-resize;
+  user-select: none;
+}
+/* 2px 细线不好抓：一条透明命中带，范围 -8..+2px，不与线下标签（+3px 起）抢点击 */
+.timenote-point-line-hit {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  height: 10px;
+  cursor: ns-resize;
+}
+.timenote-point-line-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 0;
+  border-top: 2px solid var(--tn-tint);
+  opacity: 0.82;
+  pointer-events: none;
+}
+.timenote-point-line-dot {
+  position: absolute;
+  left: 0;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--tn-tint);
+  pointer-events: none;
+}
+.timenote-point-line-label {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: var(--tn-label-offset, 3px);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 18px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.92);
+  background-color: var(--background-primary);
+  font-size: 0.7rem;
+  line-height: 18px;
+  color: var(--text-normal);
+  cursor: ns-resize;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.timenote-point-line.is-above .timenote-point-line-label {
+  top: calc(0px - var(--tn-label-offset, 3px) - 18px);
+}
+.timenote-point-line-time {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  background-color: rgba(124, 92, 255, 0.16);
+  background-color: color-mix(in srgb, var(--tn-tint) 16%, transparent);
+  color: var(--tn-tint);
+  font-size: 0.64rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.timenote-point-line-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timenote-point-line-tags {
+  flex: 0 0 auto;
+  font-size: 0.64rem;
+  color: var(--text-muted);
+}
+.timenote-point-line.is-completed .timenote-point-line-text {
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+.timenote-point-line.is-readonly { cursor: default; }
+.timenote-point-line.is-readonly .timenote-point-line-hit,
+.timenote-point-line.is-readonly .timenote-point-line-label { cursor: pointer; }
+.timenote-point-line.is-dragging { z-index: 8; }
+.timenote-point-line.is-dragging .timenote-point-line-bar { opacity: 1; }
+
 /* ---- 时间块卡片：实色但不遮字，颜色由 --tn-tint 按天分配（DEC-016） ---- */
 .timenote-event-block {
   /* 兜底值；renderBlockGrid 会给每个块写入当天分配到的颜色 */

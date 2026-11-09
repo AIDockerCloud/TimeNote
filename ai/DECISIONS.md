@@ -1,6 +1,6 @@
 ---
 pcmp_version: "2.2"
-revision: 11
+revision: 14
 updated: 2026-11-09
 ---
 
@@ -199,3 +199,28 @@ updated: 2026-11-09
 - 理由 (Reason): 「同一天不同色」若靠随机或按渲染顺序取色，重渲染就会跳色、拖拽后颜色乱变，用户无法建立颜色记忆；用「内容 hash 偏好 + 当天冲突消解」既保证确定性，又天然让新块落到空位。调色板直接借官方扩展色变量，比自造一套 HSL 色板更贴主题，也避免 DEC-015 那类「预览有、真机无」的环境差异。指定通道用标签形态而不是新字段或 frontmatter，是为了不改动日记数据格式、且回写时不会被破坏。
 - 备选方案 (Alternatives): 按 `getTagColor(tag)` 的标签 hash 上色（不同标签可能撞色、无标签的块仍同色，且不满足「新块一定不同」）；按 `isTask` 继续分两类色（就是当前被否掉的方案）；渲染时随机取色（重渲染跳色，无法复现）；把颜色写进日记文件持久化（每次新建块都要改写用户数据，且回写复杂度高，用户只要求「没有指定时自动安排」）；自造 8 组 HSL 常量（明暗主题要维护两套，且不跟随用户主题）；用 `--no-ff` 生成合并提交（沙箱 GPG 签名不可用，快进合并不产生新提交，正好绕开限制）。
 - 影响 (Consequences): `main.ts` 新增 `BLOCK_TINT_BEGIN/END` 纯函数区块（测试按标记抽取）、`parseLine` 增加 `tint` 字段、`renderBlockGrid` 每天构建 `tintsByDay` 并给块 `setProperty("--tn-tint", …)`；`styles.css` 块颜色规则改为变量驱动；新增 `scripts/dev/test-block-tints.mjs`（25 项）并接入 `npm test`（33+23+20+25）；`preview-real-dom.mjs` 补齐 8 个扩展色变量并展示多色块（探针新增「同一天互不撞色」）。`npm run bump` 到 1.0.6，真机 vault 已重新部署。**签名提交仍需用户本地执行**（沙箱里 `gpg` 无法创建 lock 文件），交付 `~/tn-main-commit.sh`；`git push origin main` 在会话内超时，也一并交给该脚本。`scripts/dev/out/` 下的预览 HTML 曾随早期提交误入库（`.gitignore` 已声明忽略），提交脚本会用 `git rm --cached` 让它们退出版本库、本地文件保留。
+- 执行结果 (2026-11-09 02:2x 补记): 用户已运行该脚本，`fd9af37` v1.0.6 签名提交完成、工作区干净；但 push 弹出「用户名/密码」未成功。根因经查为 `origin = https://github.com/AIDockerCloud/TimeNote.git` —— GitHub 自 2021-08-13 起不再接受 HTTPS 账号密码（须用 PAT / OAuth），此前的「push 超时」也是卡在非交互凭据提示，并非网络故障。用户本机 `~/.ssh/config` 早已配好 `git@github.com` + `id_ed25519`（22 端口可通），只是 remote 没用上。已执行 `git remote set-url origin git@github.com:AIDockerCloud/TimeNote.git`，`ssh -T` 实测返回 `Hi AIDockerCloud! You've successfully authenticated`，随后 `e5285db..fd9af37 main -> main` 推送成功，`origin/main` 与本地一致。此后 Git 远端一律走 SSH（AGENTS 红线 15）；`~/tn-main-commit.sh` 去掉 1.0.6 硬编码检查，改为可复用的通用签名提交+推送脚本。
+
+## DEC-017 — 日期标题直接打开对应日记（日 / 3天 / 周 / 时间线）
+日期: 2026-11-09 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-09 11:55 指令「在各个周期视图中点击 all day 上面的标题，应该直接跳转到对应的日记」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要让月 / 季 / 年视图的日期格也直接打开日记、需要自定义日记创建模板或路径、需要改为新标签页打开以保留日历视图时复审
+- 背景 (Context): ① [事实] `renderTimeGrid` 是日 / 3天 / 周三个视图的共享渲染层，按布局分派到 `renderCompactGrid` / `renderBlockGrid`，两张表都在 `ALL DAY` 容器上方画 `.timenote-day-title-row`；此前 `titleRow.onclick` 把 `currentDate` 设为该天并切到 `day` 视图，点击后仍停在日历里。② [事实] 时间线视图另有「打开日记 ↗」链接，只在 `findDailyNoteFile` 命中时打开，日记不存在时点击无任何反应。③ [事实] `DailyNoteService.addEntry` 已有「逐级建目录 + 创建 `# 日期` / `## quickAddSection` 日记」的成熟路径规则，`findDailyNoteFile` 的索引有 5 秒缓存。
+- 决策 (Decision): ① 在 `TimeNoteView` 新增统一入口 `openDailyNoteForDate(dateStr)`：点击前清 `dailyNoteIndex` 强制重建 → 命中已有日记直接打开；未命中则按 `<periodicNotesFolder>/YYYY/Daily/MM/YYYY-MM-DD.md` 逐级建目录、创建与 QuickAdd 同结构的日记、写回索引并 `Notice`，最后 `getLeaf(false).openFile`。② `renderCompactGrid` / `renderBlockGrid` 两处 `titleRow.onclick` 一律改为调用该入口，并加 `title="打开 YYYY-MM-DD 日记"`。③ 时间线视图「打开日记 ↗」改走同一入口，消除「无日记时无反应」。④ 下钻到日视图仍由顶部「日」标签提供；月 / 季 / 年的日期格点击行为不变（它们没有 `ALL DAY` 行）。⑤ 版本 `1.0.6 → 1.0.7`，新增 `scripts/dev/test-open-daily-note.mjs`（16 项静态断言）接入 `npm test`。
+- 理由 (Reason): 用户要的是「跳转到日记」而不是「在插件里换一个视图」，两者不能靠同一个点击同时满足；统一到一个入口可保证三种周期 × 两种布局 × 时间线共 7 个点击点行为一致，且复用 `addEntry` 的目录/模板规则，不引入第二套日记路径约定。自动创建空日记是为了点空白日期也能到达目标，而不是静默无反应。
+- 备选方案 (Alternatives): 保留点击切日视图、另加右键或图标按钮打开日记（多一步操作，且用户明确要求「直接」）；只在日记存在时打开、缺文件时弹 Notice（点空白日仍到不了日记）；为每个视图各写一份打开逻辑（7 处重复，易漂移）；用 `app.workspace.openLinkText` 走 Obsidian 内部链接（依赖 Daily Notes 插件配置，路径与本插件自己的 `SpiralNotes/YYYY/Daily/MM` 不一致）；改月 / 季 / 年日期格也跳日记（会破坏既有下钻交互，超出本次指令范围）。
+- 影响 (Consequences): `main.ts` 两处 `titleRow.onclick` 与时间线链接共 3 处改为统一入口，新增 `openDailyNoteForDate`；`styles.css` 未改（`.timenote-day-title-row` 已有 `cursor:pointer` / hover）。`npm test` 由 33+23+20+25 扩为 33+23+20+25+16 = 117 项；`npm run bump` 到 1.0.7、真机 vault 重新部署。**签名提交仍需用户本地执行**（会话内 GPG 不可用），连同 2026-11-09 02:2x 遗留的 3 个纯文档同步文件一并 `bash ~/tn-main-commit.sh "提交信息"` 提交并 SSH 推送；点击空白日期会在 vault 里新建一篇空日记，属预期行为。
+
+## DEC-018 — 单时间点记录画成线，不扩展成任务 / 时间块
+日期: 2026-11-09 | 状态: Accepted
+- 确认来源: inverstar 于 2026-11-09 12:2x 指令「对于时间点的记录不要扩展成任务并展示成时间块，而是用线展示对应时间点，至于信息显示在线上或线下，线也可以拖动改变时间，但是不需要拖动边缘来扩展为时间块」
+- Supersedes: 无
+- Superseded-by: 无
+- 复审触发条件 (Review Trigger): 需要把「信息在线上 / 线下」做成设置项、需要让点线支持跨日拖动或秒级回写、需要把「单时间 + `30m` 标签」也改成线、需要点线独立于按天配色体系、同簇点记录常超过 6 条需要更紧凑的堆叠策略时复审
+- 背景 (Context): ⓪ [事实] 本决策**部分修订** DEC-007 / DEC-013 中关于「单时间点默认按 30 分钟绘制成块」的渲染约定，但不推翻两条 ADR 的主体（共享块布局、内容定高、块高恒等于跨度仍全部有效，只是不再适用于点记录），日记数据格式与 `parseLine` 输出也未改动，故 `Supersedes` 记「无」。① [事实] `parseLine` 对单时间点记录一律补 `endSeconds = startSeconds + 1800`，`renderBlockGrid` 再把所有 `hasTime` 条目交给 `layoutTimeBlockClusters` 画成 30 分钟卡片（还带任务复选框），用户看到的是凭空多出来的「任务块」。② [事实] `updateEntryTime` 会把单时间行改写成 `HH:mm-HH:mm` 范围行 —— 拖一次就把点永久变成块。③ [事实] 紧凑流的空闲段计算、时间线视图徽标、QuickAdd 弹窗提示都沿用了这个虚构的 30 分钟。④ [事实] DEC-013「块高恒等于跨度」与 DEC-014「任意块高都能拖边缘改起止」只对有范围的记录成立，套到时间点上就是问题本身。
+- 决策 (Decision): ① **判定**：模块级纯函数 `isPointEntry(e) = !!e.hasTime && !e.isRange`；显式范围与「单时间 + `30m`/`1h`/`45min` 标签」仍是有跨度的块，保留用户显式表达的时长。② **渲染**：点记录从 `layoutTimeBlockClusters` 剔除，改由 `layoutPointLines()` 按「时间 → 行号 → 文本」稳定排序、15 分钟窗口归簇，每条画一条 `top = scale.yOf(startSeconds)` 的水平线；圆点 + 线下标签（时刻 / 内容 / 标签），簇内标签按 `POINT_ROW_H = 20px` 逐行错开；**不创建时间块 DOM、不创建复选框**。③ **信息位置**：默认「线下」（用户把选择权交给我方）；CSS 同时内置 `.timenote-point-line.is-above` 变体，靠 `--tn-label-offset` 翻转到线上，零 JS 改动即可切换，本期不增设设置项。④ **弹性轴**：点线不再按内容撑最多 6 行，改为按小时汇总 `pointNeeds`（每条 20px、多天取最大值）传进 `buildTimeScale` 并加到该行总高；映射仍严格单调 / `yOf`↔`secOf` 互逆，关闭自适应后等距模式忽略该需求。⑤ **拖拽**：新增 `attachPointDrag` —— 整条线上下拖动，位移走 `scale.secOf(baseY + dy)` 反函数、`POINT_SNAP_MINUTES = 1` 吸附，实时改 `top` 与时间胶囊；**没有 `blockEdgeHit`、没有 start/end 模式、没有把手 DOM**，光标全程 `ns-resize`；Blinko 等外部来源标 `is-readonly`、不绑拖拽（仍可点击跳转）。⑥ **回写**：新增 `updateEntryPointTime(entry, startSec)`，只替换行首那个单时间前缀，范围行 / 无时间行拒绝，其余文本、缩进、复选框、列表符、标签一字不动；`updateEntryTime` 原样保留供块拖拽使用，两个入口互不转换。⑦ 时间线视图徽标、QuickAdd 提示、紧凑流 `lastEndSec` 同步去掉虚构的 30m；点线沿用 `--tn-tint` 按天配色。⑧ 新增 `scripts/dev/test-point-lines.mjs`（57 项）与 `preview-point-lines.mjs`（浅/深真机等效预览 + 浏览器探针），`npm test` 扩为 174 项。
+- 理由 (Reason): 「时间点」和「时间段」是两种语义，把所有定时记录都塞进 30 分钟块既篡改了用户数据的含义，也让拖拽回写把数据永久改写掉。判定只看 `isRange`（解析时已区分「显式范围 / 显式时长 / 纯时刻」），不引入新字段、不改日记格式，回写边界可以收得很干净。线精确落在 `yOf(sec)` 上，才能和 DEC-013 的「上下沿 = 真实时刻」保持一致；同簇标签错开而非横向分 lane，是沿用紧凑流「一行一条、不要并列」的既有偏好。点线不参与内容撑高、只按行计 20px，避免一条短记录把整条弹性轴拉高。1 分钟吸附比块的 15 分钟更贴合「精确到秒的时间点」，且不会把 `09:23` 悄悄变成 `09:30`。
+- 备选方案 (Alternatives): 继续用 30 分钟块但改成窄条 / 半透明（仍是块，用户明确否决）；把点记录渲染成零高度块再靠 CSS 伪装成线（拖拽与边缘命中逻辑仍会漏出来，且 `updateEntryTime` 仍会把行改成范围）；复用 `updateEntryTime` 加 `keepPoint` 参数（一个方法两种语义，测试与红线更难守，且容易误把范围行压成点）；线也做上下边缘拖动并允许拉成块（用户明确「不需要拖动边缘来扩展为时间块」）；给信息位置做设置项（本期只是视觉取舍，先交付默认线下 + CSS 变体，等真机反馈再决定是否占一个设置位）；把「单时间 + 30m」也改成线（会抹掉用户显式写下的时长，超出本次指令）。
+- 影响 (Consequences): `main.ts` 新增 `POINT_LINE_BEGIN/END` 纯函数区块（位于 `buildTimeScale` 与 `parseLine` 之间，开发脚本按既有切片自动取到）、`buildTimeScale` 增加可选 `pointNeeds`、`renderBlockGrid` 分流出点线渲染、`DailyNoteService.updateEntryPointTime` 与视图层 `attachPointDrag` / `commitEntryPoint`；`styles.css` 新增 12 条 `.timenote-point-line*` 规则（颜色走 `--tn-tint`，新增的 `color-mix` 遵守「固定 rgba 兜底」红线）。紧凑流仍保留 checkbox 与线行形态，只改空闲段计算；月 / 季 / 年视图不受影响。拖动后带秒的原始时刻会归一到分钟（1 分钟吸附），属已知取舍。**本轮不 bump、不签名提交**：工作区仍叠加未提交的 v1.0.7（DEC-017）改动，按红线 7 由用户在本地决定版号后统一 `npm run bump && npm run build` 再 `bash ~/tn-main-commit.sh "..."`；三件套 + README 已备份后覆盖到真机 vault（`~/tmp/timenote-backup-20261109-1245`，四文件 md5 与仓库一致），用户 reload 插件即可肉眼验收；`data.json` 未动。
