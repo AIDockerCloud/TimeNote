@@ -1,7 +1,7 @@
 {
   "id": "timenote",
   "name": "TimeNote",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "minAppVersion": "1.0.0",
   "description": "基于周期笔记（日记）中带时间戳的行与待办直接生成日历与时间轴视图，精准在时间点上呈现笔记灵感与任务。",
   "author": "AIDockerCloud",

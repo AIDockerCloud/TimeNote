@@ -36,6 +36,8 @@ const DEFAULT_SETTINGS = {
   quickAddSection: "## 灵感闪念",
   layoutMode: "block",
   defaultDuration: 60,
+  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
+  defaultAddType: "block",
   allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
@@ -162,6 +164,9 @@ const BLOCK_RULER_W = 64;
 // 时间吸附：拖拽创建 / 调节范围时按 N 分钟取整，避免出现 14:37 这种脏时间
 const DRAG_SNAP_MINUTES = 15;
 const MIN_BLOCK_SECONDS = 15 * 60;
+// 从空白槽新建「时间点」也按 15 分钟吸附；已有点线的拖动仍是 1 分钟（DEC-018），
+// 两者不能混：一个是凭空定时刻，一个是微调已有记录。
+const POINT_CREATE_SNAP_MINUTES = 15;
 
 function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
   const step = Math.max(1, minutes) * 60;
@@ -443,6 +448,50 @@ function layoutPointLines(entries, dayStartSec, dayEndSec) {
   return out;
 }
 // --- POINT_LINE_END ---
+
+// --- CROSS_DAY_BEGIN ---
+// 跨天拖动（DEC-022）：把一条定时记录从 A 天日记搬到 B 天日记。
+// 判定 / 行首改写 / 子项收集都放在模块级纯函数里，方便开发脚本抽真实实现验证
+// 「只搬目标行、绝不误删用户内容」这条红线。
+function normalizeAddType(raw) {
+  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+}
+
+// 按记录类型改写行首时间前缀：块写 HH:mm-HH:mm，点只写一个 HH:mm。
+// 不认识的行返回 null —— 调用方必须据此放弃整个移动，不能删任何东西。
+function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
+  const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+  const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+  if (isPoint) {
+    // 点永远不能被悄悄扩成块：范围行直接拒绝，单时间行只换那一刻
+    if (rangeRe.test(line) || !singleRe.test(line)) return null;
+    return line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp || ""}`);
+  }
+  const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+  let out;
+  if (rangeRe.test(line)) {
+    out = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else if (singleRe.test(line)) {
+    out = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else {
+    return null;
+  }
+  // 行尾时长标签（30m / 1h）与新范围冲突，去掉那一个，其余正文一字不动
+  return out.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, '');
+}
+
+// 目标行后面连续的缩进子项属于这条记录，必须一起搬走；否则它们会留在
+// 原日记变成没有父项的孤儿行（parseDailyFile 会直接忽略）。
+function collectSubItemLines(lines, idx) {
+  const out = [];
+  for (let i = idx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || !/^(?:\t+| {2,})/.test(l)) break;
+    out.push(l);
+  }
+  return out;
+}
+// --- CROSS_DAY_END ---
 
 // --- SECTION_HEADING_BEGIN ---
 // 快速记录默认插入标题允许自带层级：设置里写 "## 灵感闪念" / "### 随手记"
@@ -903,14 +952,54 @@ class DailyNoteService {
     return true;
   }
 
+  // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
+  // 只搬「一条记录」，不重写两篇笔记的其它内容；行号对不上时宁可拒绝，绝不误删。
+  async moveEntryToDate(entry, targetDate, startSec, endSec) {
+    if (!entry || !targetDate || entry.dateStr === targetDate) return false;
+    // Blinko 等外部来源没有可安全删除的日记行，只读
+    if (entry.source && entry.source !== "daily") return false;
+
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof TFile)) return false;
+
+    const content = await this.app.vault.read(file);
+    const lines = content.split('\n');
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    // 解析之后日记可能被外部改过：行号漂移时整笔操作作废，防止删掉别人的内容
+    if (lines[idx] !== entry.rawLine) return false;
+
+    const movedLine = rewriteEntryLineTime(lines[idx], startSec, endSec, isPointEntry(entry));
+    if (movedLine === null) return false;
+    const moving = [movedLine, ...collectSubItemLines(lines, idx)];
+
+    // 先写目标文件再删源行：中途失败最多留下一份重复，绝不会把记录弄丢。
+    // 复用 addEntry 的建目录 / 建日记 / 找标题下插入逻辑，避免第二套路径约定。
+    // 目标文件写失败时直接放弃，源文件一个字都不动。
+    try {
+      await this.addEntry(targetDate, "", "", false, [], "", moving);
+    } catch (err) {
+      return false;
+    }
+
+    const remaining = lines.slice();
+    remaining.splice(idx, moving.length);
+    await this.app.vault.modify(file, remaining.join('\n'));
+    this.fileCache.delete(file.path);
+    return true;
+  }
+
   // Append new entry to daily note
-  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
+  // rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
+  // 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
     let file = this.findDailyNoteFile(dateStr);
     const tagPart = tags.length > 0 ? ' ' + tags.map(t => '#' + t).join(' ') : '';
     const linePrefix = isTask ? '- [ ] ' : '- ';
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : '';
-    const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const newLine = (rawLines && rawLines.length) ? rawLines.join('\n') : generatedLine;
     // 层级与标题都来自设置，不再写死 "## "
     const section = parseQuickAddSection(this.settings.quickAddSection);
     const headerRe = sectionHeaderRegex(section.title);
@@ -1306,6 +1395,24 @@ class TimenoteView extends ItemView {
       await this.plugin.saveSettings();
     };
 
+    // 新增类型切换（DEC-022）：决定空白槽点击 / 拖拽与「+ 记一条」默认创建块还是时间点。
+    // 只改设置与按钮文字，不重渲染 —— 槽位交互每次按下时都读当前设置，切换立即生效，
+    // 也不会像整视图重建那样把用户的滚动位置重置掉。
+    const addTypeBtn = actions.createEl("button", {
+      text: this.getAddType() === "point" ? "新增：时间点" : "新增：时间块",
+      cls: "timenote-layout-toggle",
+      attr: {
+        title: "切换新建记录类型：时间块（起止时间）/ 时间点（只有时刻）。按住 Alt 点空白槽可临时记时间点。"
+      }
+    });
+    addTypeBtn.onclick = async () => {
+      this.plugin.settings.defaultAddType = this.getAddType() === "point" ? "block" : "point";
+      await this.plugin.saveSettings();
+      const isPoint = this.getAddType() === "point";
+      addTypeBtn.textContent = isPoint ? "新增：时间点" : "新增：时间块";
+      new Notice(isPoint ? "新建记录：时间点（只记时刻）" : "新建记录：时间块（起止时间）");
+    };
+
     // Quick Add Button
     const addBtn = actions.createEl("button", { text: "+ 记一条", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
@@ -1486,6 +1593,32 @@ class TimenoteView extends ItemView {
 
   getLayoutMode() {
     return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
+  }
+
+  // 新建记录类型：设置页与工具栏共用同一个状态，非法值一律回退成时间块（DEC-022）
+  getAddType() {
+    return normalizeAddType(this.plugin.settings.defaultAddType);
+  }
+
+  // 拖动时按指针横坐标找目标日期列。只认当前视图里真实存在的列：
+  // 落在刻度列 / 容器外返回 null，不臆造视图范围之外的日期。
+  findDropDate(clientX, homeDate, columns) {
+    for (const c of columns) {
+      const r = c.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) {
+        const ds = c.dataset.dateStr;
+        return ds && ds !== homeDate ? ds : null;
+      }
+    }
+    return null;
+  }
+
+  // 拖动中的落点提示：高亮目标列，其余列清掉
+  markDropDate(columns, targetDate) {
+    columns.forEach(c => {
+      if (c.dataset.dateStr === targetDate) c.classList.add("is-drop-target");
+      else c.classList.remove("is-drop-target");
+    });
   }
 
   renderCompactGrid(container, days) {
@@ -1920,6 +2053,8 @@ class TimenoteView extends ItemView {
       const col = colsContainer.createEl("div", {
         cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
       });
+      // 跨天拖动靠列上的日期标识找落点（DEC-022）
+      col.dataset.dateStr = dateStr;
       col.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
 
       for (let h = startHour; h <= endHour; h++) {
@@ -2087,14 +2222,26 @@ class TimenoteView extends ItemView {
     slotLayer.onpointerdown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
-      const anchorSec = snapSeconds(secAt(ev.clientY));
+      // 时间点模式（工具栏切换，或按住 Alt 临时切换）：只定一个时刻，不画范围预览（DEC-022）
+      const asPoint = ev.altKey || this.getAddType() === "point";
+      const anchorSec = snapSeconds(secAt(ev.clientY),
+        asPoint ? POINT_CREATE_SNAP_MINUTES : DRAG_SNAP_MINUTES);
       const startY = ev.clientY;
       let moved = false;
       let ghost: HTMLElement | null = null;
+      let pointSec = Math.max(dayStartSec, Math.min(dayEndSec, anchorSec));
 
       const onMove = (e: PointerEvent) => {
         if (!moved && Math.abs(e.clientY - startY) < 5) return;
         moved = true;
+        if (asPoint) {
+          pointSec = Math.max(dayStartSec, Math.min(dayEndSec,
+            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)));
+          if (!ghost) ghost = col.createEl("div", { cls: "timenote-point-ghost" });
+          ghost.style.top = `${scale.yOf(pointSec)}px`;
+          ghost.textContent = formatSecondsToTime(pointSec);
+          return;
+        }
         const cur = snapSeconds(secAt(e.clientY));
         let s = Math.min(anchorSec, cur);
         let en = Math.max(anchorSec, cur);
@@ -2111,11 +2258,19 @@ class TimenoteView extends ItemView {
       const onUp = (e: PointerEvent) => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        if (asPoint) {
+          if (ghost) ghost.remove();
+          // 单击与拖动都只落一个时刻：不生成结束时间，弹窗里结束框也会被禁用
+          const sec = moved ? pointSec : Math.max(dayStartSec, Math.min(dayEndSec,
+            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)));
+          this.openQuickAdd(dateStr, sec, sec, "point");
+          return;
+        }
         if (moved && ghost) {
           const s = Number(ghost.dataset.start);
           const en = Number(ghost.dataset.end);
           ghost.remove();
-          this.openQuickAdd(dateStr, s, en);
+          this.openQuickAdd(dateStr, s, en, "block");
           return;
         }
         if (ghost) ghost.remove();
@@ -2123,7 +2278,7 @@ class TimenoteView extends ItemView {
         const rawSec = secAt(e.clientY);
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
         const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
-        this.openQuickAdd(dateStr, snapped, endSec);
+        this.openQuickAdd(dateStr, snapped, endSec, "block");
       };
 
       window.addEventListener("pointermove", onMove);
@@ -2131,10 +2286,13 @@ class TimenoteView extends ItemView {
     };
   }
 
-  openQuickAdd(dateStr, startSec, endSec) {
+  openQuickAdd(dateStr, startSec, endSec, type = "block") {
+    const isPoint = normalizeAddType(type) === "point";
     new QuickAddModal(
       this.app, this.plugin, dateStr, () => this.renderView(),
-      formatSecondsToTime(startSec), formatSecondsToTime(endSec)
+      formatSecondsToTime(startSec),
+      isPoint ? "" : formatSecondsToTime(endSec),
+      isPoint ? "point" : "block"
     ).open();
   }
 
@@ -2144,6 +2302,15 @@ class TimenoteView extends ItemView {
 
     // 跨出可见时间轴范围的记录不参与拖拽，避免把隐藏部分裁掉
     if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
+
+    // 跨天拖动（DEC-022）：每列带 dataset.dateStr，指针横向进入别的列即换日期。
+    // 边缘模式（start / end）只改起止、不允许跨天，免得「调时长」误变成「搬记录」。
+    const col = block.parentElement as HTMLElement | null;
+    const columns = col && col.parentElement
+      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
+      : [];
+    const homeDate = entry.dateStr;
+    const canMoveDay = !entry.source || entry.source === "daily";
 
     // 位移 -> 时间增量：弹性轴的斜率逐行不同，用「原位置 + dy」查反函数比
     // 直接 dy/slotHeight 更准；上边缘用起点基准、下边缘用终点基准，手感才不会跳
@@ -2178,10 +2345,13 @@ class TimenoteView extends ItemView {
       if (offsetY <= edge) mode = "start";
       else if (rect.height - offsetY <= edge) mode = "end";
 
+      const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
       let curStart = origStart;
       let curEnd = origEnd;
+      let dragDx = 0;
+      let targetDate = null;
 
       const tagSuffix = entry.tags && entry.tags.length > 0 ? ` · #${entry.tags.slice(0, 2).join(" #")}` : "";
       const paint = () => {
@@ -2189,19 +2359,27 @@ class TimenoteView extends ItemView {
         const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
         block.style.top = `${top}px`;
         block.style.height = `${spanPx}px`;
-        meta.textContent = `${formatSecondsToTime(curStart)} – ${formatSecondsToTime(curEnd)}${tagSuffix}`;
+        block.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
+        meta.textContent = `${formatSecondsToTime(curStart)} – ${formatSecondsToTime(curEnd)}${tagSuffix}${targetDate ? ` → ${targetDate}` : ""}`;
         duration.textContent = formatDuration(curEnd - curStart);
       };
 
       const onMove = (e: PointerEvent) => {
         const dy = e.clientY - startY;
-        if (!moved && Math.abs(dy) < 4) return;
+        dragDx = e.clientX - startX;
+        // 横向阈值单独放宽到 12px：纯横向拖动才能启动，又不至于轻微抖动就跨天
+        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
         if (!moved) {
           moved = true;
           block.addClass("is-dragging");
           block.style.cursor = "grabbing";
           this.hideHoverTooltip();
         }
+        // 只有中部平移模式认横向落点；边缘改起止时横向位移一律忽略
+        targetDate = (mode === "move" && canMoveDay && Math.abs(dragDx) >= 12)
+          ? this.findDropDate(e.clientX, homeDate, columns)
+          : null;
+        this.markDropDate(columns, targetDate);
         const deltaStart = snapSeconds(scale.secOf(baseStartY + dy) - origStart);
         const deltaEnd = snapSeconds(scale.secOf(baseEndY + dy) - origEnd);
         // 一律夹在可见时间轴内，避免把块拖出 startHour–endHour 后整块消失
@@ -2224,9 +2402,19 @@ class TimenoteView extends ItemView {
         window.removeEventListener("pointerup", onUp);
         block.removeClass("is-dragging");
         block.style.cursor = "";
+        this.markDropDate(columns, null);
         if (!moved) return;
         block.dataset.dragMoved = "1";
         window.setTimeout(() => { delete block.dataset.dragMoved; }, 80);
+        const moveTo = targetDate;
+        dragDx = 0;
+        targetDate = null;
+        block.style.transform = "";
+        if (moveTo) {
+          // 换日期时哪怕时刻没变也要提交：先写目标日记、再删原日记那一行
+          void this.commitEntryMove(entry, moveTo, curStart, curEnd);
+          return;
+        }
         if (curStart === origStart && curEnd === origEnd) {
           paint();
           return;
@@ -2250,6 +2438,29 @@ class TimenoteView extends ItemView {
     this.renderView();
   }
 
+  // 跨天拖动回写（DEC-022）：与只改时刻的两个 commit 分开，失败一律整视图重渲染复原
+  async commitEntryMove(entry, targetDate, startSec, endSec) {
+    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, endSec);
+    if (!ok) {
+      new Notice("跨天移动未写入：目标行已变化或来源只读，已恢复原状");
+      this.renderView();
+      return;
+    }
+    new Notice(`已移动到 ${targetDate}：${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.renderView();
+  }
+
+  async commitEntryPointMove(entry, targetDate, startSec) {
+    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, startSec);
+    if (!ok) {
+      new Notice("跨天移动未写入：目标行已变化或来源只读，已恢复原状");
+      this.renderView();
+      return;
+    }
+    new Notice(`已移动到 ${targetDate}：${formatSecondsToTime(startSec)}`);
+    this.renderView();
+  }
+
   // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
   // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
   attachPointDrag(line, entry, timeBadge, scale) {
@@ -2261,38 +2472,62 @@ class TimenoteView extends ItemView {
     const origStart = Number(entry.startSeconds) || 0;
     if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
 
+    // 点线也支持横向拖到别的日期列（DEC-022）：与时间块共用 findDropDate / 落点高亮
+    const col = line.parentElement as HTMLElement | null;
+    const columns = col && col.parentElement
+      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
+      : [];
+    const homeDate = entry.dateStr;
+
     const baseY = scale.yOf(origStart);
     let curStart = origStart;
     line.onpointerdown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
       ev.stopPropagation();
+      const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
+      let dragDx = 0;
+      let targetDate = null;
 
       const onMove = (e: PointerEvent) => {
         const dy = e.clientY - startY;
-        if (!moved && Math.abs(dy) < 4) return;
+        dragDx = e.clientX - startX;
+        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
         if (!moved) {
           moved = true;
           line.addClass("is-dragging");
           this.hideHoverTooltip();
         }
+        targetDate = Math.abs(dragDx) >= 12
+          ? this.findDropDate(e.clientX, homeDate, columns)
+          : null;
+        this.markDropDate(columns, targetDate);
         // 弹性轴行高不等距，位移 → 时刻必须走 scale 反函数（AGENTS 红线 9）
         const raw = scale.secOf(baseY + dy);
         curStart = Math.max(scale.dayStartSec,
           Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES)));
         line.style.top = `${scale.yOf(curStart)}px`;
-        timeBadge.textContent = formatSecondsToTime(curStart);
+        line.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
+        timeBadge.textContent = formatSecondsToTime(curStart) +
+          (targetDate ? ` → ${targetDate.slice(5)}` : "");
       };
 
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         line.removeClass("is-dragging");
+        line.style.transform = "";
+        this.markDropDate(columns, null);
         if (!moved) return;
         line.dataset.dragMoved = "1";
         window.setTimeout(() => { delete line.dataset.dragMoved; }, 80);
+        const moveTo = targetDate;
+        if (moveTo) {
+          void this.commitEntryPointMove(entry, moveTo, curStart);
+          return;
+        }
         if (curStart === origStart) return;
         void this.commitEntryPoint(entry, curStart);
       };
@@ -2913,12 +3148,17 @@ class TimenoteView extends ItemView {
 class QuickAddModal extends Modal {
   // TODO(types): 渐进替换为显式字段声明
   [key: string]: any;
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = undefined, prefillType = "") {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
+    // 记录类型（DEC-022）：显式传入优先，否则跟随设置里的默认类型。
+    // prefillEndTime 用 undefined 区分「没传（按类型补默认时长）」与「传了空串（时间点，无结束时间）」。
+    this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
     this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
-    this.endTimeStr = prefillEndTime || addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
+    this.endTimeStr = prefillEndTime !== undefined
+      ? prefillEndTime
+      : (this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60));
     this.isTask = false;
     this.content = "";
     this.tagsStr = "";
@@ -2931,6 +3171,17 @@ class QuickAddModal extends Modal {
     contentEl.createEl("h3", { text: "⚡ 快速记录至时间笔记 (Daily Note)" });
 
     const form = contentEl.createEl("div", { cls: "timenote-modal-form" });
+
+    // 记录类型（DEC-022）：把「只能新增时间块」补成显式二选一。
+    // 时间块写 HH:mm-HH:mm；时间点只写一个 HH:mm，渲染成时刻线、不生成块。
+    const typeRow = form.createEl("div", { cls: "timenote-modal-row" });
+    typeRow.createEl("span", { text: "记录类型", cls: "timenote-modal-label" });
+    const typeSelect = typeRow.createEl("select", { cls: "timenote-modal-input" }) as HTMLSelectElement;
+    const blockOption = typeSelect.createEl("option", { text: "时间块（起止时间）" }) as HTMLOptionElement;
+    const pointOption = typeSelect.createEl("option", { text: "时间点（只记时刻）" }) as HTMLOptionElement;
+    blockOption.value = "block";
+    pointOption.value = "point";
+    typeSelect.value = this.addType;
 
     // Date & Time Row
     const row1 = form.createEl("div", { cls: "timenote-modal-row" });
@@ -2946,15 +3197,19 @@ class QuickAddModal extends Modal {
     });
     const endTimeInput = row1.createEl("input", {
       cls: "timenote-modal-input",
-      attr: { type: "text", placeholder: "结束时间 (留空为单时间点)", value: this.endTimeStr }
-    });
+      attr: { type: "text", placeholder: "结束时间（时间点模式不需要）", value: this.endTimeStr }
+    }) as HTMLInputElement;
     const durationHint = row1.createEl("span", { cls: "timenote-duration-hint", text: "" });
     const updateDurationHint = () => {
+      if (this.addType === "point") {
+        durationHint.textContent = "时间点（只记时刻，不成块）";
+        return;
+      }
       const sSec = parseTimeToSeconds(this.timeStr);
       const eSec = parseTimeToSeconds(this.endTimeStr);
       durationHint.textContent = (sSec !== null && eSec !== null && eSec > sSec)
         ? `时长 ${formatDuration(eSec - sSec)}`
-        : (this.endTimeStr ? "结束需晚于开始" : "时间点（不成块）");
+        : (this.endTimeStr ? "结束需晚于开始" : `默认时长 ${this.plugin.settings.defaultDuration || 60} 分钟`);
     };
     timeInput.oninput = (e) => {
       this.timeStr = (e.target as HTMLInputElement).value.trim();
@@ -2964,7 +3219,25 @@ class QuickAddModal extends Modal {
       this.endTimeStr = (e.target as HTMLInputElement).value.trim();
       updateDurationHint();
     };
-    updateDurationHint();
+    // 切类型时同步结束时间输入框：点模式清空并禁用，切回块模式补默认时长
+    const syncType = () => {
+      const isPoint = this.addType === "point";
+      endTimeInput.disabled = isPoint;
+      endTimeInput.style.opacity = isPoint ? "0.45" : "";
+      if (isPoint) {
+        this.endTimeStr = "";
+        endTimeInput.value = "";
+      } else if (!this.endTimeStr) {
+        this.endTimeStr = addMinutesToTime(this.timeStr, this.plugin.settings.defaultDuration || 60);
+        endTimeInput.value = this.endTimeStr;
+      }
+      updateDurationHint();
+    };
+    typeSelect.onchange = (e) => {
+      this.addType = normalizeAddType((e.target as HTMLSelectElement).value);
+      syncType();
+    };
+    syncType();
 
     // Is Task Row
     const row2 = form.createEl("div", { cls: "timenote-modal-row" });
@@ -3004,8 +3277,20 @@ class QuickAddModal extends Modal {
         return;
       }
       const startStr = this.timeStr.trim();
-      const endStr = this.endTimeStr.trim();
       const hasExplicitRange = /[-~至到]/.test(startStr);
+      // 时间点模式是权威开关：不带结束时间、也不接受写在开始时间里的范围
+      if (this.addType === "point" && hasExplicitRange) {
+        new Notice("时间点只记一个时刻：请去掉开始时间里的范围，或切换成时间块");
+        return;
+      }
+      let endStr = this.addType === "point" ? "" : this.endTimeStr.trim();
+      if (this.addType === "block" && !endStr && !hasExplicitRange && startStr) {
+        endStr = addMinutesToTime(startStr, this.plugin.settings.defaultDuration || 60);
+      }
+      if (startStr && !hasExplicitRange && parseTimeToSeconds(startStr) === null) {
+        new Notice("时间格式不正确，请使用 HH:mm！");
+        return;
+      }
       if (!hasExplicitRange && endStr) {
         const sSec = parseTimeToSeconds(startStr);
         const eSec = parseTimeToSeconds(endStr);
@@ -3027,7 +3312,7 @@ class QuickAddModal extends Modal {
         tags,
         hasExplicitRange ? "" : endStr
       );
-      new Notice(`✅ 已成功记录到 ${this.targetDate} 日记中！`);
+      new Notice(`✅ 已记录${this.addType === "point" ? "时间点" : "时间块"}到 ${this.targetDate} 日记中！`);
       this.close();
       if (this.onSaved) this.onSaved();
     };
@@ -3199,8 +3484,23 @@ class TimenoteSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
+      .setName("新建记录默认类型")
+      .setDesc("空白槽点击 / 拖拽、工具栏「+ 记一条」与快速记录弹窗默认创建哪种记录。时间块写起止时间；时间点只记一个时刻、在日历上画成时刻线。工具栏的「新增：时间块 / 时间点」按钮可随时切换；块布局里按住 Alt 点空白槽可临时记时间点。")
+      .addDropdown(drop => drop
+        .addOption("block", "时间块（起止时间）")
+        .addOption("point", "时间点（只记时刻）")
+        .setValue(normalizeAddType(this.plugin.settings.defaultAddType))
+        .onChange(async (val) => {
+          this.plugin.settings.defaultAddType = normalizeAddType(val);
+          await this.plugin.saveSettings();
+          // 让工具栏「新增：…」按钮的文字跟着同步
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
+            .forEach(leaf => (leaf.view as TimenoteView).renderView());
+        }));
+
+    new Setting(containerEl)
       .setName("新建时间块默认时长")
-      .setDesc("从日历空白槽点击、或打开快速记录时，默认预填的结束时间。")
+      .setDesc("从日历空白槽点击、或打开快速记录时，默认预填的结束时间（时间点模式不预填）。")
       .addDropdown(drop => drop
         .addOption("30", "30 分钟")
         .addOption("60", "1 小时")

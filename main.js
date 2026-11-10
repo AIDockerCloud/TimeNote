@@ -43,6 +43,8 @@ var DEFAULT_SETTINGS = {
   quickAddSection: "## \u7075\u611F\u95EA\u5FF5",
   layoutMode: "block",
   defaultDuration: 60,
+  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
+  defaultAddType: "block",
   allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true
@@ -151,6 +153,7 @@ var BLOCK_BOTTOM_GUTTER = 14;
 var BLOCK_RULER_W = 64;
 var DRAG_SNAP_MINUTES = 15;
 var MIN_BLOCK_SECONDS = 15 * 60;
+var POINT_CREATE_SNAP_MINUTES = 15;
 function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
   const step = Math.max(1, minutes) * 60;
   return Math.round(sec / step) * step;
@@ -366,6 +369,36 @@ function layoutPointLines(entries, dayStartSec, dayEndSec) {
       });
     });
   });
+  return out;
+}
+function normalizeAddType(raw) {
+  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+}
+function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
+  const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+  const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+  if (isPoint) {
+    if (rangeRe.test(line) || !singleRe.test(line)) return null;
+    return line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp || ""}`);
+  }
+  const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+  let out;
+  if (rangeRe.test(line)) {
+    out = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else if (singleRe.test(line)) {
+    out = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else {
+    return null;
+  }
+  return out.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+}
+function collectSubItemLines(lines, idx) {
+  const out = [];
+  for (let i = idx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || !/^(?:\t+| {2,})/.test(l)) break;
+    out.push(l);
+  }
   return out;
 }
 function parseQuickAddSection(raw) {
@@ -726,14 +759,43 @@ var DailyNoteService = class {
     this.fileCache.delete(file.path);
     return true;
   }
+  // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
+  // 只搬「一条记录」，不重写两篇笔记的其它内容；行号对不上时宁可拒绝，绝不误删。
+  async moveEntryToDate(entry, targetDate, startSec, endSec) {
+    if (!entry || !targetDate || entry.dateStr === targetDate) return false;
+    if (entry.source && entry.source !== "daily") return false;
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof import_obsidian.TFile)) return false;
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    if (lines[idx] !== entry.rawLine) return false;
+    const movedLine = rewriteEntryLineTime(lines[idx], startSec, endSec, isPointEntry(entry));
+    if (movedLine === null) return false;
+    const moving = [movedLine, ...collectSubItemLines(lines, idx)];
+    try {
+      await this.addEntry(targetDate, "", "", false, [], "", moving);
+    } catch (err) {
+      return false;
+    }
+    const remaining = lines.slice();
+    remaining.splice(idx, moving.length);
+    await this.app.vault.modify(file, remaining.join("\n"));
+    this.fileCache.delete(file.path);
+    return true;
+  }
   // Append new entry to daily note
-  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
+  // rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
+  // 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
     let file = this.findDailyNoteFile(dateStr);
     const tagPart = tags.length > 0 ? " " + tags.map((t) => "#" + t).join(" ") : "";
     const linePrefix = isTask ? "- [ ] " : "- ";
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : "";
-    const newLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const newLine = rawLines && rawLines.length ? rawLines.join("\n") : generatedLine;
     const section = parseQuickAddSection(this.settings.quickAddSection);
     const headerRe = sectionHeaderRegex(section.title);
     if (!file) {
@@ -1047,6 +1109,20 @@ var TimenoteView = class extends import_obsidian.ItemView {
       this.plugin.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
       await this.plugin.saveSettings();
     };
+    const addTypeBtn = actions.createEl("button", {
+      text: this.getAddType() === "point" ? "\u65B0\u589E\uFF1A\u65F6\u95F4\u70B9" : "\u65B0\u589E\uFF1A\u65F6\u95F4\u5757",
+      cls: "timenote-layout-toggle",
+      attr: {
+        title: "\u5207\u6362\u65B0\u5EFA\u8BB0\u5F55\u7C7B\u578B\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09/ \u65F6\u95F4\u70B9\uFF08\u53EA\u6709\u65F6\u523B\uFF09\u3002\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002"
+      }
+    });
+    addTypeBtn.onclick = async () => {
+      this.plugin.settings.defaultAddType = this.getAddType() === "point" ? "block" : "point";
+      await this.plugin.saveSettings();
+      const isPoint = this.getAddType() === "point";
+      addTypeBtn.textContent = isPoint ? "\u65B0\u589E\uFF1A\u65F6\u95F4\u70B9" : "\u65B0\u589E\uFF1A\u65F6\u95F4\u5757";
+      new import_obsidian.Notice(isPoint ? "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" : "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09");
+    };
     const addBtn = actions.createEl("button", { text: "+ \u8BB0\u4E00\u6761", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
       new QuickAddModal(this.app, this.plugin, this.currentDate.format("YYYY-MM-DD"), () => {
@@ -1203,6 +1279,29 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
   getLayoutMode() {
     return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
+  }
+  // 新建记录类型：设置页与工具栏共用同一个状态，非法值一律回退成时间块（DEC-022）
+  getAddType() {
+    return normalizeAddType(this.plugin.settings.defaultAddType);
+  }
+  // 拖动时按指针横坐标找目标日期列。只认当前视图里真实存在的列：
+  // 落在刻度列 / 容器外返回 null，不臆造视图范围之外的日期。
+  findDropDate(clientX, homeDate, columns) {
+    for (const c of columns) {
+      const r = c.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) {
+        const ds = c.dataset.dateStr;
+        return ds && ds !== homeDate ? ds : null;
+      }
+    }
+    return null;
+  }
+  // 拖动中的落点提示：高亮目标列，其余列清掉
+  markDropDate(columns, targetDate) {
+    columns.forEach((c) => {
+      if (c.dataset.dateStr === targetDate) c.classList.add("is-drop-target");
+      else c.classList.remove("is-drop-target");
+    });
   }
   renderCompactGrid(container, days) {
     const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
@@ -1551,6 +1650,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const col = colsContainer.createEl("div", {
         cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
       });
+      col.dataset.dateStr = dateStr;
       col.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
       for (let h = startHour; h <= endHour; h++) {
         const line = col.createEl("div", { cls: "timenote-block-hour-line" });
@@ -1689,13 +1789,28 @@ var TimenoteView = class extends import_obsidian.ItemView {
     slotLayer.onpointerdown = (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
-      const anchorSec = snapSeconds(secAt(ev.clientY));
+      const asPoint = ev.altKey || this.getAddType() === "point";
+      const anchorSec = snapSeconds(
+        secAt(ev.clientY),
+        asPoint ? POINT_CREATE_SNAP_MINUTES : DRAG_SNAP_MINUTES
+      );
       const startY = ev.clientY;
       let moved = false;
       let ghost = null;
+      let pointSec = Math.max(dayStartSec, Math.min(dayEndSec, anchorSec));
       const onMove = (e) => {
         if (!moved && Math.abs(e.clientY - startY) < 5) return;
         moved = true;
+        if (asPoint) {
+          pointSec = Math.max(dayStartSec, Math.min(
+            dayEndSec,
+            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)
+          ));
+          if (!ghost) ghost = col.createEl("div", { cls: "timenote-point-ghost" });
+          ghost.style.top = `${scale.yOf(pointSec)}px`;
+          ghost.textContent = formatSecondsToTime(pointSec);
+          return;
+        }
         const cur = snapSeconds(secAt(e.clientY));
         let s = Math.min(anchorSec, cur);
         let en = Math.max(anchorSec, cur);
@@ -1711,35 +1826,50 @@ var TimenoteView = class extends import_obsidian.ItemView {
       const onUp = (e) => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        if (asPoint) {
+          if (ghost) ghost.remove();
+          const sec = moved ? pointSec : Math.max(dayStartSec, Math.min(
+            dayEndSec,
+            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)
+          ));
+          this.openQuickAdd(dateStr, sec, sec, "point");
+          return;
+        }
         if (moved && ghost) {
           const s = Number(ghost.dataset.start);
           const en = Number(ghost.dataset.end);
           ghost.remove();
-          this.openQuickAdd(dateStr, s, en);
+          this.openQuickAdd(dateStr, s, en, "block");
           return;
         }
         if (ghost) ghost.remove();
         const rawSec = secAt(e.clientY);
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
         const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
-        this.openQuickAdd(dateStr, snapped, endSec);
+        this.openQuickAdd(dateStr, snapped, endSec, "block");
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp, { once: true });
     };
   }
-  openQuickAdd(dateStr, startSec, endSec) {
+  openQuickAdd(dateStr, startSec, endSec, type = "block") {
+    const isPoint = normalizeAddType(type) === "point";
     new QuickAddModal(
       this.app,
       this.plugin,
       dateStr,
       () => this.renderView(),
       formatSecondsToTime(startSec),
-      formatSecondsToTime(endSec)
+      isPoint ? "" : formatSecondsToTime(endSec),
+      isPoint ? "point" : "block"
     ).open();
   }
   attachBlockDrag(block, entry, meta, duration, scale) {
     if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
+    const col = block.parentElement;
+    const columns = col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
+    const homeDate = entry.dateStr;
+    const canMoveDay = !entry.source || entry.source === "daily";
     const origStart = Number(entry.startSeconds) || 0;
     const origEnd = Number(entry.endSeconds) || origStart + 1800;
     const baseStartY = scale.yOf(origStart);
@@ -1764,28 +1894,35 @@ var TimenoteView = class extends import_obsidian.ItemView {
       let mode = "move";
       if (offsetY <= edge) mode = "start";
       else if (rect.height - offsetY <= edge) mode = "end";
+      const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
       let curStart = origStart;
       let curEnd = origEnd;
+      let dragDx = 0;
+      let targetDate = null;
       const tagSuffix = entry.tags && entry.tags.length > 0 ? ` \xB7 #${entry.tags.slice(0, 2).join(" #")}` : "";
       const paint = () => {
         const top = scale.yOf(curStart);
         const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
         block.style.top = `${top}px`;
         block.style.height = `${spanPx}px`;
-        meta.textContent = `${formatSecondsToTime(curStart)} \u2013 ${formatSecondsToTime(curEnd)}${tagSuffix}`;
+        block.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
+        meta.textContent = `${formatSecondsToTime(curStart)} \u2013 ${formatSecondsToTime(curEnd)}${tagSuffix}${targetDate ? ` \u2192 ${targetDate}` : ""}`;
         duration.textContent = formatDuration(curEnd - curStart);
       };
       const onMove = (e) => {
         const dy = e.clientY - startY;
-        if (!moved && Math.abs(dy) < 4) return;
+        dragDx = e.clientX - startX;
+        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
         if (!moved) {
           moved = true;
           block.addClass("is-dragging");
           block.style.cursor = "grabbing";
           this.hideHoverTooltip();
         }
+        targetDate = mode === "move" && canMoveDay && Math.abs(dragDx) >= 12 ? this.findDropDate(e.clientX, homeDate, columns) : null;
+        this.markDropDate(columns, targetDate);
         const deltaStart = snapSeconds(scale.secOf(baseStartY + dy) - origStart);
         const deltaEnd = snapSeconds(scale.secOf(baseEndY + dy) - origEnd);
         if (mode === "move") {
@@ -1806,11 +1943,20 @@ var TimenoteView = class extends import_obsidian.ItemView {
         window.removeEventListener("pointerup", onUp);
         block.removeClass("is-dragging");
         block.style.cursor = "";
+        this.markDropDate(columns, null);
         if (!moved) return;
         block.dataset.dragMoved = "1";
         window.setTimeout(() => {
           delete block.dataset.dragMoved;
         }, 80);
+        const moveTo = targetDate;
+        dragDx = 0;
+        targetDate = null;
+        block.style.transform = "";
+        if (moveTo) {
+          void this.commitEntryMove(entry, moveTo, curStart, curEnd);
+          return;
+        }
         if (curStart === origStart && curEnd === origEnd) {
           paint();
           return;
@@ -1831,6 +1977,27 @@ var TimenoteView = class extends import_obsidian.ItemView {
     new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
     this.renderView();
   }
+  // 跨天拖动回写（DEC-022）：与只改时刻的两个 commit 分开，失败一律整视图重渲染复原
+  async commitEntryMove(entry, targetDate, startSec, endSec) {
+    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, endSec);
+    if (!ok) {
+      new import_obsidian.Notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.renderView();
+      return;
+    }
+    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.renderView();
+  }
+  async commitEntryPointMove(entry, targetDate, startSec) {
+    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, startSec);
+    if (!ok) {
+      new import_obsidian.Notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.renderView();
+      return;
+    }
+    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)}`);
+    this.renderView();
+  }
   // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
   // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
   attachPointDrag(line, entry, timeBadge, scale) {
@@ -1840,39 +2007,56 @@ var TimenoteView = class extends import_obsidian.ItemView {
     }
     const origStart = Number(entry.startSeconds) || 0;
     if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
+    const col = line.parentElement;
+    const columns = col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
+    const homeDate = entry.dateStr;
     const baseY = scale.yOf(origStart);
     let curStart = origStart;
     line.onpointerdown = (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
       ev.stopPropagation();
+      const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
+      let dragDx = 0;
+      let targetDate = null;
       const onMove = (e) => {
         const dy = e.clientY - startY;
-        if (!moved && Math.abs(dy) < 4) return;
+        dragDx = e.clientX - startX;
+        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
         if (!moved) {
           moved = true;
           line.addClass("is-dragging");
           this.hideHoverTooltip();
         }
+        targetDate = Math.abs(dragDx) >= 12 ? this.findDropDate(e.clientX, homeDate, columns) : null;
+        this.markDropDate(columns, targetDate);
         const raw = scale.secOf(baseY + dy);
         curStart = Math.max(
           scale.dayStartSec,
           Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES))
         );
         line.style.top = `${scale.yOf(curStart)}px`;
-        timeBadge.textContent = formatSecondsToTime(curStart);
+        line.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
+        timeBadge.textContent = formatSecondsToTime(curStart) + (targetDate ? ` \u2192 ${targetDate.slice(5)}` : "");
       };
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         line.removeClass("is-dragging");
+        line.style.transform = "";
+        this.markDropDate(columns, null);
         if (!moved) return;
         line.dataset.dragMoved = "1";
         window.setTimeout(() => {
           delete line.dataset.dragMoved;
         }, 80);
+        const moveTo = targetDate;
+        if (moveTo) {
+          void this.commitEntryPointMove(entry, moveTo, curStart);
+          return;
+        }
         if (curStart === origStart) return;
         void this.commitEntryPoint(entry, curStart);
       };
@@ -2376,12 +2560,13 @@ ${heading}
   }
 };
 var QuickAddModal = class extends import_obsidian.Modal {
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "") {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
+    this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
     this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
-    this.endTimeStr = prefillEndTime || addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
+    this.endTimeStr = prefillEndTime !== void 0 ? prefillEndTime : this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
     this.isTask = false;
     this.content = "";
     this.tagsStr = "";
@@ -2392,6 +2577,14 @@ var QuickAddModal = class extends import_obsidian.Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: "\u26A1 \u5FEB\u901F\u8BB0\u5F55\u81F3\u65F6\u95F4\u7B14\u8BB0 (Daily Note)" });
     const form = contentEl.createEl("div", { cls: "timenote-modal-form" });
+    const typeRow = form.createEl("div", { cls: "timenote-modal-row" });
+    typeRow.createEl("span", { text: "\u8BB0\u5F55\u7C7B\u578B", cls: "timenote-modal-label" });
+    const typeSelect = typeRow.createEl("select", { cls: "timenote-modal-input" });
+    const blockOption = typeSelect.createEl("option", { text: "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09" });
+    const pointOption = typeSelect.createEl("option", { text: "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" });
+    blockOption.value = "block";
+    pointOption.value = "point";
+    typeSelect.value = this.addType;
     const row1 = form.createEl("div", { cls: "timenote-modal-row" });
     const dateInput = row1.createEl("input", {
       cls: "timenote-modal-input",
@@ -2404,13 +2597,17 @@ var QuickAddModal = class extends import_obsidian.Modal {
     });
     const endTimeInput = row1.createEl("input", {
       cls: "timenote-modal-input",
-      attr: { type: "text", placeholder: "\u7ED3\u675F\u65F6\u95F4 (\u7559\u7A7A\u4E3A\u5355\u65F6\u95F4\u70B9)", value: this.endTimeStr }
+      attr: { type: "text", placeholder: "\u7ED3\u675F\u65F6\u95F4\uFF08\u65F6\u95F4\u70B9\u6A21\u5F0F\u4E0D\u9700\u8981\uFF09", value: this.endTimeStr }
     });
     const durationHint = row1.createEl("span", { cls: "timenote-duration-hint", text: "" });
     const updateDurationHint = () => {
+      if (this.addType === "point") {
+        durationHint.textContent = "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF0C\u4E0D\u6210\u5757\uFF09";
+        return;
+      }
       const sSec = parseTimeToSeconds(this.timeStr);
       const eSec = parseTimeToSeconds(this.endTimeStr);
-      durationHint.textContent = sSec !== null && eSec !== null && eSec > sSec ? `\u65F6\u957F ${formatDuration(eSec - sSec)}` : this.endTimeStr ? "\u7ED3\u675F\u9700\u665A\u4E8E\u5F00\u59CB" : "\u65F6\u95F4\u70B9\uFF08\u4E0D\u6210\u5757\uFF09";
+      durationHint.textContent = sSec !== null && eSec !== null && eSec > sSec ? `\u65F6\u957F ${formatDuration(eSec - sSec)}` : this.endTimeStr ? "\u7ED3\u675F\u9700\u665A\u4E8E\u5F00\u59CB" : `\u9ED8\u8BA4\u65F6\u957F ${this.plugin.settings.defaultDuration || 60} \u5206\u949F`;
     };
     timeInput.oninput = (e) => {
       this.timeStr = e.target.value.trim();
@@ -2420,7 +2617,24 @@ var QuickAddModal = class extends import_obsidian.Modal {
       this.endTimeStr = e.target.value.trim();
       updateDurationHint();
     };
-    updateDurationHint();
+    const syncType = () => {
+      const isPoint = this.addType === "point";
+      endTimeInput.disabled = isPoint;
+      endTimeInput.style.opacity = isPoint ? "0.45" : "";
+      if (isPoint) {
+        this.endTimeStr = "";
+        endTimeInput.value = "";
+      } else if (!this.endTimeStr) {
+        this.endTimeStr = addMinutesToTime(this.timeStr, this.plugin.settings.defaultDuration || 60);
+        endTimeInput.value = this.endTimeStr;
+      }
+      updateDurationHint();
+    };
+    typeSelect.onchange = (e) => {
+      this.addType = normalizeAddType(e.target.value);
+      syncType();
+    };
+    syncType();
     const row2 = form.createEl("div", { cls: "timenote-modal-row" });
     const taskCheckbox = row2.createEl("input", { attr: { type: "checkbox", id: "tn-is-task" } });
     taskCheckbox.onchange = (e) => this.isTask = e.target.checked;
@@ -2451,8 +2665,19 @@ var QuickAddModal = class extends import_obsidian.Modal {
         return;
       }
       const startStr = this.timeStr.trim();
-      const endStr = this.endTimeStr.trim();
       const hasExplicitRange = /[-~至到]/.test(startStr);
+      if (this.addType === "point" && hasExplicitRange) {
+        new import_obsidian.Notice("\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\uFF1A\u8BF7\u53BB\u6389\u5F00\u59CB\u65F6\u95F4\u91CC\u7684\u8303\u56F4\uFF0C\u6216\u5207\u6362\u6210\u65F6\u95F4\u5757");
+        return;
+      }
+      let endStr = this.addType === "point" ? "" : this.endTimeStr.trim();
+      if (this.addType === "block" && !endStr && !hasExplicitRange && startStr) {
+        endStr = addMinutesToTime(startStr, this.plugin.settings.defaultDuration || 60);
+      }
+      if (startStr && !hasExplicitRange && parseTimeToSeconds(startStr) === null) {
+        new import_obsidian.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
+        return;
+      }
       if (!hasExplicitRange && endStr) {
         const sSec = parseTimeToSeconds(startStr);
         const eSec = parseTimeToSeconds(endStr);
@@ -2474,7 +2699,7 @@ var QuickAddModal = class extends import_obsidian.Modal {
         tags,
         hasExplicitRange ? "" : endStr
       );
-      new import_obsidian.Notice(`\u2705 \u5DF2\u6210\u529F\u8BB0\u5F55\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
+      new import_obsidian.Notice(`\u2705 \u5DF2\u8BB0\u5F55${this.addType === "point" ? "\u65F6\u95F4\u70B9" : "\u65F6\u95F4\u5757"}\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
       this.close();
       if (this.onSaved) this.onSaved();
     };
@@ -2572,7 +2797,12 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.layoutMode = val;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
+    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u8BB0\u5F55\u9ED8\u8BA4\u7C7B\u578B").setDesc("\u7A7A\u767D\u69FD\u70B9\u51FB / \u62D6\u62FD\u3001\u5DE5\u5177\u680F\u300C+ \u8BB0\u4E00\u6761\u300D\u4E0E\u5FEB\u901F\u8BB0\u5F55\u5F39\u7A97\u9ED8\u8BA4\u521B\u5EFA\u54EA\u79CD\u8BB0\u5F55\u3002\u65F6\u95F4\u5757\u5199\u8D77\u6B62\u65F6\u95F4\uFF1B\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\u3001\u5728\u65E5\u5386\u4E0A\u753B\u6210\u65F6\u523B\u7EBF\u3002\u5DE5\u5177\u680F\u7684\u300C\u65B0\u589E\uFF1A\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u300D\u6309\u94AE\u53EF\u968F\u65F6\u5207\u6362\uFF1B\u5757\u5E03\u5C40\u91CC\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002").addDropdown((drop) => drop.addOption("block", "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09").addOption("point", "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09").setValue(normalizeAddType(this.plugin.settings.defaultAddType)).onChange(async (val) => {
+      this.plugin.settings.defaultAddType = normalizeAddType(val);
+      await this.plugin.saveSettings();
+      this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
+    }));
+    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\uFF08\u65F6\u95F4\u70B9\u6A21\u5F0F\u4E0D\u9884\u586B\uFF09\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
       this.plugin.settings.defaultDuration = parseInt(val, 10);
       await this.plugin.saveSettings();
     }));

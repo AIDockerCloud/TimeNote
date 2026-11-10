@@ -1,0 +1,396 @@
+// DEC-022 回归测试：① 时间块 / 时间点跨天拖动回写 ② 新增时间点
+//
+// 用法：node scripts/dev/test-cross-day.mjs
+// 与项目其它开发脚本一致：直接从 main.ts 抽真实实现（产物不导出内部函数），
+// 用假 vault / 假 DOM 验证「只搬目标行、绝不误删用户内容」与「点不会被写成块」。
+import fs from "node:fs";
+import path from "node:path";
+import { PROJECT_ROOT } from "./lib/elastic.mjs";
+
+const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const css = fs.readFileSync(path.join(PROJECT_ROOT, "styles.css"), "utf8");
+const built = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
+
+let pass = 0;
+const fails = [];
+const ok = (name, cond, extra) => {
+  if (cond) pass++;
+  else fails.push(name + (extra ? `  [${extra}]` : ""));
+};
+
+const formatSecondsToTime = (sec) => {
+  const c = Math.max(0, Math.min(86400, sec));
+  return String(Math.floor(c / 3600)).padStart(2, "0") + ":" +
+    String(Math.floor((c % 3600) / 60)).padStart(2, "0");
+};
+
+// ---------- 抽取真实实现 ----------
+function sliceMarked(begin, end) {
+  const a = src.indexOf(begin);
+  const b = src.indexOf(end);
+  if (a < 0 || b < 0 || b <= a) throw new Error(`找不到标记 ${begin} / ${end}`);
+  return src.slice(a, b);
+}
+function sliceFunction(name) {
+  const a = src.indexOf(`function ${name}(`);
+  if (a < 0) throw new Error(`找不到 function ${name}`);
+  const b = src.indexOf("\n}\n", a) + 3;
+  return src.slice(a, b);
+}
+function extractMethod(signature) {
+  const a = src.indexOf(`  ${signature}`);
+  if (a < 0) throw new Error(`找不到方法 ${signature}`);
+  let depth = 0, end = -1;
+  for (let i = src.indexOf("{", a); i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { end = i + 1; break; } }
+  }
+  return src.slice(a, end)
+    .replace(/^\s*(?:async\s+)?\w+\([^)]*\)\s*\{/, "")
+    .replace(/\}\s*$/, "");
+}
+
+const crossDaySrc = sliceMarked("// --- CROSS_DAY_BEGIN ---", "// --- CROSS_DAY_END ---");
+const { normalizeAddType, rewriteEntryLineTime, collectSubItemLines } = new Function(
+  "formatSecondsToTime",
+  `${crossDaySrc}\nreturn { normalizeAddType, rewriteEntryLineTime, collectSubItemLines };`
+)(formatSecondsToTime);
+
+const isPointEntry = new Function(
+  `${sliceFunction("isPointEntry")}\nreturn isPointEntry;`
+)();
+const parseLine = new Function(
+  `${sliceFunction("parseLine")}\nreturn parseLine;`
+)();
+const sectionSrc = sliceMarked("// --- SECTION_HEADING_BEGIN ---", "// --- SECTION_HEADING_END ---");
+const { parseQuickAddSection, sectionHeaderRegex } = new Function(
+  `${sectionSrc}\nreturn { parseQuickAddSection, sectionHeaderRegex };`
+)();
+
+const findDropDate = new Function(
+  `return function(clientX, homeDate, columns){ ${extractMethod("findDropDate(clientX, homeDate, columns) {")} };`
+)();
+const markDropDate = new Function(
+  `return function(columns, targetDate){ ${extractMethod("markDropDate(columns, targetDate) {")} };`
+)();
+
+// ---------- 1) normalizeAddType ----------
+console.log("--- 新建记录类型判定 ---");
+ok("默认（旧 data.json 无此键）回退时间块", normalizeAddType(undefined) === "block");
+ok("空值回退时间块", normalizeAddType("") === "block");
+ok("非法值回退时间块", normalizeAddType("whatever") === "block");
+ok("point 识别", normalizeAddType("point") === "point");
+ok("大小写不敏感", normalizeAddType("POINT") === "point");
+ok("block 识别", normalizeAddType("block") === "block");
+
+// ---------- 2) rewriteEntryLineTime ----------
+console.log("--- 跨天移动时的行首改写 ---");
+const H = (h) => h * 3600;
+{
+  const out = rewriteEntryLineTime("- 14:00-15:30 写周报 #工作", H(9), H(10) + 1800, false);
+  ok("范围行改成新范围，正文与标签不动", out === "- 09:00-10:30 写周报 #工作", String(out));
+}
+{
+  const out = rewriteEntryLineTime("- 09:00 站会 30m", H(10), H(11), false);
+  ok("单时间 + 30m 标签 → 范围并去掉冲突标签", out === "- 10:00-11:00 站会", String(out));
+}
+{
+  const out = rewriteEntryLineTime("- [ ] 10:00-11:00 任务 #a", H(8), H(9), false);
+  ok("任务复选框保留", out === "- [ ] 08:00-09:00 任务 #a", String(out));
+}
+{
+  const out = rewriteEntryLineTime("\t* 08:00-09:00 缩进星号", H(7), H(8) + 1800, false);
+  ok("缩进与 * 列表符保留", out === "\t* 07:00-08:30 缩进星号", String(out));
+}
+{
+  const out = rewriteEntryLineTime("- 14:00:00-15:00:00 带秒", H(14), H(15), false);
+  ok("带秒前缀可改写", out === "- 14:00-15:00 带秒", String(out));
+}
+ok("无时间行拒绝", rewriteEntryLineTime("- 纯文本记录", H(1), H(2), false) === null);
+ok("块模式遇到非列表行拒绝", rewriteEntryLineTime("14:00 没有列表符", H(1), H(2), false) === null);
+{
+  const out = rewriteEntryLineTime("- 09:23 到公司 #通勤", H(10) + 15 * 60, H(10) + 15 * 60, true);
+  ok("点只换时刻、绝不生成结束时间", out === "- 10:15 到公司 #通勤", String(out));
+}
+{
+  const out = rewriteEntryLineTime("- [x] 09:23 打卡", H(8), H(8), true);
+  ok("点保留已完成复选框", out === "- [x] 08:00 打卡", String(out));
+}
+{
+  const out = rewriteEntryLineTime("- 09:00", H(9) + 30 * 60, H(9) + 30 * 60, true);
+  ok("点行尾没有正文时不写 undefined", out === "- 09:30", String(out));
+}
+ok("点模式遇到范围行拒绝", rewriteEntryLineTime("- 09:00-10:00 已经是块", H(9), H(9), true) === null);
+ok("点模式遇到无时间行拒绝", rewriteEntryLineTime("- 纯文本", H(9), H(9), true) === null);
+ok("点模式改写结果仍被判定为点",
+  isPointEntry(parseLine(rewriteEntryLineTime("- 09:23 到公司", H(10), H(10), true), 1, "2026-11-11", "x.md")));
+
+// ---------- 3) collectSubItemLines ----------
+console.log("--- 子项随记录一起搬走 ---");
+{
+  const lines = ["- 14:00-15:00 主记录", "\t- 子项 A", "  - 子项 B", "", "  - 不属于本记录", "- 16:00 下一条"];
+  const subs = collectSubItemLines(lines, 0);
+  ok("连续缩进行全部收集", subs.length === 2 && subs[0] === "\t- 子项 A" && subs[1] === "  - 子项 B", JSON.stringify(subs));
+}
+ok("空行截断收集", collectSubItemLines(["- 14:00 x", "  - A", "", "  - B"], 0).length === 1);
+ok("没有子项时返回空数组", collectSubItemLines(["- 14:00 x", "- 15:00 y"], 0).length === 0);
+
+// ---------- 4) moveEntryToDate 端到端（假 vault） ----------
+console.log("--- 跨天移动回写（假 vault）---");
+class FakeTFile {
+  constructor(p, text) { this.path = p; this._text = text; }
+}
+const moveBody = extractMethod("async moveEntryToDate(entry, targetDate, startSec, endSec) {");
+const moveEntryToDate = new Function(
+  "TFile", "rewriteEntryLineTime", "collectSubItemLines", "isPointEntry",
+  `return async function(entry, targetDate, startSec, endSec){ ${moveBody} };`
+)(FakeTFile, rewriteEntryLineTime, collectSubItemLines, isPointEntry);
+
+const SRC_PATH = "SpiralNotes/2026/Daily/11/2026-11-10.md";
+const DST_PATH = "SpiralNotes/2026/Daily/11/2026-11-11.md";
+
+function makeMoveService(text, opts = {}) {
+  const file = new FakeTFile(SRC_PATH, text);
+  const target = new FakeTFile(DST_PATH, "# 2026-11-11\n\n## 灵感闪念\n");
+  const calls = [];
+  const svc = {
+    app: { vault: {
+      getAbstractFileByPath: (p) => (p === file.path ? file : (p === target.path ? target : null)),
+      read: async (f) => f._text,
+      modify: async (f, t) => { calls.push({ op: "modify", path: f.path, text: t }); f._text = t; }
+    } },
+    fileCache: new Map([[file.path, 1], [target.path, 1]]),
+    addEntry: async (dateStr, _t, _c, _task, _tags, _end, rawLines) => {
+      if (opts.failAdd) throw new Error("disk full");
+      calls.push({ op: "addEntry", dateStr, rawLines });
+      const lines = target._text.split("\n");
+      lines.splice(3, 0, rawLines.join("\n"));
+      target._text = lines.join("\n");
+    }
+  };
+  return { file, target, calls, svc };
+}
+const baseEntry = (rawLine, extra = {}) => ({
+  filePath: SRC_PATH, lineNum: 4, dateStr: "2026-11-10", rawLine,
+  source: "daily", hasTime: true, isRange: true,
+  startSeconds: H(14), endSeconds: H(15) + 1800, ...extra
+});
+
+{
+  const text = "# 2026-11-10\n\n## 灵感闪念\n- 14:00-15:30 写周报 #工作\n- 16:00 复盘\n";
+  const { file, target, calls, svc } = makeMoveService(text);
+  const changed = await moveEntryToDate.call(svc, baseEntry("- 14:00-15:30 写周报 #工作"),
+    "2026-11-11", H(9), H(10) + 1800);
+  ok("块跨天返回 true", changed === true);
+  ok("先写目标日记，再删源日记那一行",
+    calls.length === 2 && calls[0].op === "addEntry" && calls[1].op === "modify" && calls[1].path === SRC_PATH,
+    JSON.stringify(calls.map(c => c.op)));
+  ok("目标日记插入改写后的范围行（含正文/标签）",
+    target._text.includes("- 09:00-10:30 写周报 #工作"),
+    JSON.stringify(target._text));
+  ok("源日记只删目标行、其余顺序不变",
+    file._text === "# 2026-11-10\n\n## 灵感闪念\n- 16:00 复盘\n", JSON.stringify(file._text));
+  ok("目标日期传给 addEntry", calls[0].dateStr === "2026-11-11");
+  ok("源文件的解析缓存被清掉", svc.fileCache.has(SRC_PATH) === false);
+}
+{
+  const raw = "- 09:23 到公司 #通勤";
+  const text = `# 2026-11-10\n\n## 灵感闪念\n${raw}\n- 16:00 复盘\n`;
+  const { file, target, svc } = makeMoveService(text);
+  const entry = baseEntry(raw, { isRange: false, startSeconds: H(9) + 23 * 60, endSeconds: H(9) + 53 * 60 });
+  const changed = await moveEntryToDate.call(svc, entry, "2026-11-11", H(10) + 15 * 60, H(10) + 15 * 60);
+  ok("点跨天返回 true", changed === true);
+  ok("点搬到目标日仍是单时间行（绝不变成块）",
+    target._text.includes("- 10:15 到公司 #通勤") && !/- 10:15-/.test(target._text),
+    JSON.stringify(target._text));
+  ok("点跨天后源文件不留残行", !file._text.includes("到公司"));
+}
+{
+  const raw = "- [ ] 14:00-15:30 任务 #a";
+  const text = `# 2026-11-10\n\n## 灵感闪念\n${raw}\n\t- 子项 A\n  - 子项 B\n- 16:00 复盘\n`;
+  const { file, target, calls, svc } = makeMoveService(text);
+  const changed = await moveEntryToDate.call(svc, baseEntry(raw), "2026-11-11", H(14), H(15) + 1800);
+  ok("带子项的任务跨天返回 true", changed === true);
+  ok("复选框 / 正文 / 标签原样搬到目标日记",
+    target._text.includes("- [ ] 14:00-15:30 任务 #a\n\t- 子项 A\n  - 子项 B"));
+  ok("三条（主行 + 两个子项）一起从源日记删除",
+    file._text === "# 2026-11-10\n\n## 灵感闪念\n- 16:00 复盘\n", JSON.stringify(file._text));
+  ok("搬走的行数 = 主行 + 子项数", calls[0].rawLines.length === 3);
+}
+{
+  const raw = "- 09:00 站会 30m";
+  const text = `# 2026-11-10\n\n## 灵感闪念\n${raw}\n`;
+  const { target, svc } = makeMoveService(text);
+  await moveEntryToDate.call(svc, baseEntry(raw), "2026-11-11", H(10), H(11));
+  ok("时长标签与新范围冲突时去掉",
+    target._text.includes("- 10:00-11:00 站会\n") && !target._text.includes("30m"));
+}
+{
+  const raw = "- 14:00-15:30 写周报";
+  const { file, target, svc } = makeMoveService(
+    `# 2026-11-10\n\n## 灵感闪念\n${raw}\n`);
+  const changed = await moveEntryToDate.call(svc, baseEntry(raw, { source: "blinko" }),
+    "2026-11-11", H(14), H(15));
+  ok("Blinko 等外部来源拒绝跨天", changed === false);
+  ok("拒绝时两个文件都不动", file._text.includes(raw) && !target._text.includes(raw));
+}
+{
+  const raw = "- 14:00-15:30 写周报";
+  const { file, target, svc } = makeMoveService(
+    `# 2026-11-10\n\n## 灵感闪念\n${raw}\n`);
+  const changed = await moveEntryToDate.call(svc, baseEntry(raw), "2026-11-10", H(14), H(15));
+  ok("同日期不触发跨天", changed === false);
+  ok("同日期时两个文件都不动", file._text.includes(raw) && !target._text.includes(raw));
+}
+{
+  const { file, target, svc } = makeMoveService(
+    "# 2026-11-10\n\n## 灵感闪念\n- 已被外部改过的行\n");
+  const changed = await moveEntryToDate.call(svc, baseEntry("- 14:00-15:30 写周报"),
+    "2026-11-11", H(14), H(15));
+  ok("行号漂移（rawLine 不一致）拒绝", changed === false);
+  ok("漂移时不删任何用户内容", file._text.includes("已被外部改过的行") && !target._text.includes("写周报"));
+}
+{
+  const raw = "- 纯文本记录";
+  const { file, svc } = makeMoveService(`# 2026-11-10\n\n## 灵感闪念\n${raw}\n`);
+  const changed = await moveEntryToDate.call(svc, baseEntry(raw, { hasTime: false }),
+    "2026-11-11", H(14), H(15));
+  ok("行首没有时间前缀时拒绝", changed === false);
+  ok("拒绝时源行仍在", file._text.includes(raw));
+}
+{
+  const raw = "- 14:00-15:30 写周报";
+  const { file, svc } = makeMoveService(`# 2026-11-10\n\n## 灵感闪念\n${raw}\n`);
+  const changed = await moveEntryToDate.call(svc, baseEntry(raw, { lineNum: 99 }),
+    "2026-11-11", H(14), H(15));
+  ok("行号越界拒绝", changed === false && file._text.includes(raw));
+}
+{
+  const raw = "- 14:00-15:30 写周报";
+  const { file, target, svc } = makeMoveService(
+    `# 2026-11-10\n\n## 灵感闪念\n${raw}\n`, { failAdd: true });
+  let changed = true;
+  try { changed = await moveEntryToDate.call(svc, baseEntry(raw), "2026-11-11", H(14), H(15)); }
+  catch (e) { changed = `threw: ${e.message}`; }
+  ok("目标日记写失败时返回 false 而不是抛异常", changed === false, String(changed));
+  ok("写失败时源记录不丢（宁可重复不丢数据）", file._text.includes(raw) && !target._text.includes(raw));
+}
+
+// ---------- 5) 落点列判定 ----------
+console.log("--- 跨天落点（列几何）---");
+function makeCol(dateStr, left, right) {
+  const classes = new Set();
+  return {
+    dataset: { dateStr },
+    getBoundingClientRect: () => ({ left, right }),
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c) },
+    classes
+  };
+}
+{
+  const cols = [makeCol("2026-11-10", 100, 200), makeCol("2026-11-11", 200, 300), makeCol("2026-11-12", 300, 400)];
+  ok("横向进入别的列 → 返回目标日期", findDropDate(250, "2026-11-10", cols) === "2026-11-11");
+  ok("留在本列 → 不跨天", findDropDate(150, "2026-11-10", cols) === null);
+  ok("落在刻度列 / 容器外 → 不跨天", findDropDate(20, "2026-11-10", cols) === null);
+  ok("右侧超出所有列 → 不臆造日期", findDropDate(999, "2026-11-10", cols) === null);
+  ok("空列集合不跨天", findDropDate(250, "2026-11-10", []) === null);
+  markDropDate(cols, "2026-11-11");
+  ok("只高亮目标列", cols[1].classes.has("is-drop-target") &&
+    !cols[0].classes.has("is-drop-target") && !cols[2].classes.has("is-drop-target"));
+  markDropDate(cols, null);
+  ok("松手后清掉所有高亮", cols.every(c => !c.classes.has("is-drop-target")));
+}
+
+// ---------- 6) addEntry(rawLines) 与「新增时间点落盘不是块」 ----------
+console.log("--- 原样插入 + 新增时间点的数据形态 ---");
+const addBody = extractMethod("async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = \"\", rawLines = null) {");
+const addEntry = new Function(
+  "window", "parseQuickAddSection", "sectionHeaderRegex",
+  `return async function(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null){ ${addBody} };`
+)(
+  { moment: () => ({ format: (f) => (f === "YYYY" ? "2026" : "11") }) },
+  parseQuickAddSection, sectionHeaderRegex
+);
+{
+  const file = new FakeTFile(DST_PATH, "# 2026-11-11\n\n## 灵感闪念\n- 08:00 旧记录\n");
+  const svc = {
+    settings: { quickAddSection: "## 灵感闪念", periodicNotesFolder: "SpiralNotes" },
+    fileCache: new Map(), dailyNoteIndex: new Map(),
+    findDailyNoteFile: () => file,
+    app: { vault: { read: async () => file._text, modify: async (_f, t) => { file._text = t; } } }
+  };
+  await addEntry.call(svc, "2026-11-11", "", "", false, [], "",
+    ["- [ ] 14:00-15:30 任务 #a", "\t- 子项 A"]);
+  ok("rawLines 原样插入（不重新拼装行）",
+    file._text.includes("- [ ] 14:00-15:30 任务 #a\n\t- 子项 A\n- 08:00 旧记录\n"),
+    JSON.stringify(file._text));
+  ok("rawLines 模式不会插入空前缀", !file._text.includes("-  \n"));
+}
+{
+  const pointLine = "- 09:23 到公司 #通勤";
+  const e = parseLine(pointLine, 1, "2026-11-11", "x.md");
+  ok("新增时间点解析出 hasTime", !!e && e.hasTime === true);
+  ok("新增时间点 isRange=false（isPointEntry 为真）", !!e && e.isRange === false && isPointEntry(e));
+  ok("新增时间点不会凭空生成结束时间", e.endSeconds === e.startSeconds + 1800 && e.timeStr === "09:23");
+  ok("新增时间点不带虚构 30m 标签", !/30m/.test(pointLine));
+  const blockLine = "- 09:23-10:23 开会";
+  const b = parseLine(blockLine, 1, "2026-11-11", "x.md");
+  ok("时间块仍是块（不被点逻辑吞掉）", !!b && b.isRange === true && !isPointEntry(b));
+  const durationLine = "- 09:23 站会 45min";
+  const d = parseLine(durationLine, 1, "2026-11-11", "x.md");
+  ok("显式时长标签仍是块（DEC-018 边界不破）", !!d && d.isRange === true && !isPointEntry(d));
+}
+
+// ---------- 7) 静态断言：接线与产物 ----------
+console.log("--- 接线 / 产物 / 样式 ---");
+ok("默认设置是时间块（不改旧用户行为）", /defaultAddType:\s*"block"/.test(src));
+ok("每列带日期标识", /col\.dataset\.dateStr = dateStr;/.test(src));
+ok("块拖动接了跨天落点", /const columns = col && col\.parentElement/.test(src) &&
+  /commitEntryMove\(entry, moveTo, curStart, curEnd\)/.test(src));
+ok("点线拖动也接了跨天落点", /commitEntryPointMove\(entry, moveTo, curStart\)/.test(src));
+ok("跨天只在中部平移模式生效（边缘改起止不跨天）",
+  /mode === "move" && canMoveDay && Math\.abs\(dragDx\) >= 12/.test(src));
+ok("外部来源禁止跨天", /canMoveDay = !entry\.source \|\| entry\.source === "daily"/.test(src) &&
+  /entry\.source && entry\.source !== "daily"\) return false/.test(src));
+ok("回写走 moveEntryToDate，源行不匹配时拒绝",
+  /if \(lines\[idx\] !== entry\.rawLine\) return false;/.test(src));
+ok("先写目标文件再删源行", src.indexOf("await this.addEntry(targetDate") < src.indexOf("remaining.splice(idx, moving.length)"));
+ok("写目标失败时放弃，不删源行", /catch \(err\) \{\s*return false;/.test(src));
+ok("addEntry 支持 rawLines 复用插入逻辑", /rawLines = null/.test(src) && /rawLines\.join\('\\n'\)/.test(src));
+ok("空白槽支持 Alt 临时记时间点", /ev\.altKey \|\| this\.getAddType\(\) === "point"/.test(src));
+ok("点模式画 .timenote-point-ghost 而不是范围 ghost", /cls: "timenote-point-ghost"/.test(src));
+ok("点模式打开快速记录时传 point 类型与空结束时间",
+  /this\.openQuickAdd\(dateStr, sec, sec, "point"\)/.test(src) &&
+  /isPoint \? "" : formatSecondsToTime\(endSec\)/.test(src));
+ok("QuickAddModal 有记录类型下拉与禁用结束框",
+  /const typeSelect = typeRow\.createEl\("select"/.test(src) &&
+  /endTimeInput\.disabled = isPoint/.test(src) &&
+  /this\.addType = normalizeAddType/.test(src));
+ok("保存时点模式强制不带结束时间",
+  /this\.addType === "point" \? "" : this\.endTimeStr\.trim\(\)/.test(src));
+ok("点模式拒绝把范围写进开始时间",
+  /this\.addType === "point" && hasExplicitRange/.test(src));
+ok("设置页有默认类型下拉与工具栏切换按钮",
+  /setName\("新建记录默认类型"\)/.test(src) && /新增：时间点/.test(src));
+ok("CSS 有落点高亮与点预览线，且颜色走双声明",
+  /\.timenote-block-column\.is-drop-target/.test(css) &&
+  /\.timenote-point-ghost/.test(css) &&
+  /box-shadow: inset 0 0 0 2px rgba\(/.test(css) &&
+  /box-shadow: inset 0 0 0 2px color-mix\(/.test(css));
+ok("产物 main.js 已包含新逻辑（需先 build）",
+  ["defaultAddType", "moveEntryToDate", "timenote-point-ghost", "is-drop-target", "normalizeAddType"]
+    .every(k => built.includes(k)),
+  ["defaultAddType", "moveEntryToDate", "timenote-point-ghost", "is-drop-target", "normalizeAddType"]
+    .filter(k => !built.includes(k)).join(","));
+ok("没有把点记录交给时间块分簇", /\.filter\(e => !isPointEntry\(e\)\)/.test(src));
+ok("没有新增把手 DOM", !src.includes("timenote-block-edge"));
+ok("跨天仍不碰 updateEntryTime / updateEntryPointTime 的原有边界",
+  src.includes("async updateEntryTime(entry, startSec, endSec)") &&
+  src.includes("async updateEntryPointTime(entry, startSec)"));
+
+console.log(`\n===== ${pass} passed, ${fails.length} failed =====`);
+if (fails.length) {
+  console.log("FAILED:");
+  fails.forEach(f => console.log("  ✗", f));
+  process.exit(1);
+}

@@ -58,7 +58,8 @@ ok("正则元字符被转义", sectionHeaderRegex("A+B").test("## A+B") && !sect
 
 // ---------- 3) addEntry 假 vault 端到端 ----------
 console.log("--- addEntry 插入行为 ---");
-const mStart = src.indexOf("  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = \"\") {");
+// 签名会随功能演进增加可选参数（DEC-022 加了 rawLines），这里只按方法名定位
+const mStart = src.indexOf("  async addEntry(");
 if (mStart < 0) throw new Error("main.ts 里找不到 addEntry");
 let depth = 0;
 let mEnd = -1;
@@ -72,7 +73,7 @@ const addInner = src.slice(mStart, mEnd)
 const fakeWindow = { moment: () => ({ format: (f) => (f === "YYYY" ? "2026" : "11") }) };
 const addEntry = new Function(
   "window", "parseQuickAddSection", "sectionHeaderRegex",
-  `return async function(dateStr, timeStr, content, isTask, tags = [], endTimeStr = ""){ ${addInner} };`
+  `return async function(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null){ ${addInner} };`
 )(fakeWindow, parseQuickAddSection, sectionHeaderRegex);
 
 function makeService(text, setting, hasFile = true) {
