@@ -81,6 +81,8 @@ import { DailySource } from "./sources/daily";
 // 与上面走 HTTP API 的 BlinkoSource 是两回事，只是共用 source="blinko"。
 import { BlinkoLocalSource } from "./sources/blinko-local";
 import { createObsidianFileStore } from "./hosts/obsidian/vault-store";
+// 日记模板（DEC-028）：读 Obsidian 日记插件配置 / 自定义模板文件并替换变量。
+import { createObsidianTemplateResolver } from "./hosts/daily-note-template";
 import {
   // 共享浏览器基础设施（DEC-024）：宿主注入的日期实现
   moment
@@ -115,10 +117,15 @@ const DEFAULT_SETTINGS = {
   parseAllBullets: true,
   // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
   quickAddSection: "## 灵感闪念",
+  // 日记模板（DEC-028）："" = 跟随 Obsidian 日记插件里配置的模板文件；
+  // 填 vault 内相对路径 = 用自定义模板；"off" = 不用模板，保持内置的三行结构。
+  // 只影响新建日记，已有日记一个字都不会改。
+  dailyNoteTemplate: "",
   layoutMode: "block",
   defaultDuration: 60,
-  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
-  defaultAddType: "block",
+  // 新建记录的默认类型：point = 只有一个时刻的时间点（DEC-029 起默认），
+  // block = 起止时间块。旧 data.json 里显式存了 block 的用户仍沿用 block。
+  defaultAddType: "point",
   allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true,
@@ -134,6 +141,14 @@ const DEFAULT_SETTINGS = {
   blinkoBaseUrl: "", // 如 https://blinko.example.com
   blinkoApiKey: "" // Blinko 的 API Token（Bearer）
 };
+
+/**
+ * 记录类型的显示文字（DEC-029）。设置页按钮、快速记录弹窗按钮共用这一份，
+ * 避免「两处各写一份文案」漂移；工具栏是「新增：时间点」那种短标签，另在 ui/view.ts。
+ */
+function addTypeLabel(raw: string): string {
+  return normalizeAddType(raw) === "point" ? "时间点（只记时刻）" : "时间块（起止时间）";
+}
 
 // --- BLOCK_TINT_BEGIN ---
 // 同一天的时间块默认使用互不相同的颜色（DEC-016）。
@@ -210,7 +225,16 @@ class DailyNoteService {
     // 本地 Blinko 导出 md 的解析迁到 sources/blinko-local.ts（DEC-027）。
     // 这里只保留两件宿主侧的事：装配文件存储、远程来源聚合编排。
     this.store = createObsidianFileStore(app);
-    this.daily = new DailySource({ store: this.store, settings });
+    this.daily = new DailySource({
+      store: this.store,
+      settings,
+      // 模板读取是宿主能力，sources/ 只认这个回调（DEC-028）。
+      // settings 是共享的可变对象，resolver 每次调用都读最新值，改设置立即生效。
+      resolveTemplate: createObsidianTemplateResolver(app, settings, {
+        makeMoment: moment,
+        warn: (msg) => console.warn(msg)
+      })
+    });
     this.blinkoLocal = new BlinkoLocalSource({ store: this.store });
     // 上一轮远程来源的错误（id -> message）。设置页「测试连接」与排障用，
     // 不在打开日历时弹 Notice —— 那太吵了（DEC-023）。
@@ -486,16 +510,15 @@ class QuickAddModal extends Modal {
 
     const form = contentEl.createEl("div", { cls: "timenote-modal-form" });
 
-    // 记录类型（DEC-022）：把「只能新增时间块」补成显式二选一。
+    // 记录类型（DEC-029）：单击直接在两种类型之间切换，不再用下拉「点开还要再选一次」。
     // 时间块写 HH:mm-HH:mm；时间点只写一个 HH:mm，渲染成时刻线、不生成块。
     const typeRow = form.createEl("div", { cls: "timenote-modal-row" });
     typeRow.createEl("span", { text: "记录类型", cls: "timenote-modal-label" });
-    const typeSelect = typeRow.createEl("select", { cls: "timenote-modal-input" }) as HTMLSelectElement;
-    const blockOption = typeSelect.createEl("option", { text: "时间块（起止时间）" }) as HTMLOptionElement;
-    const pointOption = typeSelect.createEl("option", { text: "时间点（只记时刻）" }) as HTMLOptionElement;
-    blockOption.value = "block";
-    pointOption.value = "point";
-    typeSelect.value = this.addType;
+    const typeBtn = typeRow.createEl("button", {
+      cls: "timenote-modal-input timenote-type-toggle",
+      attr: { type: "button", title: "点击切换记录类型" }
+    }) as HTMLButtonElement;
+    typeBtn.textContent = addTypeLabel(this.addType);
 
     // Date & Time Row
     const row1 = form.createEl("div", { cls: "timenote-modal-row" });
@@ -536,6 +559,7 @@ class QuickAddModal extends Modal {
     // 切类型时同步结束时间输入框：点模式清空并禁用，切回块模式补默认时长
     const syncType = () => {
       const isPoint = this.addType === "point";
+      typeBtn.textContent = addTypeLabel(this.addType);
       endTimeInput.disabled = isPoint;
       endTimeInput.style.opacity = isPoint ? "0.45" : "";
       if (isPoint) {
@@ -547,8 +571,8 @@ class QuickAddModal extends Modal {
       }
       updateDurationHint();
     };
-    typeSelect.onchange = (e) => {
-      this.addType = normalizeAddType((e.target as HTMLSelectElement).value);
+    typeBtn.onclick = () => {
+      this.addType = this.addType === "point" ? "block" : "point";
       syncType();
     };
     syncType();
@@ -910,14 +934,14 @@ class TimenoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("新建记录默认类型")
-      .setDesc("空白槽点击 / 拖拽、工具栏「+ 记一条」与快速记录弹窗默认创建哪种记录。时间块写起止时间；时间点只记一个时刻、在日历上画成时刻线。工具栏的「新增：时间块 / 时间点」按钮可随时切换；块布局里按住 Alt 点空白槽可临时记时间点。")
-      .addDropdown(drop => drop
-        .addOption("block", "时间块（起止时间）")
-        .addOption("point", "时间点（只记时刻）")
-        .setValue(normalizeAddType(this.plugin.settings.defaultAddType))
-        .onChange(async (val) => {
-          this.plugin.settings.defaultAddType = normalizeAddType(val);
+      .setDesc("空白槽点击 / 拖拽、工具栏「+ 记一条」与快速记录弹窗默认创建哪种记录。点击右侧按钮即在时间块 / 时间点之间切换，无需下拉再选；工具栏「新增：时间块 / 时间点」按钮同样是单击切换。块布局里按住 Alt 点空白槽可临时切到另一种类型。")
+      .addButton(btn => btn
+        .setButtonText(addTypeLabel(this.plugin.settings.defaultAddType))
+        .onClick(async () => {
+          const next = normalizeAddType(this.plugin.settings.defaultAddType) === "point" ? "block" : "point";
+          this.plugin.settings.defaultAddType = next;
           await this.plugin.saveSettings();
+          btn.setButtonText(addTypeLabel(next));
           // 让工具栏「新增：…」按钮的文字跟着同步
           this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE)
             .forEach(leaf => (leaf.view as TimenoteView).renderView());
@@ -957,6 +981,18 @@ class TimenoteSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.quickAddSection)
         .onChange(async (val) => {
           this.plugin.settings.quickAddSection = val.trim() || DEFAULT_SETTINGS.quickAddSection;
+          await this.plugin.saveSettings();
+        }));
+
+    // DEC-028：一个设置项同时覆盖「复用 Obsidian 日记模板」与「自定义模板」。
+    new Setting(containerEl)
+      .setName("日记模板文件")
+      .setDesc("留空 = 自动复用 Obsidian「日记」插件里配置的模板文件；填 vault 内路径（如 SpiralNotes/Templates/Daily.md）= 用自定义模板；填 off = 不用模板，保持内置的「# 日期 + 快速记录标题」。仅影响新建日记，已有日记不改。")
+      .addText(text => text
+        .setPlaceholder("留空跟随 Obsidian，或填模板路径 / off")
+        .setValue(this.plugin.settings.dailyNoteTemplate || "")
+        .onChange(async (val) => {
+          this.plugin.settings.dailyNoteTemplate = val.trim();
           await this.plugin.saveSettings();
         }));
   }

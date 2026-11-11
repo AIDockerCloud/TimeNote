@@ -65,7 +65,9 @@ const PLUGIN_SOURCE_FILES = [
   "main.ts",
   "ui/view.ts",
   "hosts/obsidian/adapter.ts",
-  "apps/bootstrap.ts"
+  "apps/bootstrap.ts",
+  // DEC-028：日记模板读取也在宿主层，按红线 26 一并纳入静态断言源码全集
+  "hosts/daily-note-template.ts"
 ];
 
 export function loadPluginSources(root = PROJECT_ROOT) {

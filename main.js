@@ -468,7 +468,7 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
 
 // core/crossday.ts
 function normalizeAddType(raw) {
-  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+  return String(raw || "").toLowerCase() === "block" ? "block" : "point";
 }
 function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
   const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
@@ -838,6 +838,7 @@ var DailySource = class {
     this.store = config.store;
     this.settings = config.settings || {};
     this.indexTtlMs = (_a = config.indexTtlMs) != null ? _a : DEFAULT_INDEX_TTL;
+    this.resolveTemplate = config.resolveTemplate || null;
   }
   /** 设置对象是宿主共享的可变对象，改了要立刻生效，所以每次读都取最新 */
   get folder() {
@@ -893,8 +894,40 @@ var DailySource = class {
     return `${this.folder}/${dateStr.slice(0, 4)}/Daily/${dateStr.slice(5, 7)}`;
   }
   /**
-   * 确保某天日记存在并返回它，不存在则按约定新建（内容只有标题 + 快速记录标题）。
-   * 对应原实现里「打开日记时顺手建一篇」的逻辑（DEC-017）。
+   * 新建日记的内容（DEC-028）。两个创建入口（ensureDailyNote / addEntry）都走这里，
+   * 避免「点日期标题建的是模板、QuickAdd 建的还是三行」这类分叉（DEC-020 的教训）。
+   *
+   * 无模板时**逐字保持旧行为**：`# 日期` + 空行 + 快速记录标题（+ 首条记录）。
+   * 有模板时直接用模板内容，不再额外补 `# 日期` 一级标题（与 Obsidian 一致，
+   * 否则会破坏模板自己的标题结构）；模板里没有配置的那节标题才在文末补一节。
+   */
+  async buildNewNoteContent(dateStr, newLine = null) {
+    const section = parseQuickAddSection(this.quickAddSectionCfg);
+    const template = this.resolveTemplate ? await this.resolveTemplate(dateStr) : null;
+    if (template === null || template === void 0 || !String(template).trim()) {
+      return newLine === null ? `# ${dateStr}
+
+${section.heading}
+` : `# ${dateStr}
+
+${section.heading}
+${newLine}
+`;
+    }
+    const lines = String(template).replace(/\s+$/, "").split("\n");
+    const headerRe = sectionHeaderRegex(section.title);
+    const headerIdx = lines.findIndex((l) => headerRe.test(l));
+    if (headerIdx >= 0) {
+      if (newLine !== null) lines.splice(headerIdx + 1, 0, newLine);
+    } else {
+      lines.push("", section.heading);
+      if (newLine !== null) lines.push(newLine);
+    }
+    return lines.join("\n") + "\n";
+  }
+  /**
+   * 确保某天日记存在并返回它，不存在则按约定新建（DEC-017）。
+   * 内容规则已收口到 buildNewNoteContent：默认沿用宿主日记模板（DEC-028）。
    */
   async ensureDailyNote(dateStr) {
     await this.buildIndexIfNeeded();
@@ -903,11 +936,7 @@ var DailySource = class {
     const folder = this.folderOf(dateStr);
     await this.ensureFolder(folder);
     const path = `${folder}/${dateStr}.md`;
-    const heading = parseQuickAddSection(this.quickAddSectionCfg).heading;
-    await this.store.create(path, `# ${dateStr}
-
-${heading}
-`);
+    await this.store.create(path, await this.buildNewNoteContent(dateStr));
     const file = { path, basename: dateStr, mtime: Date.now() };
     this.index.set(dateStr, file);
     return file;
@@ -1100,11 +1129,7 @@ ${heading}
       const folder = this.folderOf(dateStr);
       await this.ensureFolder(folder);
       const path = `${folder}/${dateStr}.md`;
-      await this.store.create(path, `# ${dateStr}
-
-${section.heading}
-${newLine}
-`);
+      await this.store.create(path, await this.buildNewNoteContent(dateStr, newLine));
       file = { path, basename: dateStr, mtime: Date.now() };
       this.index.set(dateStr, file);
     } else {
@@ -1297,6 +1322,122 @@ function createObsidianFileStore(app) {
     async createFolder(path) {
       await vault.createFolder((0, import_obsidian.normalizePath)(path));
     }
+  };
+}
+
+// hosts/daily-note-template.ts
+var OFF_RE = /^(off|none|disable|关闭|禁用)$/i;
+var DEFAULT_DAILY_NOTE_FORMAT = "YYYY-MM-DD";
+var UNIT_ALIASES = {
+  y: "year",
+  q: "quarter",
+  m: "month",
+  w: "week",
+  d: "day",
+  h: "hour",
+  s: "second"
+};
+function resolveTemplatePath(setting, obsidianTemplate) {
+  const raw = String(setting != null ? setting : "").trim();
+  if (OFF_RE.test(raw)) return null;
+  if (raw) return raw;
+  const fromObsidian = String(obsidianTemplate != null ? obsidianTemplate : "").trim();
+  return fromObsidian || null;
+}
+function renderTemplateVariables(content, opts) {
+  var _a;
+  const text = String(content != null ? content : "");
+  const format = String(opts.format || DEFAULT_DAILY_NOTE_FORMAT);
+  const makeMoment = opts.makeMoment;
+  const now = makeMoment();
+  const date = makeMoment(opts.dateStr, "YYYY-MM-DD");
+  const filename = date.format(format);
+  const nowTime = (_a = opts.nowTime) != null ? _a : now.format("HH:mm");
+  let out = text.replace(/\{\{\s*date\s*\}\}/gi, filename).replace(/\{\{\s*time\s*\}\}/gi, nowTime).replace(/\{\{\s*title\s*\}\}/gi, filename);
+  out = out.replace(
+    /\{\{\s*(date|time)\s*(([+-]\d+)([yqmwdhs]))?\s*(:.+?)?\}\}/gi,
+    (_m, kind, _calc, delta, unit, fmt) => {
+      let base = String(kind).toLowerCase() === "time" ? makeMoment() : makeMoment(opts.dateStr, "YYYY-MM-DD");
+      if (delta) base = base.add(parseInt(delta, 10), UNIT_ALIASES[unit] || unit);
+      const pattern = fmt ? fmt.substring(1).trim() : format;
+      return base.format(pattern);
+    }
+  );
+  out = out.replace(
+    /\{\{\s*yesterday\s*\}\}/gi,
+    makeMoment(opts.dateStr, "YYYY-MM-DD").clone().subtract(1, "day").format(format)
+  ).replace(
+    /\{\{\s*tomorrow\s*\}\}/gi,
+    makeMoment(opts.dateStr, "YYYY-MM-DD").clone().add(1, "day").format(format)
+  );
+  return out;
+}
+function normalizeConfig(raw) {
+  const str = (v) => typeof v === "string" ? v.trim() : "";
+  return {
+    folder: str(raw == null ? void 0 : raw.folder),
+    format: str(raw == null ? void 0 : raw.format) || DEFAULT_DAILY_NOTE_FORMAT,
+    template: str(raw == null ? void 0 : raw.template)
+  };
+}
+async function readObsidianDailyNotesConfig(app) {
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+  try {
+    const periodic = (_b = (_a = app == null ? void 0 : app.plugins) == null ? void 0 : _a.getPlugin) == null ? void 0 : _b.call(_a, "periodic-notes");
+    const daily = (_c = periodic == null ? void 0 : periodic.settings) == null ? void 0 : _c.daily;
+    if (daily == null ? void 0 : daily.enabled) return normalizeConfig(daily);
+  } catch (e) {
+  }
+  try {
+    const options = (_g = (_f = (_e = (_d = app == null ? void 0 : app.internalPlugins) == null ? void 0 : _d.getPluginById) == null ? void 0 : _e.call(_d, "daily-notes")) == null ? void 0 : _f.instance) == null ? void 0 : _g.options;
+    if (options && typeof options === "object") return normalizeConfig(options);
+  } catch (e) {
+  }
+  try {
+    const raw = await ((_j = (_i = (_h = app == null ? void 0 : app.vault) == null ? void 0 : _h.adapter) == null ? void 0 : _i.read) == null ? void 0 : _j.call(_i, ".obsidian/daily-notes.json"));
+    if (raw) return normalizeConfig(JSON.parse(raw));
+  } catch (e) {
+  }
+  return { folder: "", format: DEFAULT_DAILY_NOTE_FORMAT, template: "" };
+}
+async function readTemplateFile(app, templatePath) {
+  var _a, _b, _c, _d, _e, _f, _g, _h;
+  const base = String(templatePath || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!base || base === "/") return null;
+  const candidates = [base];
+  if (!/\.md$/i.test(base)) candidates.push(`${base}.md`);
+  for (const candidate of candidates) {
+    try {
+      const file = ((_b = (_a = app == null ? void 0 : app.metadataCache) == null ? void 0 : _a.getFirstLinkpathDest) == null ? void 0 : _b.call(_a, candidate, "")) || ((_d = (_c = app == null ? void 0 : app.vault) == null ? void 0 : _c.getAbstractFileByPath) == null ? void 0 : _d.call(_c, candidate));
+      if (file && ((_e = app == null ? void 0 : app.vault) == null ? void 0 : _e.cachedRead)) {
+        const content = await app.vault.cachedRead(file);
+        if (typeof content === "string") return content;
+      }
+      if (await ((_h = (_g = (_f = app == null ? void 0 : app.vault) == null ? void 0 : _f.adapter) == null ? void 0 : _g.exists) == null ? void 0 : _h.call(_g, candidate))) {
+        const content = await app.vault.adapter.read(candidate);
+        if (typeof content === "string") return content;
+      }
+    } catch (e) {
+    }
+  }
+  return null;
+}
+function createObsidianTemplateResolver(app, settings, deps) {
+  return async (dateStr) => {
+    var _a;
+    const cfg = await readObsidianDailyNotesConfig(app);
+    const path = resolveTemplatePath(settings == null ? void 0 : settings.dailyNoteTemplate, cfg.template);
+    if (!path) return null;
+    const content = await readTemplateFile(app, path);
+    if (content === null || !String(content).trim()) {
+      (_a = deps.warn) == null ? void 0 : _a.call(deps, `TimeNote: \u65E5\u8BB0\u6A21\u677F\u300C${path}\u300D\u8BFB\u53D6\u5931\u8D25\u6216\u4E3A\u7A7A\uFF0C\u56DE\u9000\u5230\u5185\u7F6E\u65E5\u8BB0\u7ED3\u6784`);
+      return null;
+    }
+    return renderTemplateVariables(content, {
+      dateStr,
+      format: cfg.format,
+      makeMoment: deps.makeMoment
+    });
   };
 }
 
@@ -1916,7 +2057,7 @@ var TimenoteRenderer = class {
       text: this.getAddType() === "point" ? "\u65B0\u589E\uFF1A\u65F6\u95F4\u70B9" : "\u65B0\u589E\uFF1A\u65F6\u95F4\u5757",
       cls: "timenote-layout-toggle",
       attr: {
-        title: "\u5207\u6362\u65B0\u5EFA\u8BB0\u5F55\u7C7B\u578B\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09/ \u65F6\u95F4\u70B9\uFF08\u53EA\u6709\u65F6\u523B\uFF09\u3002\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002"
+        title: "\u5355\u51FB\u5207\u6362\u65B0\u5EFA\u8BB0\u5F55\u7C7B\u578B\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09/ \u65F6\u95F4\u70B9\uFF08\u53EA\u6709\u65F6\u523B\uFF09\u3002\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u5207\u5230\u53E6\u4E00\u79CD\u7C7B\u578B\u3002"
       }
     });
     addTypeBtn.onclick = async () => {
@@ -2592,7 +2733,7 @@ var TimenoteRenderer = class {
     slotLayer.onpointerdown = (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
-      const asPoint = ev.altKey || this.getAddType() === "point";
+      const asPoint = ev.altKey ? this.getAddType() !== "point" : this.getAddType() === "point";
       const anchorSec = snapSeconds(
         secAt(ev.clientY),
         asPoint ? POINT_CREATE_SNAP_MINUTES : DRAG_SNAP_MINUTES
@@ -3449,10 +3590,15 @@ var DEFAULT_SETTINGS = {
   parseAllBullets: true,
   // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
   quickAddSection: "## \u7075\u611F\u95EA\u5FF5",
+  // 日记模板（DEC-028）："" = 跟随 Obsidian 日记插件里配置的模板文件；
+  // 填 vault 内相对路径 = 用自定义模板；"off" = 不用模板，保持内置的三行结构。
+  // 只影响新建日记，已有日记一个字都不会改。
+  dailyNoteTemplate: "",
   layoutMode: "block",
   defaultDuration: 60,
-  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
-  defaultAddType: "block",
+  // 新建记录的默认类型：point = 只有一个时刻的时间点（DEC-029 起默认），
+  // block = 起止时间块。旧 data.json 里显式存了 block 的用户仍沿用 block。
+  defaultAddType: "point",
   allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
   elasticTimeline: true,
@@ -3471,12 +3617,24 @@ var DEFAULT_SETTINGS = {
   blinkoApiKey: ""
   // Blinko 的 API Token（Bearer）
 };
+function addTypeLabel(raw) {
+  return normalizeAddType(raw) === "point" ? "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" : "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09";
+}
 var DailyNoteService = class {
   constructor(app, settings) {
     this.app = app;
     this.settings = settings;
     this.store = createObsidianFileStore(app);
-    this.daily = new DailySource({ store: this.store, settings });
+    this.daily = new DailySource({
+      store: this.store,
+      settings,
+      // 模板读取是宿主能力，sources/ 只认这个回调（DEC-028）。
+      // settings 是共享的可变对象，resolver 每次调用都读最新值，改设置立即生效。
+      resolveTemplate: createObsidianTemplateResolver(app, settings, {
+        makeMoment: moment,
+        warn: (msg) => console.warn(msg)
+      })
+    });
     this.blinkoLocal = new BlinkoLocalSource({ store: this.store });
     this.lastRemoteErrors = {};
     this.remoteCache = /* @__PURE__ */ new Map();
@@ -3705,12 +3863,11 @@ var QuickAddModal = class extends import_obsidian3.Modal {
     const form = contentEl.createEl("div", { cls: "timenote-modal-form" });
     const typeRow = form.createEl("div", { cls: "timenote-modal-row" });
     typeRow.createEl("span", { text: "\u8BB0\u5F55\u7C7B\u578B", cls: "timenote-modal-label" });
-    const typeSelect = typeRow.createEl("select", { cls: "timenote-modal-input" });
-    const blockOption = typeSelect.createEl("option", { text: "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09" });
-    const pointOption = typeSelect.createEl("option", { text: "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" });
-    blockOption.value = "block";
-    pointOption.value = "point";
-    typeSelect.value = this.addType;
+    const typeBtn = typeRow.createEl("button", {
+      cls: "timenote-modal-input timenote-type-toggle",
+      attr: { type: "button", title: "\u70B9\u51FB\u5207\u6362\u8BB0\u5F55\u7C7B\u578B" }
+    });
+    typeBtn.textContent = addTypeLabel(this.addType);
     const row1 = form.createEl("div", { cls: "timenote-modal-row" });
     const dateInput = row1.createEl("input", {
       cls: "timenote-modal-input",
@@ -3745,6 +3902,7 @@ var QuickAddModal = class extends import_obsidian3.Modal {
     };
     const syncType = () => {
       const isPoint = this.addType === "point";
+      typeBtn.textContent = addTypeLabel(this.addType);
       endTimeInput.disabled = isPoint;
       endTimeInput.style.opacity = isPoint ? "0.45" : "";
       if (isPoint) {
@@ -3756,8 +3914,8 @@ var QuickAddModal = class extends import_obsidian3.Modal {
       }
       updateDurationHint();
     };
-    typeSelect.onchange = (e) => {
-      this.addType = normalizeAddType(e.target.value);
+    typeBtn.onclick = () => {
+      this.addType = this.addType === "point" ? "block" : "point";
       syncType();
     };
     syncType();
@@ -3986,9 +4144,11 @@ var TimenoteSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.plugin.settings.layoutMode = val;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("\u65B0\u5EFA\u8BB0\u5F55\u9ED8\u8BA4\u7C7B\u578B").setDesc("\u7A7A\u767D\u69FD\u70B9\u51FB / \u62D6\u62FD\u3001\u5DE5\u5177\u680F\u300C+ \u8BB0\u4E00\u6761\u300D\u4E0E\u5FEB\u901F\u8BB0\u5F55\u5F39\u7A97\u9ED8\u8BA4\u521B\u5EFA\u54EA\u79CD\u8BB0\u5F55\u3002\u65F6\u95F4\u5757\u5199\u8D77\u6B62\u65F6\u95F4\uFF1B\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\u3001\u5728\u65E5\u5386\u4E0A\u753B\u6210\u65F6\u523B\u7EBF\u3002\u5DE5\u5177\u680F\u7684\u300C\u65B0\u589E\uFF1A\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u300D\u6309\u94AE\u53EF\u968F\u65F6\u5207\u6362\uFF1B\u5757\u5E03\u5C40\u91CC\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002").addDropdown((drop) => drop.addOption("block", "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09").addOption("point", "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09").setValue(normalizeAddType(this.plugin.settings.defaultAddType)).onChange(async (val) => {
-      this.plugin.settings.defaultAddType = normalizeAddType(val);
+    new import_obsidian3.Setting(containerEl).setName("\u65B0\u5EFA\u8BB0\u5F55\u9ED8\u8BA4\u7C7B\u578B").setDesc("\u7A7A\u767D\u69FD\u70B9\u51FB / \u62D6\u62FD\u3001\u5DE5\u5177\u680F\u300C+ \u8BB0\u4E00\u6761\u300D\u4E0E\u5FEB\u901F\u8BB0\u5F55\u5F39\u7A97\u9ED8\u8BA4\u521B\u5EFA\u54EA\u79CD\u8BB0\u5F55\u3002\u70B9\u51FB\u53F3\u4FA7\u6309\u94AE\u5373\u5728\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u4E4B\u95F4\u5207\u6362\uFF0C\u65E0\u9700\u4E0B\u62C9\u518D\u9009\uFF1B\u5DE5\u5177\u680F\u300C\u65B0\u589E\uFF1A\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u300D\u6309\u94AE\u540C\u6837\u662F\u5355\u51FB\u5207\u6362\u3002\u5757\u5E03\u5C40\u91CC\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u5207\u5230\u53E6\u4E00\u79CD\u7C7B\u578B\u3002").addButton((btn) => btn.setButtonText(addTypeLabel(this.plugin.settings.defaultAddType)).onClick(async () => {
+      const next = normalizeAddType(this.plugin.settings.defaultAddType) === "point" ? "block" : "point";
+      this.plugin.settings.defaultAddType = next;
       await this.plugin.saveSettings();
+      btn.setButtonText(addTypeLabel(next));
       this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
     }));
     new import_obsidian3.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\uFF08\u65F6\u95F4\u70B9\u6A21\u5F0F\u4E0D\u9884\u586B\uFF09\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
@@ -4001,6 +4161,10 @@ var TimenoteSettingTab = class extends import_obsidian3.PluginSettingTab {
     }));
     new import_obsidian3.Setting(containerEl).setName("\u5FEB\u901F\u8BB0\u5F55\u9ED8\u8BA4\u63D2\u5165\u6807\u9898").setDesc("\u5199\u5E26 # \u7684\u6807\u9898\u5373\u53EF\u540C\u65F6\u6307\u5B9A\u5C42\u7EA7\u4E0E\u6807\u9898\uFF0C\u5982\u300C## \u7075\u611F\u95EA\u5FF5\u300D\u6216\u300C### \u968F\u624B\u8BB0\u300D\uFF1B\u4E0D\u5199 # \u65F6\u6309\u4E8C\u7EA7\u6807\u9898\u5904\u7406\u3002\u5DF2\u6709\u65E5\u8BB0\u91CC\u5B58\u5728\u540C\u540D\u6807\u9898\uFF08\u4EFB\u610F\u5C42\u7EA7\uFF09\u65F6\u6CBF\u7528\u90A3\u4E00\u8282\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u6807\u9898\u3002").addText((text) => text.setPlaceholder("## \u7075\u611F\u95EA\u5FF5").setValue(this.plugin.settings.quickAddSection).onChange(async (val) => {
       this.plugin.settings.quickAddSection = val.trim() || DEFAULT_SETTINGS.quickAddSection;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("\u65E5\u8BB0\u6A21\u677F\u6587\u4EF6").setDesc("\u7559\u7A7A = \u81EA\u52A8\u590D\u7528 Obsidian\u300C\u65E5\u8BB0\u300D\u63D2\u4EF6\u91CC\u914D\u7F6E\u7684\u6A21\u677F\u6587\u4EF6\uFF1B\u586B vault \u5185\u8DEF\u5F84\uFF08\u5982 SpiralNotes/Templates/Daily.md\uFF09= \u7528\u81EA\u5B9A\u4E49\u6A21\u677F\uFF1B\u586B off = \u4E0D\u7528\u6A21\u677F\uFF0C\u4FDD\u6301\u5185\u7F6E\u7684\u300C# \u65E5\u671F + \u5FEB\u901F\u8BB0\u5F55\u6807\u9898\u300D\u3002\u4EC5\u5F71\u54CD\u65B0\u5EFA\u65E5\u8BB0\uFF0C\u5DF2\u6709\u65E5\u8BB0\u4E0D\u6539\u3002").addText((text) => text.setPlaceholder("\u7559\u7A7A\u8DDF\u968F Obsidian\uFF0C\u6216\u586B\u6A21\u677F\u8DEF\u5F84 / off").setValue(this.plugin.settings.dailyNoteTemplate || "").onChange(async (val) => {
+      this.plugin.settings.dailyNoteTemplate = val.trim();
       await this.plugin.saveSettings();
     }));
   }

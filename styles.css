@@ -1123,6 +1123,25 @@
 }
 .timenote-modal-input:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* DEC-029：记录类型按钮 —— 单击直接切换，不再用下拉「点开还要再选一次」。 */
+.timenote-type-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.timenote-type-toggle:hover { background-color: var(--background-modifier-hover); }
+.timenote-type-toggle::after {
+  content: "点击切换";
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
 .timenote-modal-textarea {
   width: 100%;
   min-height: 80px;

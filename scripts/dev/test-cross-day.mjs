@@ -12,6 +12,9 @@ const src = loadPluginSources();
 const dailySrc = fs.readFileSync(path.join(PROJECT_ROOT, "sources", "daily.ts"), "utf8");
 const css = fs.readFileSync(path.join(PROJECT_ROOT, "styles.css"), "utf8");
 const built = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
+// DEC-029：参考宿主设置与交互预览也要跟默认类型一起同步
+const refSettingsSrc = fs.readFileSync(path.join(PROJECT_ROOT, "hosts/memory/adapter.ts"), "utf8");
+const previewSrc = fs.readFileSync(path.join(PROJECT_ROOT, "scripts/dev/preview-cross-day.mjs"), "utf8");
 
 let pass = 0;
 const fails = [];
@@ -72,9 +75,10 @@ const markDropDate = new Function(
 
 // ---------- 1) normalizeAddType ----------
 console.log("--- 新建记录类型判定 ---");
-ok("默认（旧 data.json 无此键）回退时间块", normalizeAddType(undefined) === "block");
-ok("空值回退时间块", normalizeAddType("") === "block");
-ok("非法值回退时间块", normalizeAddType("whatever") === "block");
+// DEC-029：默认类型改为时间点，所有兜底路径跟着落到 point
+ok("默认（旧 data.json 无此键）回退时间点", normalizeAddType(undefined) === "point");
+ok("空值回退时间点", normalizeAddType("") === "point");
+ok("非法值回退时间点", normalizeAddType("whatever") === "point");
 ok("point 识别", normalizeAddType("point") === "point");
 ok("大小写不敏感", normalizeAddType("POINT") === "point");
 ok("block 识别", normalizeAddType("block") === "block");
@@ -352,7 +356,7 @@ console.log("--- 原样插入 + 新增时间点的数据形态 ---");
 
 // ---------- 7) 静态断言：接线与产物 ----------
 console.log("--- 接线 / 产物 / 样式 ---");
-ok("默认设置是时间块（不改旧用户行为）", /defaultAddType:\s*"block"/.test(src));
+ok("默认设置是时间点（DEC-029）", /defaultAddType:\s*"point"/.test(src));
 ok("每列带日期标识", /col\.dataset\.dateStr = dateStr;/.test(src));
 ok("块拖动接了跨天落点", /const columns = col && col\.parentElement/.test(src) &&
   /commitEntryMove\(entry, moveTo, curStart, curEnd\)/.test(src));
@@ -374,21 +378,35 @@ ok("写目标失败时放弃，不删源行", /\}\s*catch\s*\{\s*return false;/.
 ok("addEntry 支持 rawLines 复用插入逻辑",
   /rawLines: string\[\] \| null = null/.test(dailySrc) &&
   dailySrc.includes('rawLines.join("\\n")'));
-ok("空白槽支持 Alt 临时记时间点", /ev\.altKey \|\| this\.getAddType\(\) === "point"/.test(src));
+ok("Alt 临时切到相反类型（默认时间点时不再是空操作）",
+  /const asPoint = ev\.altKey \? this\.getAddType\(\) !== "point" : this\.getAddType\(\) === "point";/.test(src));
 ok("点模式画 .timenote-point-ghost 而不是范围 ghost", /cls: "timenote-point-ghost"/.test(src));
 ok("点模式打开快速记录时传 point 类型与空结束时间",
   /this\.openQuickAdd\(dateStr, sec, sec, "point"\)/.test(src) &&
   /isPoint \? "" : formatSecondsToTime\(endSec\)/.test(src));
-ok("QuickAddModal 有记录类型下拉与禁用结束框",
-  /const typeSelect = typeRow\.createEl\("select"/.test(src) &&
+ok("QuickAddModal 的记录类型是单击切换按钮（不再下拉）",
+  /const typeBtn = typeRow\.createEl\("button"/.test(src) &&
+  /typeBtn\.onclick = \(\) => \{[\s\S]{0,160}this\.addType = this\.addType === "point" \? "block" : "point"/.test(src) &&
+  !/createEl\("select"/.test(src) &&
   /endTimeInput\.disabled = isPoint/.test(src) &&
   /this\.addType = normalizeAddType/.test(src));
 ok("保存时点模式强制不带结束时间",
   /this\.addType === "point" \? "" : this\.endTimeStr\.trim\(\)/.test(src));
 ok("点模式拒绝把范围写进开始时间",
   /this\.addType === "point" && hasExplicitRange/.test(src));
-ok("设置页有默认类型下拉与工具栏切换按钮",
-  /setName\("新建记录默认类型"\)/.test(src) && /新增：时间点/.test(src));
+ok("设置页默认类型改成单击切换按钮，工具栏仍是单击切换",
+  /setName\("新建记录默认类型"\)[\s\S]{0,600}\.addButton\(/.test(src) &&
+  /新增：时间点/.test(src) &&
+  /addTypeBtn\.onclick = async \(\) =>/.test(src));
+ok("两处按钮共用 addTypeLabel 文案，不再各写一份",
+  (src.match(/addTypeLabel\(/g) || []).length >= 4);
+ok("CSS 有类型切换按钮与「点击切换」提示",
+  /\.timenote-type-toggle/.test(css) && /content: "点击切换"/.test(css));
+ok("参考宿主设置默认也是时间点", /defaultAddType:\s*"point"/.test(refSettingsSrc));
+ok("交互预览与真机一致（默认时间点 + 单击切换按钮）",
+  /let addType = "point"/.test(previewSrc) &&
+  /typeBtn\.onclick/.test(previewSrc) &&
+  !/id="typeSelect"/.test(previewSrc));
 ok("CSS 有落点高亮与点预览线，且颜色走双声明",
   /\.timenote-block-column\.is-drop-target/.test(css) &&
   /\.timenote-point-ghost/.test(css) &&

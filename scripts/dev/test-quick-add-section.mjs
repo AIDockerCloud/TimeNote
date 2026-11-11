@@ -140,8 +140,11 @@ const openStart = adapterSrc.indexOf("async openDailyNote(dateStr: string) {");
 const openBody = openStart < 0 ? "" : adapterSrc.slice(openStart, adapterSrc.indexOf("\n    },", openStart) + 8);
 // DEC-026：新建日记落在 DailySource.ensureDailyNote 里，adapter 只委托
 ok("日期标题新建日记走 DailySource.ensureDailyNote", /ensureDailyNote\(dateStr\)/.test(openBody));
+// DEC-028：两个建日记入口收口进 buildNewNoteContent，heading 由它统一取配置值
 ok("新建日记用配置 heading",
-  /const heading = parseQuickAddSection\(this\.quickAddSectionCfg\)\.heading/.test(dailySrc));
+  /buildNewNoteContent\(/.test(dailySrc) &&
+  /const section = parseQuickAddSection\(this\.quickAddSectionCfg\)/.test(dailySrc) &&
+  /section\.heading/.test(dailySrc));
 ok("parseDailyFile 用配置标题判定随手记区",
   /const memoTitle = parseQuickAddSection\(this\.quickAddSectionCfg\)\.title/.test(dailySrc) &&
   /currentSection === memoTitle/.test(dailySrc));

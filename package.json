@@ -1,6 +1,6 @@
 {
   "name": "timenote",
-  "version": "1.0.11",
+  "version": "1.1.0",
   "private": true,
   "description": "Obsidian 插件：基于周期日记的时间轴与全周期日历视图",
   "main": "main.js",
@@ -33,11 +33,12 @@
     "test:ui": "node scripts/dev/test-ui.mjs",
     "test:bundle": "node scripts/dev/test-bundle-load.mjs",
     "preview:cross": "node scripts/dev/preview-cross-day.mjs",
-    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross && npm run test:sources && npm run test:ui && npm run test:bundle && npm run test:hosts && npm run test:daily && npm run test:blinko-local",
+    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross && npm run test:sources && npm run test:ui && npm run test:bundle && npm run test:hosts && npm run test:daily && npm run test:blinko-local && npm run test:template",
     "test:hosts": "node scripts/dev/test-hosts.mjs",
     "build:apps": "node apps/esbuild.config.mjs",
     "test:daily": "node scripts/dev/test-daily-source.mjs",
-    "test:blinko-local": "node scripts/dev/test-blinko-local.mjs"
+    "test:blinko-local": "node scripts/dev/test-blinko-local.mjs",
+    "test:template": "node scripts/dev/test-daily-template.mjs"
   },
   "keywords": [
     "obsidian",

@@ -89,8 +89,8 @@ const html = `<!doctype html>
   <div>
     <div class="card">
       <h2>① 新增：时间块 / 时间点</h2>
-      <p class="hint">工具栏按钮、设置页、弹窗下拉共用同一个 <code>defaultAddType</code>。默认时间块，旧用户行为不变。</p>
-      <button class="btn timenote-layout-toggle" id="addTypeBtn">新增：时间块</button>
+      <p class="hint">工具栏 / 设置页 / 弹窗都是<b>单击直接切换</b>，共用同一个 <code>defaultAddType</code>。DEC-029 起默认时间点（旧 <code>data.json</code> 显式存 block 的用户仍沿用）。</p>
+      <button class="btn timenote-layout-toggle" id="addTypeBtn">新增：时间点</button>
       <button class="btn primary" id="addBtn">+ 记一条</button>
       <div><span class="fake-notice" id="notice">点击按钮切换类型</span></div>
       <div class="modal" style="margin-top:12px">
@@ -98,10 +98,7 @@ const html = `<!doctype html>
         <div class="timenote-modal-form">
           <div class="timenote-modal-row">
             <span class="timenote-modal-label">记录类型</span>
-            <select class="timenote-modal-input" id="typeSelect">
-              <option value="block">时间块（起止时间）</option>
-              <option value="point">时间点（只记时刻）</option>
-            </select>
+            <button type="button" class="timenote-modal-input timenote-type-toggle" id="typeBtn">时间点（只记时刻）</button>
           </div>
           <div class="timenote-modal-row">
             <input class="timenote-modal-input" value="09:15" aria-label="开始时间">
@@ -111,7 +108,7 @@ const html = `<!doctype html>
           <textarea class="timenote-modal-textarea" placeholder="输入灵感闪念、随手记或任务内容..."></textarea>
         </div>
       </div>
-      <p class="hint" style="margin-top:10px">切到「时间点」时结束时间框会清空并禁用，保存只写 <code>- 09:15 到公司</code> —— 日历上是一条线，不是块。按住 <code>Alt</code> 点空白槽可临时记时间点。</p>
+      <p class="hint" style="margin-top:10px">切到「时间点」时结束时间框会清空并禁用，保存只写 <code>- 09:15 到公司</code> —— 日历上是一条线，不是块。按住 <code>Alt</code> 点空白槽可临时切到另一种类型。</p>
     </div>
     <div class="card">
       <h2>② 空白槽的点预览</h2>
@@ -170,12 +167,12 @@ const html = `<!doctype html>
 </div>
 
 <script>
-const typeSelect = document.getElementById("typeSelect");
+const typeBtn = document.getElementById("typeBtn");
 const endInput = document.getElementById("endInput");
 const durationHint = document.getElementById("durationHint");
 const addTypeBtn = document.getElementById("addTypeBtn");
 const notice = document.getElementById("notice");
-let addType = "block";
+let addType = "point";
 
 function syncType() {
   const isPoint = addType === "point";
@@ -183,13 +180,13 @@ function syncType() {
   endInput.value = isPoint ? "" : "10:15";
   durationHint.textContent = isPoint ? "时间点（只记时刻，不成块）" : "时长 1h";
   addTypeBtn.textContent = isPoint ? "新增：时间点" : "新增：时间块";
-  typeSelect.value = addType;
+  typeBtn.textContent = isPoint ? "时间点（只记时刻）" : "时间块（起止时间）";
   notice.textContent = isPoint
     ? "新建记录：时间点（只记时刻）"
     : "新建记录：时间块（起止时间）";
   probe();
 }
-typeSelect.onchange = () => { addType = typeSelect.value; syncType(); };
+typeBtn.onclick = () => { addType = addType === "point" ? "block" : "point"; syncType(); };
 addTypeBtn.onclick = () => { addType = addType === "point" ? "block" : "point"; syncType(); };
 document.getElementById("addBtn").onclick = () => { notice.textContent = "打开快速记录（类型：" + addType + "）"; };
 

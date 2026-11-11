@@ -340,7 +340,7 @@ export class TimenoteRenderer {
       text: this.getAddType() === "point" ? "新增：时间点" : "新增：时间块",
       cls: "timenote-layout-toggle",
       attr: {
-        title: "切换新建记录类型：时间块（起止时间）/ 时间点（只有时刻）。按住 Alt 点空白槽可临时记时间点。"
+        title: "单击切换新建记录类型：时间块（起止时间）/ 时间点（只有时刻）。按住 Alt 点空白槽可临时切到另一种类型。"
       }
     });
     addTypeBtn.onclick = async () => {
@@ -1162,8 +1162,10 @@ export class TimenoteRenderer {
     slotLayer.onpointerdown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
-      // 时间点模式（工具栏切换，或按住 Alt 临时切换）：只定一个时刻，不画范围预览（DEC-022）
-      const asPoint = ev.altKey || this.getAddType() === "point";
+      // 时间点模式（DEC-022 的工具栏切换 + DEC-029 的 Alt 语义）：只定一个时刻，不画范围预览。
+      // 默认已是时间点，Alt 若仍是「强制记点」就变成空操作 —— 改成「临时切到相反类型」：
+      // 默认点 + Alt → 块，默认块 + Alt → 点，两种默认值下都有意义。
+      const asPoint = ev.altKey ? this.getAddType() !== "point" : this.getAddType() === "point";
       const anchorSec = snapSeconds(secAt(ev.clientY),
         asPoint ? POINT_CREATE_SNAP_MINUTES : DRAG_SNAP_MINUTES);
       const startY = ev.clientY;

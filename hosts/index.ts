@@ -6,3 +6,19 @@
 export type { HostAdapter, TimenoteSettings, HostId } from "./types";
 export { createMemoryHostAdapter, REFERENCE_SETTINGS } from "./memory/adapter";
 export type { MemoryHostState, MemoryHostOptions } from "./memory/adapter";
+
+// 日记模板读取（DEC-028）。该文件不 import obsidian、不读任何全局，
+// 宿主对象全靠注入，所以能安全地打进平台无关的 ESM 产物给测试 import。
+export {
+  DEFAULT_DAILY_NOTE_FORMAT,
+  resolveTemplatePath,
+  renderTemplateVariables,
+  readObsidianDailyNotesConfig,
+  readTemplateFile,
+  createObsidianTemplateResolver
+} from "./daily-note-template";
+export type {
+  DailyNotesConfig,
+  TemplateRenderOptions,
+  TemplateResolverDeps
+} from "./daily-note-template";

@@ -25,6 +25,8 @@ export interface TimenoteSettings {
   firstDayOfWeek: number;
   parseAllBullets: boolean;
   quickAddSection: string;
+  /** 日记模板（DEC-028）："" 跟随 Obsidian、路径 = 自定义、off = 不用模板 */
+  dailyNoteTemplate: string;
   layoutMode: string;
   defaultDuration: number;
   defaultAddType: string;

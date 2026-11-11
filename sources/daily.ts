@@ -42,6 +42,13 @@ export interface DailySourceConfig {
    * 但用户新建日记后要能立刻看到 —— 5 秒是原实现的取值，保持不变。
    */
   indexTtlMs?: number;
+  /**
+   * 宿主注入：返回「已经渲染好变量」的日记模板内容（DEC-028）。
+   * 返回 null / 空串表示不使用模板，DailySource 逐字回退到旧版内置结构。
+   * sources/ 不认 Obsidian，模板怎么读、变量怎么替换由宿主层决定。
+   * 只在**新建日记**时调用，已有日记直接走原来的插入逻辑。
+   */
+  resolveTemplate?: (dateStr: string) => Promise<string | null>;
 }
 
 const DEFAULT_INDEX_TTL = 5000;
@@ -68,6 +75,7 @@ export class DailySource implements NoteSource {
   private store: NoteFileStore;
   private settings: DailySourceSettings;
   private indexTtlMs: number;
+  private resolveTemplate: ((dateStr: string) => Promise<string | null>) | null;
 
   /** dateStr -> 文件元数据。名字沿用原实现，方便调用方迁移 */
   readonly index = new Map<string, NoteFile>();
@@ -79,6 +87,7 @@ export class DailySource implements NoteSource {
     this.store = config.store;
     this.settings = config.settings || {};
     this.indexTtlMs = config.indexTtlMs ?? DEFAULT_INDEX_TTL;
+    this.resolveTemplate = config.resolveTemplate || null;
   }
 
   /** 设置对象是宿主共享的可变对象，改了要立刻生效，所以每次读都取最新 */
@@ -143,8 +152,38 @@ export class DailySource implements NoteSource {
   }
 
   /**
-   * 确保某天日记存在并返回它，不存在则按约定新建（内容只有标题 + 快速记录标题）。
-   * 对应原实现里「打开日记时顺手建一篇」的逻辑（DEC-017）。
+   * 新建日记的内容（DEC-028）。两个创建入口（ensureDailyNote / addEntry）都走这里，
+   * 避免「点日期标题建的是模板、QuickAdd 建的还是三行」这类分叉（DEC-020 的教训）。
+   *
+   * 无模板时**逐字保持旧行为**：`# 日期` + 空行 + 快速记录标题（+ 首条记录）。
+   * 有模板时直接用模板内容，不再额外补 `# 日期` 一级标题（与 Obsidian 一致，
+   * 否则会破坏模板自己的标题结构）；模板里没有配置的那节标题才在文末补一节。
+   */
+  private async buildNewNoteContent(dateStr: string, newLine: string | null = null): Promise<string> {
+    const section = parseQuickAddSection(this.quickAddSectionCfg);
+    const template = this.resolveTemplate ? await this.resolveTemplate(dateStr) : null;
+
+    if (template === null || template === undefined || !String(template).trim()) {
+      return newLine === null
+        ? `# ${dateStr}\n\n${section.heading}\n`
+        : `# ${dateStr}\n\n${section.heading}\n${newLine}\n`;
+    }
+
+    const lines = String(template).replace(/\s+$/, "").split("\n");
+    const headerRe = sectionHeaderRegex(section.title);
+    const headerIdx = lines.findIndex(l => headerRe.test(l));
+    if (headerIdx >= 0) {
+      if (newLine !== null) lines.splice(headerIdx + 1, 0, newLine);
+    } else {
+      lines.push("", section.heading);
+      if (newLine !== null) lines.push(newLine);
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  /**
+   * 确保某天日记存在并返回它，不存在则按约定新建（DEC-017）。
+   * 内容规则已收口到 buildNewNoteContent：默认沿用宿主日记模板（DEC-028）。
    */
   async ensureDailyNote(dateStr: string): Promise<NoteFile> {
     await this.buildIndexIfNeeded();
@@ -154,8 +193,7 @@ export class DailySource implements NoteSource {
     const folder = this.folderOf(dateStr);
     await this.ensureFolder(folder);
     const path = `${folder}/${dateStr}.md`;
-    const heading = parseQuickAddSection(this.quickAddSectionCfg).heading;
-    await this.store.create(path, `# ${dateStr}\n\n${heading}\n`);
+    await this.store.create(path, await this.buildNewNoteContent(dateStr));
 
     const file: NoteFile = { path, basename: dateStr, mtime: Date.now() };
     this.index.set(dateStr, file);
@@ -418,7 +456,7 @@ export class DailySource implements NoteSource {
       const folder = this.folderOf(dateStr);
       await this.ensureFolder(folder);
       const path = `${folder}/${dateStr}.md`;
-      await this.store.create(path, `# ${dateStr}\n\n${section.heading}\n${newLine}\n`);
+      await this.store.create(path, await this.buildNewNoteContent(dateStr, newLine));
       file = { path, basename: dateStr, mtime: Date.now() };
       this.index.set(dateStr, file);
     } else {

@@ -13,7 +13,9 @@ import { formatSecondsToTime } from "./time";
 // 判定 / 行首改写 / 子项收集都放在模块级纯函数里，方便测试直接验证
 // 「只搬目标行、绝不误删用户内容」这条红线。
 export function normalizeAddType(raw) {
-  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+  // DEC-029：默认类型改为时间点，所有兜底路径（空值 / 非法值 / 旧 data.json 缺键）
+  // 都跟着落到 point；只有显式写 "block" 才是时间块。
+  return String(raw || "").toLowerCase() === "block" ? "block" : "point";
 }
 
 // 按记录类型改写行首时间前缀：块写 HH:mm-HH:mm，点只写一个 HH:mm。
