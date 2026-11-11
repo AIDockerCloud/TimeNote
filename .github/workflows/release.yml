@@ -1,8 +1,10 @@
 name: Release
 
 # 发布口径（AGENTS.md 红线 19）：
-#   只有推 `v*` tag 才发版。tag 名去掉 v 后必须与 manifest.json 的 version 完全一致，
-#   否则直接失败 —— 防止「tag 说 1.0.9、插件其实是 1.0.8」这类漂移。
+#   只有推 `v*` tag 才发版。tag 名去掉 v 后的**主版本段**必须与 manifest.json 的
+#   version 完全一致，否则直接失败 —— 防止「tag 说 1.0.9、插件其实是 1.0.8」这类漂移。
+#   预发布用带后缀的 tag（如 `v1.0.12-beta.1`，manifest 仍写 1.0.12），workflow 会
+#   自动把 Release 标成 Pre-release，不抢 Latest；验证通过后推正式的 `v1.0.12`。
 #   workflow_dispatch 只构建并上传 artifact（试跑用），不建 Release。
 
 on:
@@ -35,9 +37,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          base="${tag%%-*}"   # v1.2.3-beta.1 → 1.2.3：预发布后缀不参与比对
           ver="$(node -p "require('./manifest.json').version")"
-          echo "tag=$tag manifest=$ver"
-          if [ "$tag" != "$ver" ]; then
+          echo "tag=$tag base=$base manifest=$ver"
+          if [ "$base" != "$ver" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} 与 manifest.json 的 version ${ver} 不一致，先 npm run bump 再打 tag"
             exit 1
           fi
@@ -69,12 +72,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           assets=(dist/*.zip manifest.json main.js styles.css)
+          # tag 带预发布后缀（如 v1.2.3-beta.1）→ 标 Pre-release，不抢 Latest
+          pre=""
+          case "$GITHUB_REF_NAME" in
+            *-*) pre="--prerelease" ;;
+          esac
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            # 注意用 if 而不是 `[ -n "$pre" ] && ...`：Actions 的 bash 带 -e，
+            # 空值时的假值会让整个 step 直接失败
+            if [ -n "$pre" ]; then gh release edit "$GITHUB_REF_NAME" $pre; fi
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --title "TimeNote ${GITHUB_REF_NAME}" \
-              --generate-notes
+              --generate-notes $pre
           fi
           gh release view "$GITHUB_REF_NAME" --json assets \
             -q '.assets[].name' | sed 's/^/  asset: /'
+          echo "prerelease=${pre:+true}"
