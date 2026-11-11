@@ -4,9 +4,12 @@
 // 只查源码 / 产物 / 样式，不依赖 Obsidian 运行时。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadPluginSources, loadPluginSource } from "./lib/elastic.mjs";
 
-const ts = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const ts = loadPluginSources();
+// DEC-025：openDailyNoteForDate 的「找 / 建 / 打开」逻辑已搬进 Obsidian 宿主 adapter，
+// 渲染层只保留一句委托。行为断言要对着真正干活的 adapter 源码做。
+const adapterSrc = loadPluginSource("hosts/obsidian/adapter.ts");
 const js = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
 const css = fs.readFileSync(path.join(PROJECT_ROOT, "styles.css"), "utf8");
 const cssCode = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -18,22 +21,23 @@ const ok = (name, cond) => {
   else { fails.push(name); console.log(`  ✗ ${name}`); }
 };
 
-// 只取 openDailyNoteForDate 方法体（到下一个同级方法前）
-const start = ts.indexOf("async openDailyNoteForDate(");
-const body = start < 0 ? "" : ts.slice(start, ts.indexOf("\n  }\n", start) + 5);
+// 只取 adapter 里 openDailyNote 的方法体（对象字面量方法，到 "\n    }," 结束）
+const start = adapterSrc.indexOf("async openDailyNote(dateStr: string) {");
+const body = start < 0 ? "" : adapterSrc.slice(start, adapterSrc.indexOf("\n    },", start) + 8);
 
 console.log("--- 统一入口：打开 / 创建当天日记 ---");
 ok("openDailyNoteForDate 方法存在", start >= 0 && body.length > 200);
-ok("点击前强制重建日记索引（避开 5 秒缓存）", /dailyNoteIndex\.clear\(\)/.test(body));
+ok("点击前强制重建日记索引（避开 5 秒缓存）", /service\.clearIndex\(\)/.test(body));
 ok("先查已有日记", /findDailyNoteFile\(dateStr\)/.test(body));
-ok("不存在时逐级创建 YYYY/Daily/MM 目录",
-  /\/Daily\//.test(body) && /format\("YYYY"\)/.test(body) &&
-  /format\("MM"\)/.test(body) && /createFolder\(curr\)/.test(body));
-ok("不存在时创建与 QuickAdd 同结构的日记",
-  /vault\.create\(notePath/.test(body) && /quickAddSection/.test(body) &&
-  /normalizePath/.test(body));
-ok("创建后写回索引并给出 Notice",
-  /dailyNoteIndex\.set\(dateStr, file\)/.test(body) && /new Notice\(/.test(body));
+// DEC-026：建目录 / 建日记 / 写索引的规则已搬进 sources/daily.ts 的 ensureDailyNote，
+// adapter 只负责"委托 + 把路径换回 TFile"。这里断言两件事：
+//   ① 确实委托了  ② 不再自己碰 vault.create / createFolder（分层没被悄悄穿回去）
+ok("建目录 / 建日记委托给 DailySource（DEC-026）",
+  /ensureDailyNote\(dateStr\)/.test(body) &&
+  !/vault\.create\(/.test(body) && !/createFolder\(/.test(body));
+ok("路径换回 TFile 才打开（adapter 不再自己造文件对象）",
+  /getAbstractFileByPath\(note\.path\)/.test(body) && /instanceof TFile/.test(body));
+ok("新建日记后给出 Notice", /new Notice\(/.test(body));
 ok("无论是否已存在，最终都打开日记文件",
   /getLeaf\(false\)/.test(body) && /openFile\(file/.test(body));
 

@@ -464,6 +464,13 @@
   border-left: 3px solid var(--color-purple);
 }
 
+/* 聚合远程来源（DEC-023）：左色条按来源着色，一眼看出不是本地日记。
+   注意这里只给「来源专属」规则，不做通用 .is-external 装饰 —— 本地 Blinko
+   导出文件同样标 source="blinko"，通用规则会顺带改掉它的既有外观。 */
+.timenote-time-line-row.is-memos {
+  border-left: 3px solid var(--color-green, #44cf6e);
+}
+
 /* The Line & Time Badge header of the row */
 .timenote-line-wrapper {
   display: flex;
@@ -908,6 +915,10 @@
   background-color: var(--color-purple);
 }
 
+.timenote-timeline-dot.is-memos {
+  background-color: var(--color-green, #44cf6e);
+}
+
 .timenote-timeline-content {
   flex: 1;
   background-color: var(--background-secondary);
@@ -1046,6 +1057,12 @@
   border-left-color: var(--color-purple);
   background-color: rgba(120, 82, 238, 0.08);
   background-color: color-mix(in srgb, var(--color-purple, #7852ee) 8%, transparent);
+}
+
+.timenote-month-item-pill.is-memos {
+  border-left-color: var(--color-green, #44cf6e);
+  background-color: rgba(68, 207, 110, 0.08);
+  background-color: color-mix(in srgb, var(--color-green, #44cf6e) 8%, transparent);
 }
 
 .timenote-month-pill-time {
@@ -1394,6 +1411,11 @@
 }
 /* 任务块不再固定橙色：颜色统一走按天分配，任务语义由复选框表达 */
 .timenote-event-block.is-blinko { border-left-color: var(--text-muted); }
+/* 聚合远程来源（DEC-023）：左色条按来源着色；只读块不绑拖拽，光标也不给 grab 暗示 */
+.timenote-event-block.is-memos {
+  border-left-color: var(--color-green, #44cf6e);
+}
+.timenote-event-block.is-readonly { cursor: default; }
 .timenote-event-block.is-completed { opacity: 0.6; }
 .timenote-event-block.is-range { border-left-width: 4px; }
 .timenote-event-block-title {

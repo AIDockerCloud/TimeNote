@@ -1,12 +1,11 @@
-// 按天自动配色测试（DEC-016）：直接抽 main.ts 里的真实实现，验证
+// 按天自动配色测试（DEC-016）：直接用 core 的真实实现，验证
 // 「同一天的块颜色互不相同 / 新块拿到未用色 / 显式指定优先 / 重渲染稳定」。
 //
 // 用法：node scripts/dev/test-block-tints.mjs
-import fs from "node:fs";
-import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+// 前置：npm run build:core
+import { loadCore } from "./lib/elastic.mjs";
 
-const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const { assignDayTints, BLOCK_TINTS, resolveTint, tintEntryKey, parseLine } = await loadCore();
 
 let pass = 0;
 const fails = [];
@@ -14,20 +13,6 @@ const ok = (name, cond, extra) => {
   if (cond) { pass++; console.log(`  ✓ ${name}`); }
   else { fails.push(name + (extra ? `  [${extra}]` : "")); console.log(`  ✗ ${name}${extra ? `  [${extra}]` : ""}`); }
 };
-
-// ---------- 抽真实实现 ----------
-const begin = src.indexOf("// --- BLOCK_TINT_BEGIN ---");
-const end = src.indexOf("// --- BLOCK_TINT_END ---");
-if (begin < 0 || end < 0) throw new Error("main.ts 里找不到 BLOCK_TINT 区块");
-const tintBlock = src.slice(begin, end);
-const { assignDayTints, BLOCK_TINTS, resolveTint, tintEntryKey } = new Function(
-  `${tintBlock}\nreturn { assignDayTints, BLOCK_TINTS, resolveTint, tintEntryKey };`
-)();
-
-const pStart = src.indexOf("function parseLine(");
-const pEnd = src.indexOf("\n}\n", pStart) + 3;
-if (pStart < 0 || pEnd < 3) throw new Error("main.ts 里找不到 parseLine");
-const parseLine = new Function(`${src.slice(pStart, pEnd)}\nreturn parseLine;`)();
 
 const mk = (n, prefix = "day", tint = null) =>
   Array.from({ length: n }, (_, i) => ({ key: `${prefix}/note.md#L${i + 1}`, tint }));

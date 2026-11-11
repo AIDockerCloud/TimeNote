@@ -5,9 +5,9 @@
 // 抽 main.ts 里真实的 renderView 方法体 + 假 DOM，模拟并发调用与不同完成顺序。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadPluginSources } from "./lib/elastic.mjs";
 
-const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const src = loadPluginSources();
 const bundle = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
 
 let pass = 0;
@@ -45,6 +45,8 @@ function makeView(refreshImpl) {
   const view = {
     containerEl: { children: [{}, container] },
     contentEl: container,
+    // DEC-025：渲染引擎改名为 TimenoteRenderer，容器由宿主注入为 this.root
+    root: container,
     currentViewMode: "week",
     hideHoverTooltip() {},
     refreshData: refreshImpl,
@@ -142,10 +144,11 @@ console.log("--- 源码 / 产物 ---");
 const body = src.slice(mStart, mEnd);
 ok("renderView 用递增代号", /const gen = \(this\.renderGeneration \|\| 0\) \+ 1/.test(body));
 ok("await 之后检查代号再渲染", /await this\.refreshData\(\);\s*\n\s*if \(gen !== this\.renderGeneration\) return;/.test(body));
-ok("容器用 this.contentEl（不再靠 children[1] 索引）",
-  /const container = this\.contentEl;/.test(body) && !/containerEl\.children\[1\]/.test(body));
+ok("容器用 this.root（宿主注入，不再靠 children[1] 索引）",
+  /const container = this\.root;/.test(body) && !/containerEl\.children\[1\]/.test(body));
 ok("empty() 仍在 await 之前", body.indexOf("container.empty()") < body.indexOf("await this.refreshData()"));
-ok("vault.modify 监听保留（不靠删事件规避）", /this\.app\.vault\.on\("modify"/.test(src));
+// DEC-025：文件监听从 ItemView.registerEvent 移到 HostAdapter.onExternalChange
+ok("vault.modify 监听保留（不靠删事件规避）", /vault\.on\("modify"/.test(src));
 ok("QuickAdd 保存后 onSaved 仍触发渲染", /if \(this\.onSaved\) this\.onSaved\(\)/.test(src));
 ok("产物含代号检查", bundle.includes("this.renderGeneration") && bundle.includes("gen !== this.renderGeneration"));
 ok("产物不再用 children[1]", !bundle.includes("containerEl.children[1]"));

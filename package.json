@@ -6,7 +6,11 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build:core": "node core/esbuild.config.mjs",
+    "build:sources": "node sources/esbuild.config.mjs",
+    "build:ui": "node ui/esbuild.config.mjs",
+    "build:hosts": "node hosts/esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node core/esbuild.config.mjs && node sources/esbuild.config.mjs && node ui/esbuild.config.mjs && node hosts/esbuild.config.mjs && node apps/esbuild.config.mjs && node esbuild.config.mjs production",
     "typecheck": "tsc -noEmit -skipLibCheck",
     "check": "npm run typecheck && python3 scripts/pcmp_index.py --check",
     "bump": "node scripts/bump-version.mjs",
@@ -25,8 +29,15 @@
     "test:section": "node scripts/dev/test-quick-add-section.mjs",
     "test:render": "node scripts/dev/test-render-race.mjs",
     "test:cross": "node scripts/dev/test-cross-day.mjs",
+    "test:sources": "node scripts/dev/test-sources.mjs",
+    "test:ui": "node scripts/dev/test-ui.mjs",
+    "test:bundle": "node scripts/dev/test-bundle-load.mjs",
     "preview:cross": "node scripts/dev/preview-cross-day.mjs",
-    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross"
+    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross && npm run test:sources && npm run test:ui && npm run test:bundle && npm run test:hosts && npm run test:daily && npm run test:blinko-local",
+    "test:hosts": "node scripts/dev/test-hosts.mjs",
+    "build:apps": "node apps/esbuild.config.mjs",
+    "test:daily": "node scripts/dev/test-daily-source.mjs",
+    "test:blinko-local": "node scripts/dev/test-blinko-local.mjs"
   },
   "keywords": [
     "obsidian",

@@ -9,6 +9,16 @@ node_modules/
 # 发布包（npm run pack / dist → timenote-<version>.zip，由 Release 重新生成，不入库）
 dist/
 # 注意：main.js 是 esbuild 产物，但必须入库以支持零构建安装，故不忽略
+# core/index.mjs 只给开发脚本 import 用（npm run build:core 生成），不入库
+core/index.mjs
+# sources/index.mjs 同理（npm run build:sources 生成），不入库
+sources/index.mjs
+# ui/index.mjs 同理（npm run build:ui 生成），不入库
+ui/index.mjs
+# hosts/index.mjs 同理（npm run build:hosts 生成），不入库
+hosts/index.mjs
+# apps/index.mjs 同理（npm run build:apps 生成），不入库
+apps/index.mjs
 
 # 桌面环境回收站目录（非项目文件，勿提交）
 .Trash-*/

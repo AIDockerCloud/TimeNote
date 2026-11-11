@@ -16,5 +16,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["main.ts"]
+  "include": ["main.ts", "core/**/*.ts", "sources/**/*.ts", "ui/**/*.ts", "hosts/**/*.ts", "apps/**/*.ts"]
 }

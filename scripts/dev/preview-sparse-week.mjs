@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PROJECT_ROOT, loadElasticInternals } from "./lib/elastic.mjs";
 
-const { buildTimeScale, estimateBlockNeed } = loadElasticInternals();
+const { buildTimeScale, estimateBlockNeed } = await loadElasticInternals();
 
 const H = (h) => h * 3600;
 const START = 6;

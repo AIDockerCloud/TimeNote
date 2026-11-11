@@ -4,9 +4,9 @@
 // 覆盖：解析判定 / 分簇堆叠 / 弹性轴行高 / 只改时间不生成范围的回写 / 无边缘拖动静态断言。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT, loadElasticInternals } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadCore, loadSources, loadPluginSources } from "./lib/elastic.mjs";
 
-const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const src = loadPluginSources();
 const css = fs.readFileSync(path.join(PROJECT_ROOT, "styles.css"), "utf8");
 const bundle = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
 
@@ -18,57 +18,47 @@ const ok = (name, cond, extra) => {
 };
 
 // ---------- 抽真实实现 ----------
-const { buildTimeScale, layoutPointLines, isPointEntry } = loadElasticInternals();
+// 平台无关的纯函数直接用 core 的实现（DEC-023）
+const {
+  buildTimeScale,
+  layoutPointLines,
+  isPointEntry,
+  parseLine
+} = await loadCore();
 
-const pStart = src.indexOf("function parseLine(");
-const pEnd = src.indexOf("\n}\n", pStart) + 3;
-if (pStart < 0 || pEnd < 3) throw new Error("main.ts 里找不到 parseLine");
-const parseLine = new Function(`${src.slice(pStart, pEnd)}\nreturn parseLine;`)();
+// updateEntryPointTime 已随 DEC-026 迁进 sources/daily.ts，直接 import 真实现，
+// 不再按源码位置切片（方法搬家后切片必然错位）。
+const { DailySource, MemoryFileStore } = await loadSources();
+const dailySrc = fs.readFileSync(path.join(PROJECT_ROOT, "sources", "daily.ts"), "utf8");
 
-// 与 test-drag-writeback 同一套括号配对：把类方法体取出来，注入 TFile / 时间格式化
+// 仍需要方法体文本：DEC-018 要静态保证「点的回写里不构造范围字符串」
 const extractMethod = (signature) => {
-  const mStart = src.indexOf(signature);
-  if (mStart < 0) throw new Error(`main.ts 里找不到 ${signature}`);
+  const mStart = dailySrc.indexOf(signature);
+  if (mStart < 0) throw new Error(`sources/daily.ts 里找不到 ${signature}`);
   let depth = 0;
-  let mEnd = -1;
-  for (let i = src.indexOf("{", mStart); i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
+  for (let i = dailySrc.indexOf("{", mStart); i < dailySrc.length; i++) {
+    if (dailySrc[i] === "{") depth++;
+    else if (dailySrc[i] === "}") {
       depth--;
-      if (depth === 0) { mEnd = i + 1; break; }
+      if (depth === 0) return dailySrc.slice(mStart, i + 1);
     }
   }
-  return src.slice(mStart, mEnd);
+  return "";
 };
-const pointMethodSrc = extractMethod("  async updateEntryPointTime(entry, startSec) {");
-const pointInner = pointMethodSrc
-  .replace(/^\s*async updateEntryPointTime\(entry, startSec\) \{/, "")
-  .replace(/\}\s*$/, "");
 
-class FakeTFile {
-  constructor(p, text) { this.path = p; this._text = text; }
-}
-const formatSecondsToTime = (sec) => {
-  const c = Math.max(0, Math.min(86400, sec));
-  return String(Math.floor(c / 3600)).padStart(2, "0") + ":" +
-         String(Math.floor((c % 3600) / 60)).padStart(2, "0");
-};
-const pointRuntime = new Function(
-  "TFile", "formatSecondsToTime",
-  `return async function(entry, startSec){ ${pointInner} };`
-)(FakeTFile, formatSecondsToTime);
-
+const POINT_FILE = "SpiralNotes/2026/Daily/11/2026-11-09.md";
 function buildRunner(text) {
-  const file = new FakeTFile("SpiralNotes/2026/Daily/11/2026-11-09.md", text);
-  const app = {
-    vault: {
-      getAbstractFileByPath: (p) => (p === file.path ? file : null),
-      read: async () => file._text,
-      modify: async (_f, t) => { file._text = t; }
-    }
+  const store = new MemoryFileStore({ [POINT_FILE]: text });
+  const daily = new DailySource({
+    store,
+    settings: { periodicNotesFolder: "SpiralNotes" }
+  });
+  const file = {
+    path: POINT_FILE,
+    // 保留 _text 读法：每次 getter 都从存储读最新内容，断言不必改写
+    get _text() { return store.peek(POINT_FILE); }
   };
-  const service = { app, fileCache: new Map([["x", 1]]) };
-  return { file, run: (entry, s) => pointRuntime.call(service, entry, s) };
+  return { file, run: (entry, startSec) => daily.updateEntryPointTime(entry, startSec) };
 }
 
 const H = (h, m = 0) => h * 3600 + m * 60;
@@ -239,7 +229,9 @@ ok("点线需求按小时汇总后交给弹性轴", src.includes("entries: scale
   const cSrc = src.slice(cStart, src.indexOf("\n  }\n", cStart));
   ok("松手后走 updateEntryPointTime", cSrc.includes("updateEntryPointTime") && !cSrc.includes("updateEntryTime("));
 }
-ok("新回写方法里没有范围字符串构造", !pointMethodSrc.includes("rangeStr"));
+const pointBody = extractMethod("  async updateEntryPointTime(entry: NoteEntry, startSec: number): Promise<boolean> {");
+ok("方法体确实取到了", pointBody.length > 200, String(pointBody.length));
+ok("新回写方法里没有范围字符串构造", !pointBody.includes("rangeStr"));
 ok("点拖拽会吃掉拖拽后的补发 click", src.includes("line.dataset.dragMoved"));
 ok("时间线视图不再给点记录补虚构的 30m", src.includes("isPointEntry(entry) ? entry.timeStr"));
 ok("快速记录提示不再宣称「按默认 30m 显示」", !src.includes("按默认 30m 显示"));

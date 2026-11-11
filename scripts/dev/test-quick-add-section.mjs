@@ -4,9 +4,9 @@
 // 覆盖：纯函数解析 / 标题行匹配 / addEntry 假 vault 端到端插入 / 四处调用点静态断言。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadCore, loadSources, loadPluginSources, loadPluginSource } from "./lib/elastic.mjs";
 
-const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const src = loadPluginSources();
 const bundle = fs.readFileSync(path.join(PROJECT_ROOT, "main.js"), "utf8");
 
 let pass = 0;
@@ -16,16 +16,9 @@ const ok = (name, cond, extra) => {
   else { fails.push(name + (extra ? `  [${extra}]` : "")); console.log(`  ✗ ${name}${extra ? `  [${extra}]` : ""}`); }
 };
 
-// ---------- 抽真实实现（按 SECTION_HEADING 区块标记，测的就是进产物的那份代码） ----------
-const BEGIN = "// --- SECTION_HEADING_BEGIN ---";
-const END = "// --- SECTION_HEADING_END ---";
-const bStart = src.indexOf(BEGIN);
-const bEnd = src.indexOf(END);
-if (bStart < 0 || bEnd < 0 || bEnd <= bStart) throw new Error("main.ts 里找不到 SECTION_HEADING 区块");
-const headingSrc = src.slice(bStart, bEnd + END.length);
-const { parseQuickAddSection, sectionHeaderRegex } = new Function(
-  `${headingSrc}\nreturn { parseQuickAddSection, sectionHeaderRegex };`
-)();
+// ---------- 抽真实实现 ----------
+// 平台无关的纯函数直接用 core 的实现（DEC-023：不再按 SECTION_HEADING 区块切片）
+const { parseQuickAddSection, sectionHeaderRegex } = await loadCore();
 
 // ---------- 1) 纯函数：层级 / 标题解析 ----------
 console.log("--- 解析配置值 ---");
@@ -56,46 +49,35 @@ ok("不匹配标题后缀文字", !re.test("## 随手记 备注"));
 ok("不匹配别的标题", !sectionHeaderRegex("灵感闪念").test("## 随手记"));
 ok("正则元字符被转义", sectionHeaderRegex("A+B").test("## A+B") && !sectionHeaderRegex("A+B").test("## ABB"));
 
-// ---------- 3) addEntry 假 vault 端到端 ----------
+// ---------- 3) addEntry 端到端（真实现 + 内存存储） ----------
 console.log("--- addEntry 插入行为 ---");
-// 签名会随功能演进增加可选参数（DEC-022 加了 rawLines），这里只按方法名定位
-const mStart = src.indexOf("  async addEntry(");
-if (mStart < 0) throw new Error("main.ts 里找不到 addEntry");
-let depth = 0;
-let mEnd = -1;
-for (let i = src.indexOf("{", mStart); i < src.length; i++) {
-  if (src[i] === "{") depth++;
-  else if (src[i] === "}") { depth--; if (depth === 0) { mEnd = i + 1; break; } }
-}
-const addInner = src.slice(mStart, mEnd)
-  .replace(/^\s*async addEntry\([^)]*\) \{/, "")
-  .replace(/\}\s*$/, "");
-const fakeWindow = { moment: () => ({ format: (f) => (f === "YYYY" ? "2026" : "11") }) };
-const addEntry = new Function(
-  "window", "parseQuickAddSection", "sectionHeaderRegex",
-  `return async function(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null){ ${addInner} };`
-)(fakeWindow, parseQuickAddSection, sectionHeaderRegex);
+// DEC-026：addEntry 已迁进 sources/daily.ts，直接 import 真实现，
+// 不再用 new Function 包方法体 + 假 vault（方法搬家后那套必然错位）。
+const { DailySource, MemoryFileStore } = await loadSources();
+const dailySrc = fs.readFileSync(path.join(PROJECT_ROOT, "sources", "daily.ts"), "utf8");
 
 function makeService(text, setting, hasFile = true) {
-  const file = { path: "SpiralNotes/2026/Daily/11/2026-11-09.md", _text: text };
+  const FILE = "SpiralNotes/2026/Daily/11/2026-11-09.md";
+  const store = new MemoryFileStore(hasFile ? { [FILE]: text } : {});
+  // 记录 create 的入参，供「新建日记」的断言检查落盘内容
   const created = [];
-  const svc = {
-    settings: { quickAddSection: setting, periodicNotesFolder: "SpiralNotes" },
-    fileCache: new Map([[file.path, 1]]),
-    dailyNoteIndex: new Map(),
-    findDailyNoteFile: () => (hasFile ? file : null),
-    app: { vault: {
-      read: async () => file._text,
-      modify: async (_f, t) => { file._text = t; },
-      adapter: { exists: async () => true },
-      createFolder: async () => {},
-      create: async (p, t) => { created.push({ p, t }); return { path: p }; }
-    } },
-    file, created
+  const realCreate = store.create.bind(store);
+  store.create = async (p, t) => { created.push({ p, t }); return realCreate(p, t); };
+
+  const settings = { quickAddSection: setting, periodicNotesFolder: "SpiralNotes" };
+  const daily = new DailySource({ store, settings });
+  const file = {
+    path: FILE,
+    get _text() { return store.peek(FILE); }
   };
-  return svc;
+  return {
+    file, created, daily, settings,
+    get fileCache() { return daily.fileCache; },
+    get dailyNoteIndex() { return daily.index; }
+  };
 }
-const add = async (svc) => addEntry.call(svc, "2026-11-09", "09:00", "写周报", false, [], "");
+// 保持原调用点写法
+const add = async (svc) => svc.daily.addEntry("2026-11-09", "09:00", "写周报", false, [], "");
 
 {
   const svc = makeService("# 2026-11-09\n\n### 随手记\n- 08:00 旧记录\n", "### 随手记");
@@ -149,15 +131,20 @@ console.log("--- 写死层级已清除 / 四处调用点 ---");
 ok("main.ts 不再有写死的 `## ${...quickAddSection}`", !/## \$\{[^}]*quickAddSection/.test(src));
 ok("默认设置带二级前缀", /quickAddSection:\s*"## 灵感闪念"/.test(src));
 ok("addEntry 走纯函数且按标题名逐行匹配",
-  /const section = parseQuickAddSection\(this\.settings\.quickAddSection\)/.test(src) &&
-  /const headerIdx = lines\.findIndex\(l => headerRe\.test\(l\)\)/.test(src));
-ok("addEntry 不再用 includes/replace 子串匹配标题", !/fileText\.includes\(sectionHeader\)/.test(src));
-const openStart = src.indexOf("async openDailyNoteForDate(");
-const openBody = openStart < 0 ? "" : src.slice(openStart, src.indexOf("\n  }\n", openStart) + 5);
-ok("日期标题新建日记用配置 heading", /parseQuickAddSection\(this\.plugin\.settings\.quickAddSection\)\.heading/.test(openBody));
+  /const section = parseQuickAddSection\(this\.quickAddSectionCfg\)/.test(dailySrc) &&
+  /const headerIdx = lines\.findIndex\(l => headerRe\.test\(l\)\)/.test(dailySrc));
+ok("addEntry 不再用 includes/replace 子串匹配标题", !/fileText\.includes\(sectionHeader\)/.test(dailySrc));
+// DEC-025：新建日记的逻辑已搬进 hosts/obsidian/adapter.ts（渲染层只委托）
+const adapterSrc = loadPluginSource("hosts/obsidian/adapter.ts");
+const openStart = adapterSrc.indexOf("async openDailyNote(dateStr: string) {");
+const openBody = openStart < 0 ? "" : adapterSrc.slice(openStart, adapterSrc.indexOf("\n    },", openStart) + 8);
+// DEC-026：新建日记落在 DailySource.ensureDailyNote 里，adapter 只委托
+ok("日期标题新建日记走 DailySource.ensureDailyNote", /ensureDailyNote\(dateStr\)/.test(openBody));
+ok("新建日记用配置 heading",
+  /const heading = parseQuickAddSection\(this\.quickAddSectionCfg\)\.heading/.test(dailySrc));
 ok("parseDailyFile 用配置标题判定随手记区",
-  /const memoTitle = parseQuickAddSection\(this\.settings\.quickAddSection\)\.title/.test(src) &&
-  /currentSection === memoTitle/.test(src));
+  /const memoTitle = parseQuickAddSection\(this\.quickAddSectionCfg\)\.title/.test(dailySrc) &&
+  /currentSection === memoTitle/.test(dailySrc));
 ok("设置项说明写明可指定层级", /或「### 随手记」/.test(src) && /setPlaceholder\("## 灵感闪念"\)/.test(src));
 ok("设置项空值回退默认配置", /val\.trim\(\) \|\| DEFAULT_SETTINGS\.quickAddSection/.test(src));
 ok("产物包含两个纯函数", bundle.includes("function parseQuickAddSection(") && bundle.includes("function sectionHeaderRegex("));

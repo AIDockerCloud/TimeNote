@@ -1,10 +1,10 @@
 // 弹性时间轴（行高内容驱动）的数学与分配测试
 //
 // 用法：node scripts/dev/test-elastic-timeline.mjs
-// 前置：npm run build（测的是 main.js 里的真实实现，不是源码副本）
-import { loadElasticInternals } from "./lib/elastic.mjs";
+// 前置：npm run build:core（测的是 core/index.mjs 里的真实实现，不是源码副本）
+import { loadCore } from "./lib/elastic.mjs";
 
-const { buildTimeScale, estimateBlockNeed } = loadElasticInternals();
+const { buildTimeScale, estimateBlockNeed } = await loadCore();
 
 let pass = 0;
 const fails = [];

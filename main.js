@@ -26,207 +26,9 @@ __export(main_exports, {
   default: () => TimenotePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
-var VIEW_TYPE_TIMENOTE = "timenote-calendar-view";
-var DEFAULT_SETTINGS = {
-  periodicNotesFolder: "SpiralNotes",
-  includeBlinko: true,
-  defaultView: "week",
-  // 'day', '3day', 'week', 'month', 'quarter', 'year', 'timeline'
-  startHour: 0,
-  endHour: 24,
-  slotHeight: 52,
-  firstDayOfWeek: 1,
-  // 1: Monday, 0: Sunday
-  parseAllBullets: true,
-  // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
-  quickAddSection: "## \u7075\u611F\u95EA\u5FF5",
-  layoutMode: "block",
-  defaultDuration: 60,
-  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
-  defaultAddType: "block",
-  allDayHeight: 36,
-  // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
-  elasticTimeline: true
-};
-var BLOCK_TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
-var TINT_FALLBACKS = {
-  purple: "#7852ee",
-  blue: "#086ddd",
-  cyan: "#00bfbc",
-  green: "#08b94e",
-  yellow: "#e0ac00",
-  orange: "#ec7500",
-  red: "#e93147",
-  pink: "#d53984"
-};
-var TINT_ALIASES = {
-  \u7D2B: "purple",
-  \u84DD: "blue",
-  \u9752: "cyan",
-  \u7EFF: "green",
-  \u9EC4: "yellow",
-  \u6A59: "orange",
-  \u7EA2: "red",
-  \u7C89: "pink"
-};
-function tintCssOf(index) {
-  const name = BLOCK_TINTS[index];
-  return `var(--color-${name}, ${TINT_FALLBACKS[name]})`;
-}
-function hashTintKey(key) {
-  let hash = 0;
-  const s = String(key);
-  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
-  return Math.abs(hash);
-}
-function tintEntryKey(entry, dateStr) {
-  return entry.id || `${dateStr}#${entry.lineNum || 0}#${entry.text || ""}`;
-}
-function resolveTint(value) {
-  if (!value) return null;
-  const raw = String(value).trim();
-  const lower = raw.toLowerCase();
-  const idx = BLOCK_TINTS.indexOf(TINT_ALIASES[raw] || lower);
-  if (idx >= 0) return { css: tintCssOf(idx), index: idx };
-  if (/^(#|hsl\(|rgb\(|var\()/i.test(raw)) return { css: raw, index: -1 };
-  const fallback = hashTintKey(raw) % BLOCK_TINTS.length;
-  return { css: tintCssOf(fallback), index: fallback };
-}
-function assignDayTints(items) {
-  const used = /* @__PURE__ */ new Set();
-  const result = new Array(items.length);
-  items.forEach((it, i) => {
-    const resolved = resolveTint(it.tint);
-    if (!resolved) return;
-    result[i] = resolved.css;
-    if (resolved.index >= 0) used.add(resolved.index);
-  });
-  const n = BLOCK_TINTS.length;
-  items.forEach((it, i) => {
-    if (result[i]) return;
-    const preferred = hashTintKey(it.key) % n;
-    let chosen = -1;
-    for (let k = 0; k < n; k++) {
-      const c = (preferred + k) % n;
-      if (!used.has(c)) {
-        chosen = c;
-        break;
-      }
-    }
-    if (chosen < 0) {
-      const prev = i > 0 ? result[i - 1] : null;
-      for (let k = 0; k < n; k++) {
-        const c = (preferred + k) % n;
-        if (tintCssOf(c) !== prev) {
-          chosen = c;
-          break;
-        }
-      }
-      if (chosen < 0) chosen = preferred;
-    }
-    used.add(chosen);
-    result[i] = tintCssOf(chosen);
-  });
-  return result;
-}
-function getTagColor(tag) {
-  let hash = 0;
-  for (let i = 0; i < tag.length; i++) {
-    hash = tag.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const hue = Math.abs(hash % 360);
-  return {
-    bg: `hsla(${hue}, 70%, 50%, 0.15)`,
-    text: `hsl(${hue}, 75%, 45%)`,
-    border: `hsla(${hue}, 70%, 50%, 0.3)`
-  };
-}
-function formatSecondsToTime(sec) {
-  const clamped = Math.max(0, Math.min(86400, sec));
-  const h = Math.floor(clamped / 3600);
-  const m = Math.floor(clamped % 3600 / 60);
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-var BLOCK_TOP_GUTTER = 0;
-var BLOCK_BOTTOM_GUTTER = 14;
-var BLOCK_RULER_W = 64;
-var DRAG_SNAP_MINUTES = 15;
-var MIN_BLOCK_SECONDS = 15 * 60;
-var POINT_CREATE_SNAP_MINUTES = 15;
-function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
-  const step = Math.max(1, minutes) * 60;
-  return Math.round(sec / step) * step;
-}
-function blockEdgeHit(px) {
-  return Math.max(2, Math.min(9, (Number(px) || 0) / 3));
-}
-function formatDuration(seconds) {
-  const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  if (h > 0 && m > 0) return `${h}h ${m}m`;
-  if (h > 0) return `${h}h`;
-  return `${m}m`;
-}
-function parseTimeToSeconds(str) {
-  if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  const sec = m[3] ? parseInt(m[3], 10) : 0;
-  if (h > 24 || h === 24 && (min > 0 || sec > 0) || min > 59 || sec > 59) return null;
-  return h * 3600 + min * 60 + sec;
-}
-function addMinutesToTime(timeStr, minutes) {
-  const sec = parseTimeToSeconds(timeStr);
-  if (sec === null) return "";
-  const total = Math.min(1440, Math.floor(sec / 60) + minutes);
-  if (total >= 1440) return "24:00";
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-}
-function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
-  const items = entries.map((e) => {
-    const st = Math.max(dayStartSec, e.startSeconds || 0);
-    const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
-    const en = Math.min(dayEndSec, Math.max(st + 60, rawEnd));
-    return { entry: e, s: st, en, lane: 0 };
-  }).sort((a, b) => a.s - b.s || a.en - b.en);
-  const clusters = [];
-  let current = null;
-  items.forEach((it) => {
-    if (!current || it.s >= current.end) {
-      current = { end: it.en, items: [], laneCount: 1 };
-      clusters.push(current);
-    }
-    current.items.push(it);
-    current.end = Math.max(current.end, it.en);
-  });
-  clusters.forEach((c) => {
-    const laneEnds = [];
-    c.items.forEach((it) => {
-      let lane = laneEnds.findIndex((end) => end <= it.s);
-      if (lane === -1) {
-        lane = laneEnds.length;
-        laneEnds.push(it.en);
-      } else {
-        laneEnds[lane] = it.en;
-      }
-      it.lane = lane;
-    });
-    c.laneCount = Math.max(1, laneEnds.length);
-  });
-  return clusters;
-}
-var ELASTIC_EMPTY_RATIO = 0.34;
-var ELASTIC_CONTENT_RATIO = 0.9;
-var ELASTIC_MIN_EMPTY_ROW = 16;
-var ELASTIC_MIN_CONTENT_ROW = 40;
-var ELASTIC_ROW_PAD = 8;
-var ELASTIC_MAX_BLOCK = 240;
-var ELASTIC_MAX_VIEWPORT_SCALE = 1.5;
-var MIN_RENDER_BLOCK_PX = 16;
+var import_obsidian3 = require("obsidian");
+
+// core/scale.ts
 function estimateBlockNeed(entry, widthPx) {
   const text = String(entry && entry.text ? entry.text : "");
   let units = 0;
@@ -242,6 +44,14 @@ function estimateBlockNeed(entry, widthPx) {
   if (entry && entry.subItems && entry.subItems.length) h += 14;
   return Math.max(28, Math.min(ELASTIC_MAX_BLOCK, h));
 }
+var ELASTIC_EMPTY_RATIO = 0.34;
+var ELASTIC_CONTENT_RATIO = 0.9;
+var ELASTIC_MIN_EMPTY_ROW = 16;
+var ELASTIC_MIN_CONTENT_ROW = 40;
+var ELASTIC_ROW_PAD = 8;
+var ELASTIC_MAX_BLOCK = 240;
+var ELASTIC_MAX_VIEWPORT_SCALE = 1.5;
+var MIN_RENDER_BLOCK_PX = 16;
 function buildTimeScale(opts) {
   const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight, pointNeeds } = opts;
   const rowCount = Math.max(1, endHour - startHour);
@@ -338,6 +148,39 @@ function buildTimeScale(opts) {
     elastic: !!elastic
   };
 }
+function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
+  const items = entries.map((e) => {
+    const st = Math.max(dayStartSec, e.startSeconds || 0);
+    const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
+    const en = Math.min(dayEndSec, Math.max(st + 60, rawEnd));
+    return { entry: e, s: st, en, lane: 0 };
+  }).sort((a, b) => a.s - b.s || a.en - b.en);
+  const clusters = [];
+  let current = null;
+  items.forEach((it) => {
+    if (!current || it.s >= current.end) {
+      current = { end: it.en, items: [], laneCount: 1 };
+      clusters.push(current);
+    }
+    current.items.push(it);
+    current.end = Math.max(current.end, it.en);
+  });
+  clusters.forEach((c) => {
+    const laneEnds = [];
+    c.items.forEach((it) => {
+      let lane = laneEnds.findIndex((end) => end <= it.s);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(it.en);
+      } else {
+        laneEnds[lane] = it.en;
+      }
+      it.lane = lane;
+    });
+    c.laneCount = Math.max(1, laneEnds.length);
+  });
+  return clusters;
+}
 var POINT_ROW_H = 20;
 var POINT_LABEL_GAP = 3;
 var POINT_CLUSTER_WINDOW_SEC = 15 * 60;
@@ -371,53 +214,149 @@ function layoutPointLines(entries, dayStartSec, dayEndSec) {
   });
   return out;
 }
-function normalizeAddType(raw) {
-  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+
+// core/time.ts
+var BLOCK_TOP_GUTTER = 0;
+var BLOCK_BOTTOM_GUTTER = 14;
+var BLOCK_RULER_W = 64;
+var DRAG_SNAP_MINUTES = 15;
+var MIN_BLOCK_SECONDS = 15 * 60;
+var POINT_CREATE_SNAP_MINUTES = 15;
+function formatSecondsToTime(sec) {
+  const clamped = Math.max(0, Math.min(86400, sec));
+  const h = Math.floor(clamped / 3600);
+  const m = Math.floor(clamped % 3600 / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
-function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
-  const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-  const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
-  if (isPoint) {
-    if (rangeRe.test(line) || !singleRe.test(line)) return null;
-    return line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp || ""}`);
+function parseTimeToSeconds(str) {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const sec = m[3] ? parseInt(m[3], 10) : 0;
+  if (h > 24 || h === 24 && (min > 0 || sec > 0) || min > 59 || sec > 59) return null;
+  return h * 3600 + min * 60 + sec;
+}
+function addMinutesToTime(timeStr, minutes) {
+  const sec = parseTimeToSeconds(timeStr);
+  if (sec === null) return "";
+  const total = Math.min(1440, Math.floor(sec / 60) + minutes);
+  if (total >= 1440) return "24:00";
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
+  const step = Math.max(1, minutes) * 60;
+  return Math.round(sec / step) * step;
+}
+function blockEdgeHit(px) {
+  return Math.max(2, Math.min(9, (Number(px) || 0) / 3));
+}
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+function getTagColor(tag) {
+  let hash = 0;
+  for (let i = 0; i < tag.length; i++) {
+    hash = tag.charCodeAt(i) + ((hash << 5) - hash);
   }
-  const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
-  let out;
-  if (rangeRe.test(line)) {
-    out = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp || ""}`);
-  } else if (singleRe.test(line)) {
-    out = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp || ""}`);
-  } else {
-    return null;
-  }
-  return out.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+  const hue = Math.abs(hash % 360);
+  return {
+    bg: `hsla(${hue}, 70%, 50%, 0.15)`,
+    text: `hsl(${hue}, 75%, 45%)`,
+    border: `hsla(${hue}, 70%, 50%, 0.3)`
+  };
 }
-function collectSubItemLines(lines, idx) {
-  const out = [];
-  for (let i = idx + 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (!l.trim() || !/^(?:\t+| {2,})/.test(l)) break;
-    out.push(l);
-  }
-  return out;
+
+// core/tints.ts
+var BLOCK_TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
+var TINT_FALLBACKS = {
+  purple: "#7852ee",
+  blue: "#086ddd",
+  cyan: "#00bfbc",
+  green: "#08b94e",
+  yellow: "#e0ac00",
+  orange: "#ec7500",
+  red: "#e93147",
+  pink: "#d53984"
+};
+var TINT_ALIASES = {
+  \u7D2B: "purple",
+  \u84DD: "blue",
+  \u9752: "cyan",
+  \u7EFF: "green",
+  \u9EC4: "yellow",
+  \u6A59: "orange",
+  \u7EA2: "red",
+  \u7C89: "pink"
+};
+function tintCssOf(index) {
+  const name = BLOCK_TINTS[index];
+  return `var(--color-${name}, ${TINT_FALLBACKS[name]})`;
 }
-function parseQuickAddSection(raw) {
-  const FALLBACK_TITLE = "\u7075\u611F\u95EA\u5FF5";
-  const text = String(raw == null ? "" : raw).trim();
-  let level = 2;
-  let title = text;
-  const m = /^(#+)\s*(.*)$/.exec(text);
-  if (m) {
-    level = Math.min(m[1].length, 6);
-    title = (m[2] || "").trim();
-  }
-  title = title.replace(/\s+#+\s*$/, "").trim() || FALLBACK_TITLE;
-  return { level, title, heading: `${"#".repeat(level)} ${title}` };
+function hashTintKey(key) {
+  let hash = 0;
+  const s = String(key);
+  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+  return Math.abs(hash);
 }
-function sectionHeaderRegex(title) {
-  const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
+function tintEntryKey(entry, dateStr) {
+  return entry.id || `${dateStr}#${entry.lineNum || 0}#${entry.text || ""}`;
 }
+function resolveTint(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const lower = raw.toLowerCase();
+  const idx = BLOCK_TINTS.indexOf(TINT_ALIASES[raw] || lower);
+  if (idx >= 0) return { css: tintCssOf(idx), index: idx };
+  if (/^(#|hsl\(|rgb\(|var\()/i.test(raw)) return { css: raw, index: -1 };
+  const fallback = hashTintKey(raw) % BLOCK_TINTS.length;
+  return { css: tintCssOf(fallback), index: fallback };
+}
+function assignDayTints(items) {
+  const used = /* @__PURE__ */ new Set();
+  const result = new Array(items.length);
+  items.forEach((it, i) => {
+    const resolved = resolveTint(it.tint);
+    if (!resolved) return;
+    result[i] = resolved.css;
+    if (resolved.index >= 0) used.add(resolved.index);
+  });
+  const n = BLOCK_TINTS.length;
+  items.forEach((it, i) => {
+    if (result[i]) return;
+    const preferred = hashTintKey(it.key) % n;
+    let chosen = -1;
+    for (let k = 0; k < n; k++) {
+      const c = (preferred + k) % n;
+      if (!used.has(c)) {
+        chosen = c;
+        break;
+      }
+    }
+    if (chosen < 0) {
+      const prev = i > 0 ? result[i - 1] : null;
+      for (let k = 0; k < n; k++) {
+        const c = (preferred + k) % n;
+        if (tintCssOf(c) !== prev) {
+          chosen = c;
+          break;
+        }
+      }
+      if (chosen < 0) chosen = preferred;
+    }
+    result[i] = tintCssOf(chosen);
+    used.add(chosen);
+  });
+  return result;
+}
+
+// core/parse.ts
 function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("---") || trimmed.startsWith("```")) {
@@ -526,49 +465,463 @@ function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
     source: "daily"
   };
 }
-var DailyNoteService = class {
-  constructor(app, settings) {
-    this.app = app;
-    this.settings = settings;
+
+// core/crossday.ts
+function normalizeAddType(raw) {
+  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
+}
+function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
+  const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+  const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+  if (isPoint) {
+    if (rangeRe.test(line) || !singleRe.test(line)) return null;
+    return line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp || ""}`);
+  }
+  const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+  let out;
+  if (rangeRe.test(line)) {
+    out = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else if (singleRe.test(line)) {
+    out = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp || ""}`);
+  } else {
+    return null;
+  }
+  return out.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+}
+function collectSubItemLines(lines, idx) {
+  const out = [];
+  for (let i = idx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || !/^(?:\t+| {2,})/.test(l)) break;
+    out.push(l);
+  }
+  return out;
+}
+
+// core/section.ts
+function parseQuickAddSection(raw) {
+  const FALLBACK_TITLE = "\u7075\u611F\u95EA\u5FF5";
+  const text = String(raw == null ? "" : raw).trim();
+  let level = 2;
+  let title = text;
+  const m = /^(#+)\s*(.*)$/.exec(text);
+  if (m) {
+    level = Math.min(m[1].length, 6);
+    title = (m[2] || "").trim();
+  }
+  title = title.replace(/\s+#+\s*$/, "").trim() || FALLBACK_TITLE;
+  return { level, title, heading: `${"#".repeat(level)} ${title}` };
+}
+function sectionHeaderRegex(title) {
+  const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
+}
+
+// sources/types.ts
+var READONLY_REJECT = {
+  updateEntryTime: async () => false,
+  updateEntryPointTime: async () => false,
+  moveEntryToDate: async () => false,
+  toggleTask: async () => false,
+  createEntry: async () => false
+};
+
+// sources/memos.ts
+var API_PATH = "/api/v1/memos";
+var PAGE_SIZE = 100;
+var MAX_PAGES = 20;
+function apiUrl(baseUrl, params) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  const qs = Object.entries(params).filter(([, v]) => v !== void 0 && v !== null && v !== "").map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  return `${base}${API_PATH}${qs ? "?" + qs : ""}`;
+}
+function isoToLocalSeconds(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const secs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+  return { dateStr: `${y}-${m}-${day}`, seconds: secs };
+}
+var MemosSource = class {
+  constructor(config) {
+    this.id = "memos";
+    this.label = "memos";
+    this.readonly = true;
+    // 只读源：所有写操作一律明确拒绝（返回 false = 未写入）
+    this.updateEntryTime = READONLY_REJECT.updateEntryTime;
+    this.updateEntryPointTime = READONLY_REJECT.updateEntryPointTime;
+    this.moveEntryToDate = READONLY_REJECT.moveEntryToDate;
+    this.toggleTask = READONLY_REJECT.toggleTask;
+    this.createEntry = READONLY_REJECT.createEntry;
+    this.config = config || {};
+  }
+  /** 供设置页显示当前配置是否可用 */
+  get configured() {
+    return !!(this.config && this.config.baseUrl && this.config.token);
+  }
+  /**
+   * 拉取区间内的 memo 并映射成条目。
+   *
+   * 筛选在服务端做（CEL 的 create_time 范围），避免把整个实例都拖回来。
+   * 若服务端不支持该 filter，退回「拉全量再本地过滤」也仍可用。
+   */
+  async listEntries(startDate, endDate) {
+    if (!this.configured) return [];
+    const startIso = `${startDate}T00:00:00`;
+    const endIso = `${endDate}T23:59:59`;
+    const clauses = [`create_time >= "${startIso}"`, `create_time <= "${endIso}"`];
+    if (this.config.creator) clauses.push(`creator == "${this.config.creator}"`);
+    const filter = clauses.join(" && ");
+    const out = [];
+    let pageToken = "";
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const params = { pageSize: String(PAGE_SIZE), filter };
+      if (pageToken) params.pageToken = pageToken;
+      const res = await fetch(apiUrl(this.config.baseUrl, params), {
+        headers: { Authorization: `Bearer ${this.config.token}` }
+      });
+      if (!res.ok) {
+        break;
+      }
+      const data = await res.json();
+      const memos = data && Array.isArray(data.memos) ? data.memos : [];
+      for (const memo of memos) out.push(this.toEntry(memo));
+      pageToken = data && data.nextPageToken || "";
+      if (!pageToken) break;
+    }
+    return out;
+  }
+  /** 单条 memo → 条目 */
+  toEntry(memo) {
+    const content = String(memo.content || "");
+    const created = isoToLocalSeconds(String(memo.createTime || ""));
+    if (!created) return null;
+    const parsed = parseLine(content, 1, created.dateStr, memo.name || "memos", true);
+    const hasExplicitRange = !!(parsed && parsed.hasTime && parsed.isRange);
+    const explicitSeconds = parsed && parsed.hasTime ? parsed.startSeconds : null;
+    const startSeconds = hasExplicitRange && explicitSeconds !== null ? explicitSeconds : created.seconds;
+    const endSeconds = hasExplicitRange && parsed ? parsed.endSeconds : Math.min(86400, startSeconds + 1800);
+    const tags = Array.isArray(memo.tags) ? memo.tags.slice() : [];
+    const body = content.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (m, t) => {
+      if (!tags.includes(t)) tags.push(t);
+      return "";
+    }).trim();
+    const hh = String(Math.floor(startSeconds / 3600)).padStart(2, "0");
+    const mm = String(Math.floor(startSeconds % 3600 / 60)).padStart(2, "0");
+    return {
+      id: `memos:${memo.name || created.dateStr}`,
+      filePath: memo.name || "",
+      dateStr: created.dateStr,
+      lineNum: 1,
+      rawLine: content,
+      isTask: !!(parsed && parsed.isTask),
+      isCompleted: !!(parsed && parsed.isCompleted),
+      hasTime: true,
+      isRange: hasExplicitRange,
+      startSeconds,
+      endSeconds,
+      startMinutes: Math.floor(startSeconds / 60),
+      endMinutes: Math.floor(endSeconds / 60),
+      timeStr: hasExplicitRange ? `${hh}:${mm}-${Math.floor(endSeconds / 3600)}:${String(Math.floor(endSeconds % 3600 / 60)).padStart(2, "0")}` : `${hh}:${mm}`,
+      text: body.slice(0, 80) || (tags.length ? tags.map((t) => "#" + t).join(" ") : "memos \u8BB0\u5F55"),
+      tags,
+      tint: parsed ? parsed.tint : null,
+      subItems: [],
+      source: "memos",
+      readonly: true
+    };
+  }
+};
+
+// sources/blinko.ts
+var API_PATH2 = "/api/v1/note/list";
+var PAGE_SIZE2 = 100;
+var MAX_PAGES2 = 20;
+function apiUrl2(baseUrl) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  return `${base}${API_PATH2}`;
+}
+function isoToLocalSeconds2(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const secs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+  return { dateStr: `${y}-${m}-${day}`, seconds: secs };
+}
+function extractTags(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const t of raw) {
+    const name = typeof t === "string" ? t : t && t.name || "";
+    const clean = String(name).trim().replace(/^#/, "");
+    if (clean) out.push(clean);
+  }
+  return out;
+}
+var BlinkoSource = class {
+  constructor(config) {
+    this.id = "blinko";
+    this.label = "Blinko";
+    this.readonly = true;
+    // 只读源：所有写操作一律明确拒绝（返回 false = 未写入）
+    this.updateEntryTime = READONLY_REJECT.updateEntryTime;
+    this.updateEntryPointTime = READONLY_REJECT.updateEntryPointTime;
+    this.moveEntryToDate = READONLY_REJECT.moveEntryToDate;
+    this.toggleTask = READONLY_REJECT.toggleTask;
+    this.createEntry = READONLY_REJECT.createEntry;
+    this.config = config || {};
+  }
+  /** 供设置页显示当前配置是否可用 */
+  get configured() {
+    return !!(this.config && this.config.baseUrl && this.config.apiKey);
+  }
+  /**
+   * 拉取区间内的 note 并映射成条目。
+   *
+   * Blinko 的 list 接口不支持按时间区间过滤，只能按时间倒序翻页后本地筛。
+   * 因此这里取「区间结束日之后往前翻页」，翻到早于区间开始就停 ——
+   * 否则会把整个实例的笔记都拖回来。
+   */
+  async listEntries(startDate, endDate) {
+    if (!this.configured) return [];
+    const out = [];
+    for (let page = 1; page <= MAX_PAGES2; page++) {
+      const res = await fetch(apiUrl2(this.config.baseUrl), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          page,
+          size: PAGE_SIZE2,
+          orderBy: "desc",
+          // 最新在前，配合「翻到早于区间开始就停」
+          type: -1,
+          // 闪念 / 笔记 / 待办 全要
+          tagId: null,
+          isArchived: false,
+          searchText: ""
+        })
+      });
+      if (!res.ok) break;
+      const data = await res.json();
+      const notes = Array.isArray(data) ? data : data && data.data || [];
+      if (!notes.length) break;
+      let reachedStart = false;
+      for (const note of notes) {
+        const created = isoToLocalSeconds2(String(note.createdAt || note.updatedAt || ""));
+        if (!created) continue;
+        if (created.dateStr < startDate) {
+          reachedStart = true;
+          break;
+        }
+        if (created.dateStr > endDate) continue;
+        const entry = this.toEntry(note, created);
+        if (entry) out.push(entry);
+      }
+      if (reachedStart) break;
+    }
+    return out;
+  }
+  /** 单条 note → 条目 */
+  toEntry(note, created) {
+    const content = String(note.content || "");
+    const parsed = parseLine(content, 1, created.dateStr, `blinko:${note.id}`, true);
+    const hasExplicitRange = !!(parsed && parsed.hasTime && parsed.isRange);
+    const explicitSeconds = parsed && parsed.hasTime ? parsed.startSeconds : null;
+    const startSeconds = hasExplicitRange && explicitSeconds !== null ? explicitSeconds : created.seconds;
+    const endSeconds = hasExplicitRange && parsed ? parsed.endSeconds : Math.min(86400, startSeconds + 1800);
+    const tags = extractTags(note.tags);
+    const body = content.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (m, t) => {
+      if (!tags.includes(t)) tags.push(t);
+      return "";
+    }).trim();
+    const hh = String(Math.floor(startSeconds / 3600)).padStart(2, "0");
+    const mm = String(Math.floor(startSeconds % 3600 / 60)).padStart(2, "0");
+    return {
+      id: `blinko:${note.id}`,
+      filePath: `blinko:${note.id}`,
+      dateStr: created.dateStr,
+      lineNum: 1,
+      rawLine: content,
+      isTask: !!(parsed && parsed.isTask),
+      isCompleted: !!(parsed && parsed.isCompleted),
+      hasTime: true,
+      isRange: hasExplicitRange,
+      startSeconds,
+      endSeconds,
+      startMinutes: Math.floor(startSeconds / 60),
+      endMinutes: Math.floor(endSeconds / 60),
+      timeStr: hasExplicitRange ? `${hh}:${mm}-${String(Math.floor(endSeconds / 3600)).padStart(2, "0")}:${String(Math.floor(endSeconds % 3600 / 60)).padStart(2, "0")}` : `${hh}:${mm}`,
+      text: body.slice(0, 80) || (tags.length ? tags.map((t) => "#" + t).join(" ") : "Blinko \u95EA\u5FF5"),
+      tags,
+      tint: parsed ? parsed.tint : null,
+      subItems: [],
+      source: "blinko",
+      readonly: true
+    };
+  }
+};
+
+// sources/aggregate.ts
+var AggregateSource = class {
+  constructor(sources = []) {
+    this.sources = sources;
+  }
+  /** 挂载一个来源 */
+  add(source) {
+    if (source) this.sources.push(source);
+  }
+  /** 当前挂载的所有来源 */
+  get list() {
+    return this.sources.slice();
+  }
+  /**
+   * 拉取所有来源在 [startDate, endDate] 区间内的条目。
+   *
+   * 单个来源抛错时只记录错误、继续下一个 —— 聚合模式下
+   * 「一个后端挂了」不应该让整个日历变空白。
+   */
+  async listEntries(startDate, endDate) {
+    const entries = [];
+    const bySource = {};
+    const errors = {};
+    for (const source of this.sources) {
+      try {
+        const list = await source.listEntries(startDate, endDate);
+        bySource[source.id] = list.length;
+        entries.push(...list);
+      } catch (err) {
+        errors[source.id] = err instanceof Error ? err.message : String(err);
+        bySource[source.id] = 0;
+      }
+    }
+    entries.sort(
+      (a, b) => (a.startSeconds || 0) - (b.startSeconds || 0) || (a.lineNum || 0) - (b.lineNum || 0) || String(a.text || "").localeCompare(String(b.text || ""))
+    );
+    return { entries, bySource, errors };
+  }
+  /** 按 id 找来源 */
+  find(id) {
+    return this.sources.find((s) => s.id === id);
+  }
+};
+
+// sources/daily.ts
+var DEFAULT_INDEX_TTL = 5e3;
+var DATE_BASENAME_RE = /^\d{4}-\d{2}-\d{2}$/;
+function addDays(dateStr, delta) {
+  const [y, m, d] = String(dateStr).split("-").map(Number);
+  const t = Date.UTC(y, (m || 1) - 1, d || 1) + delta * 864e5;
+  const dt = new Date(t);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+var DailySource = class {
+  constructor(config) {
+    this.id = "daily";
+    this.label = "\u65E5\u8BB0";
+    /** 本地文件，可写 */
+    this.readonly = false;
+    /** dateStr -> 文件元数据。名字沿用原实现，方便调用方迁移 */
+    this.index = /* @__PURE__ */ new Map();
+    /** filePath -> { mtime, entries }，按 mtime 判失效 */
     this.fileCache = /* @__PURE__ */ new Map();
-    this.dailyNoteIndex = /* @__PURE__ */ new Map();
+    this.indexBuiltTime = 0;
+    var _a;
+    this.store = config.store;
+    this.settings = config.settings || {};
+    this.indexTtlMs = (_a = config.indexTtlMs) != null ? _a : DEFAULT_INDEX_TTL;
+  }
+  /** 设置对象是宿主共享的可变对象，改了要立刻生效，所以每次读都取最新 */
+  get folder() {
+    return this.settings.periodicNotesFolder || "SpiralNotes";
+  }
+  get quickAddSectionCfg() {
+    return this.settings.quickAddSection || "";
+  }
+  /** 索引作废（设置里改了日记目录、或在别处新建了日记时用） */
+  clearIndex() {
+    this.index.clear();
     this.indexBuiltTime = 0;
   }
-  buildIndexIfNeeded() {
+  /**
+   * 建立「日期 → 文件」索引。
+   *
+   * 只认文件名严格等于 YYYY-MM-DD 的 md；同名文件里**优先**周期笔记目录下的，
+   * 目录外的作为兜底（历史日记可能散落在别处）。
+   */
+  async buildIndexIfNeeded() {
     const now = Date.now();
-    if (this.dailyNoteIndex.size > 0 && now - this.indexBuiltTime < 5e3) {
-      return;
-    }
-    this.dailyNoteIndex.clear();
-    const files = this.app.vault.getMarkdownFiles();
-    const folder = (this.settings.periodicNotesFolder || "SpiralNotes").toLowerCase();
+    if (this.index.size > 0 && now - this.indexBuiltTime < this.indexTtlMs) return;
+    this.index.clear();
+    const files = await this.store.listMarkdownFiles();
+    const folder = this.folder.toLowerCase();
     for (const f of files) {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(f.basename)) {
-        const inFolder = f.path.toLowerCase().includes(folder);
-        if (inFolder || !this.dailyNoteIndex.has(f.basename)) {
-          this.dailyNoteIndex.set(f.basename, f);
-        }
+      if (!DATE_BASENAME_RE.test(f.basename)) continue;
+      const inFolder = f.path.toLowerCase().includes(folder);
+      if (inFolder || !this.index.has(f.basename)) {
+        this.index.set(f.basename, f);
       }
     }
     this.indexBuiltTime = now;
   }
-  // Find daily note file for a specific date (YYYY-MM-DD)
-  findDailyNoteFile(dateStr) {
-    this.buildIndexIfNeeded();
-    return this.dailyNoteIndex.get(dateStr) || null;
+  /** 找某一天的日记文件（不创建） */
+  async findDailyNoteFile(dateStr) {
+    await this.buildIndexIfNeeded();
+    return this.index.get(dateStr) || null;
   }
-  // Parse a single daily note file (only top-level items, skip/attach sub-items)
+  /** 建目录，逐级创建（已存在的层级跳过） */
+  async ensureFolder(folder) {
+    let curr = "";
+    for (const part of folder.split("/")) {
+      if (!part) continue;
+      curr = curr ? `${curr}/${part}` : part;
+      if (!await this.store.exists(curr)) {
+        await this.store.createFolder(curr);
+      }
+    }
+  }
+  /** 日记在周期笔记目录下的位置：<folder>/<YYYY>/Daily/<MM>/<date>.md */
+  folderOf(dateStr) {
+    return `${this.folder}/${dateStr.slice(0, 4)}/Daily/${dateStr.slice(5, 7)}`;
+  }
+  /**
+   * 确保某天日记存在并返回它，不存在则按约定新建（内容只有标题 + 快速记录标题）。
+   * 对应原实现里「打开日记时顺手建一篇」的逻辑（DEC-017）。
+   */
+  async ensureDailyNote(dateStr) {
+    await this.buildIndexIfNeeded();
+    const hit = this.index.get(dateStr);
+    if (hit) return hit;
+    const folder = this.folderOf(dateStr);
+    await this.ensureFolder(folder);
+    const path = `${folder}/${dateStr}.md`;
+    const heading = parseQuickAddSection(this.quickAddSectionCfg).heading;
+    await this.store.create(path, `# ${dateStr}
+
+${heading}
+`);
+    const file = { path, basename: dateStr, mtime: Date.now() };
+    this.index.set(dateStr, file);
+    return file;
+  }
+  /** 解析单篇日记（只取顶层条目，缩进行挂成子项） */
   async parseDailyFile(file, dateStr) {
     const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.stat.mtime) {
-      return cached.entries;
-    }
-    const content = await this.app.vault.read(file);
+    if (cached && cached.mtime === file.mtime) return cached.entries;
+    const content = await this.store.read(file.path);
     const lines = content.split("\n");
     const entries = [];
     let currentParent = null;
     let currentSection = "";
-    const memoTitle = parseQuickAddSection(this.settings.quickAddSection).title;
+    const memoTitle = parseQuickAddSection(this.quickAddSectionCfg).title;
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i];
       const trimmed = rawLine.trim();
@@ -585,9 +938,7 @@ var DailyNoteService = class {
       if (isSubItem) {
         if (currentParent) {
           const cleanSub = trimmed.replace(/^[-*+]\s*(?:\[[ xX\-\/]\]\s*)?/, "").trim();
-          if (cleanSub) {
-            currentParent.subItems.push(cleanSub);
-          }
+          if (cleanSub) currentParent.subItems.push(cleanSub);
         }
         continue;
       }
@@ -600,16 +951,234 @@ var DailyNoteService = class {
         currentParent = null;
       }
     }
-    this.fileCache.set(file.path, { mtime: file.stat.mtime, entries });
+    this.fileCache.set(file.path, { mtime: file.mtime, entries });
     return entries;
   }
-  // Parse Blinko note
-  async parseBlinkoFile(file) {
+  /**
+   * 列区间内条目（契约方法）。
+   * 含首尾两天；没有日记的日子不产出任何条目（不报错）。
+   */
+  async listEntries(startDate, endDate) {
+    await this.buildIndexIfNeeded();
+    const out = [];
+    let curr = startDate;
+    while (curr <= endDate) {
+      const file = await this.findDailyNoteFile(curr);
+      if (file) out.push(...await this.parseDailyFile(file, curr));
+      curr = addDays(curr, 1);
+    }
+    return out;
+  }
+  /** 勾选 / 取消勾选。原实现不校验来源，只按 filePath + lineNum 定位 */
+  async toggleTask(entry) {
+    const path = entry.filePath;
+    if (!await this.store.exists(path)) return false;
+    const content = await this.store.read(path);
+    const lines = content.split("\n");
+    const targetIdx = entry.lineNum - 1;
+    if (targetIdx < 0 || targetIdx >= lines.length) return false;
+    const line = lines[targetIdx];
+    let newLine = line;
+    if (line.includes("[ ]")) {
+      newLine = line.replace("[ ]", "[x]");
+      entry.isCompleted = true;
+    } else if (line.includes("[x]") || line.includes("[X]")) {
+      newLine = line.replace(/\[[xX]\]/, "[ ]");
+      entry.isCompleted = false;
+    } else {
+      return false;
+    }
+    lines[targetIdx] = newLine;
+    await this.store.write(path, lines.join("\n"));
+    this.fileCache.delete(path);
+    return true;
+  }
+  /** 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留 */
+  async updateEntryTime(entry, startSec, endSec) {
+    const path = entry.filePath;
+    if (!await this.store.exists(path)) return false;
+    const content = await this.store.read(path);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    const line = lines[idx];
+    const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
+    let newLine;
+    if (rangeRe.test(line)) {
+      newLine = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp}`);
+    } else if (singleRe.test(line)) {
+      newLine = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp}`);
+    } else {
+      return false;
+    }
+    newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
+    if (newLine === line) return false;
+    lines[idx] = newLine;
+    await this.store.write(path, lines.join("\n"));
+    this.fileCache.delete(path);
+    return true;
+  }
+  // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
+  // 与 updateEntryTime 分开是为了让「点」永远不会被悄悄扩成「块」；
+  // 范围行、无时间行一律拒绝，缩进 / 复选框 / 列表符 / 标签 / 行尾文字全部原样保留。
+  async updateEntryPointTime(entry, startSec) {
+    const path = entry.filePath;
+    if (!await this.store.exists(path)) return false;
+    const content = await this.store.read(path);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    const line = lines[idx];
+    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)/;
+    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
+    if (rangeRe.test(line) || !singleRe.test(line)) return false;
+    const newLine = line.replace(
+      singleRe,
+      (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp}`
+    );
+    if (newLine === line) return false;
+    lines[idx] = newLine;
+    await this.store.write(path, lines.join("\n"));
+    this.fileCache.delete(path);
+    return true;
+  }
+  // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
+  // 只搬「一条记录」，不重写两篇笔记的其它内容；行号对不上时宁可拒绝，绝不误删。
+  async moveEntryToDate(entry, targetDate, startSec, endSec) {
+    if (!entry || !targetDate || entry.dateStr === targetDate) return false;
+    if (entry.readonly || entry.source && entry.source !== "daily") return false;
+    const path = entry.filePath;
+    if (!await this.store.exists(path)) return false;
+    const content = await this.store.read(path);
+    const lines = content.split("\n");
+    const idx = entry.lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return false;
+    if (lines[idx] !== entry.rawLine) return false;
+    const movedLine = rewriteEntryLineTime(lines[idx], startSec, endSec, isPointEntry(entry));
+    if (movedLine === null) return false;
+    const moving = [movedLine, ...collectSubItemLines(lines, idx)];
+    try {
+      await this.addEntry(targetDate, "", "", false, [], "", moving);
+    } catch (e) {
+      return false;
+    }
+    const remaining = lines.slice();
+    remaining.splice(idx, moving.length);
+    await this.store.write(path, remaining.join("\n"));
+    this.fileCache.delete(path);
+    return true;
+  }
+  /** 契约入口：新建一条（供未来宿主表单直接调用） */
+  async createEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "") {
+    try {
+      await this.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  /**
+   * 追加一条记录到日记的快速记录区。
+   *
+   * rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
+   * 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
+   */
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
+    await this.buildIndexIfNeeded();
+    let file = this.index.get(dateStr) || null;
+    const tagPart = tags.length > 0 ? " " + tags.map((t) => "#" + t).join(" ") : "";
+    const linePrefix = isTask ? "- [ ] " : "- ";
+    const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
+    const timePrefix = rangeStr ? `${rangeStr} ` : "";
+    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const newLine = rawLines && rawLines.length ? rawLines.join("\n") : generatedLine;
+    const section = parseQuickAddSection(this.quickAddSectionCfg);
+    const headerRe = sectionHeaderRegex(section.title);
+    if (!file) {
+      const folder = this.folderOf(dateStr);
+      await this.ensureFolder(folder);
+      const path = `${folder}/${dateStr}.md`;
+      await this.store.create(path, `# ${dateStr}
+
+${section.heading}
+${newLine}
+`);
+      file = { path, basename: dateStr, mtime: Date.now() };
+      this.index.set(dateStr, file);
+    } else {
+      let fileText = await this.store.read(file.path);
+      const lines = fileText.split("\n");
+      const headerIdx = lines.findIndex((l) => headerRe.test(l));
+      if (headerIdx >= 0) {
+        lines.splice(headerIdx + 1, 0, newLine);
+        fileText = lines.join("\n");
+      } else {
+        fileText = fileText.trimEnd() + `
+
+${section.heading}
+${newLine}
+`;
+      }
+      await this.store.write(file.path, fileText);
+    }
+    this.fileCache.delete(file.path);
+  }
+};
+
+// sources/blinko-local.ts
+function defaultBlinkoPathMatch(path) {
+  return path.startsWith("Blinko/Notes") || path.includes("Blinko");
+}
+var BlinkoLocalSource = class {
+  constructor(config) {
+    this.id = "blinko";
+    this.label = "Blinko";
+    /** 条目有本地文件（能点开跳转），但时间在 frontmatter 里、无从回写 —— 见文件头 */
+    this.readonly = false;
+    /** filePath -> { mtime, entry }，按 mtime 判失效（原实现即此策略） */
+    this.fileCache = /* @__PURE__ */ new Map();
+    this.store = config.store;
+    this.matchPath = config.matchPath || defaultBlinkoPathMatch;
+  }
+  /**
+   * 列出区间内的条目。
+   *
+   * 原实现是「遍历全库 md → 命中路径规则 → 逐文件解析 → 只保留桶里已有的日期」，
+   * 这里保持不变：先全量解析再按区间过滤，因为日期要从 frontmatter 里读出来
+   * 才知道，光看文件名判断不了。
+   */
+  async listEntries(startDate, endDate) {
+    const files = await this.store.listMarkdownFiles();
+    const out = [];
+    for (const file of files) {
+      if (!this.matchPath(file.path)) continue;
+      const entry = await this.parseFile(file);
+      if (!entry) continue;
+      if (entry.dateStr < startDate || entry.dateStr > endDate) continue;
+      out.push(entry);
+    }
+    return out;
+  }
+  /**
+   * 解析单个 Blinko 导出文件。
+   *
+   * ⚠️ 逐字搬自 main.ts 的 `parseBlinkoFile`（DEC-027）。这些正则对应真实导出
+   * 文件的格式，一个字符都不要"顺手优化"（红线 24）。
+   */
+  async parseFile(file) {
     const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.stat.mtime) {
+    if (cached && cached.mtime === file.mtime) {
       return cached.entry;
     }
-    const content = await this.app.vault.read(file);
+    const content = await this.store.read(file.path);
+    const entry = this.parseContent(file, content);
+    this.fileCache.set(file.path, { mtime: file.mtime, entry });
+    return entry;
+  }
+  /** 纯解析：内容 → 条目。单拆出来是为了测试能直接喂字符串。 */
+  parseContent(file, content) {
     const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
     if (!fmMatch) return null;
     const yaml = fmMatch[1];
@@ -637,269 +1206,498 @@ var DailyNoteService = class {
       if (!tags.includes(t)) tags.push(t);
       return "";
     }).trim();
-    const entry = {
+    return {
       id: `${file.path}#blinko`,
       filePath: file.path,
       dateStr,
+      // 原实现就这么写：拿不到正文里"第几行"，用 1 占位。
+      // 写方法因此全部不可用 —— 见文件头。
       lineNum: 1,
       rawLine: body,
       isTask: false,
       isCompleted: false,
       hasTime: true,
+      // 导出文件只给了起始时刻，没有区间语法 → 与原来一样画时间点线（DEC-018）
+      isRange: false,
       startSeconds,
       endSeconds,
       startMinutes,
       endMinutes,
       timeStr,
-      text: body.slice(0, 80) || (tags.length > 0 ? tags.map((t) => "#" + t).join(" ") : "Blinko \u95EA\u5FF5"),
+      text: body.slice(0, 80) || (tags.length > 0 ? tags.map((t) => `#${t}`).join(" ") : "Blinko \u95EA\u5FF5"),
       tags,
       subItems: [],
-      source: "blinko"
+      source: "blinko",
+      // 显式 null 而非 undefined：原来没有这个字段，两者都是 falsy，
+      // 但类型要求 string | null，写清楚免得下一个人以为"忘了设"
+      tint: null
     };
-    this.fileCache.set(file.path, { mtime: file.stat.mtime, entry });
-    return entry;
   }
-  // Scan entries for a date range [startMoment, endMoment]
-  async getEntriesForRange(startMoment, endMoment) {
-    this.buildIndexIfNeeded();
-    const results = /* @__PURE__ */ new Map();
-    const curr = startMoment.clone();
-    while (curr.isSameOrBefore(endMoment, "day")) {
-      const dateStr = curr.format("YYYY-MM-DD");
-      const file = this.findDailyNoteFile(dateStr);
-      let dayEntries = [];
-      if (file) {
-        dayEntries = await this.parseDailyFile(file, dateStr);
+};
+
+// sources/meta.ts
+var SOURCE_META = {
+  daily: { id: "daily", label: "\u7075\u611F\u95EA\u5FF5", badge: "\u{1F4DD}", color: "var(--text-muted)" },
+  blinko: { id: "blinko", label: "Blinko", badge: "\u{1F7E3}", color: "var(--color-purple)" },
+  memos: { id: "memos", label: "Memos", badge: "\u{1F7E2}", color: "var(--color-green)" },
+  siyuan: { id: "siyuan", label: "\u601D\u6E90", badge: "\u{1F535}", color: "var(--color-blue)" }
+};
+function fallbackSourceMeta(id) {
+  return { id, label: id, badge: "\u{1F517}", color: "var(--text-muted)" };
+}
+function sourceMeta(source) {
+  if (!source) return SOURCE_META.daily;
+  return SOURCE_META[source] || fallbackSourceMeta(source);
+}
+function isExternalSource(source) {
+  return !!source && source !== "daily";
+}
+function sourceBadge(source) {
+  const m = sourceMeta(source);
+  return `${m.badge} ${m.label}`;
+}
+function sourceLabel(source) {
+  return sourceMeta(source).label;
+}
+function sourceCssClass(source) {
+  if (!isExternalSource(source)) return "";
+  const id = String(source).replace(/[^a-zA-Z0-9_-]/g, "");
+  return id === "external" ? "is-external" : `is-external is-${id}`;
+}
+
+// hosts/obsidian/vault-store.ts
+var import_obsidian = require("obsidian");
+function createObsidianFileStore(app) {
+  const vault = app.vault;
+  return {
+    // vault.getMarkdownFiles() 是同步的，接口允许同步返回 —— 保持索引构建同步语义
+    listMarkdownFiles() {
+      return vault.getMarkdownFiles().map((f) => ({
+        path: f.path,
+        basename: f.basename,
+        mtime: f.stat.mtime
+      }));
+    },
+    async read(path) {
+      const file = vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(path));
+      if (!(file instanceof import_obsidian.TFile)) throw new Error(`\u6587\u4EF6\u4E0D\u5B58\u5728: ${path}`);
+      return vault.read(file);
+    },
+    async write(path, content) {
+      const file = vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(path));
+      if (!(file instanceof import_obsidian.TFile)) throw new Error(`\u6587\u4EF6\u4E0D\u5B58\u5728: ${path}`);
+      await vault.modify(file, content);
+    },
+    async create(path, content) {
+      await vault.create((0, import_obsidian.normalizePath)(path), content);
+    },
+    async exists(path) {
+      return vault.adapter.exists((0, import_obsidian.normalizePath)(path));
+    },
+    async createFolder(path) {
+      await vault.createFolder((0, import_obsidian.normalizePath)(path));
+    }
+  };
+}
+
+// ui/dom.ts
+function applyElementInfo(el, info) {
+  if (!info) return;
+  if (info.cls !== void 0) {
+    const list = Array.isArray(info.cls) ? info.cls : String(info.cls).split(/\s+/);
+    for (const c of list) if (c) el.classList.add(c);
+  }
+  if (info.text !== void 0) {
+    if (typeof info.text === "string") el.textContent = info.text;
+    else el.appendChild(info.text);
+  }
+  if (info.attr) {
+    for (const [k, v] of Object.entries(info.attr)) {
+      if (v === null || v === void 0 || v === false) el.removeAttribute(k);
+      else el.setAttribute(k, String(v));
+    }
+  }
+  if (info.title !== void 0) el.setAttribute("title", info.title);
+  if (info.type !== void 0) el.setAttribute("type", info.type);
+  if (info.placeholder !== void 0) el.setAttribute("placeholder", info.placeholder);
+  if (info.value !== void 0) el.setAttribute("value", info.value);
+  if (info.href !== void 0) el.setAttribute("href", info.href);
+  if (info.style !== void 0) el.style.cssText = info.style;
+}
+function addClass(el, ...classes) {
+  for (const c of classes) {
+    for (const part of String(c).split(/\s+/)) if (part) el.classList.add(part);
+  }
+  return el;
+}
+function removeClass(el, ...classes) {
+  for (const c of classes) {
+    for (const part of String(c).split(/\s+/)) if (part) el.classList.remove(part);
+  }
+  return el;
+}
+function toggleClass(el, classes, value) {
+  const list = Array.isArray(classes) ? classes : String(classes).split(/\s+/);
+  for (const c of list) if (c) el.classList.toggle(c, value);
+  return el;
+}
+function setText(el, val) {
+  if (typeof val === "string") el.textContent = val;
+  else el.replaceChildren(val);
+}
+function empty(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+function detach(el) {
+  if (el.parentNode) el.parentNode.removeChild(el);
+}
+function onClick(el, cb) {
+  el.addEventListener("click", cb);
+}
+var PROTO_HELPERS = {
+  createEl(tag, info) {
+    const el = document.createElement(tag);
+    applyElementInfo(el, info);
+    if (info && info.prepend) this.insertBefore(el, this.firstChild);
+    else this.appendChild(el);
+    return el;
+  },
+  createDiv(info) {
+    return PROTO_HELPERS.createEl.call(this, "div", info);
+  },
+  createSpan(info) {
+    return PROTO_HELPERS.createEl.call(this, "span", info);
+  },
+  addClass(...classes) {
+    addClass(this, ...classes);
+  },
+  addClasses(classes) {
+    addClass(this, ...classes);
+  },
+  removeClass(...classes) {
+    removeClass(this, ...classes);
+  },
+  removeClasses(classes) {
+    removeClass(this, ...classes);
+  },
+  toggleClass(classes, value) {
+    toggleClass(this, classes, value);
+  },
+  hasClass(c) {
+    return this.classList.contains(c);
+  },
+  setText(val) {
+    setText(this, val);
+  },
+  empty() {
+    empty(this);
+  },
+  detach() {
+    detach(this);
+  },
+  onClick(cb) {
+    onClick(this, cb);
+  }
+};
+var installedTargets = 0;
+function installDomHelpers(force = false) {
+  if (typeof HTMLElement === "undefined") return 0;
+  const targets = [HTMLElement.prototype];
+  if (typeof DocumentFragment !== "undefined") targets.push(DocumentFragment.prototype);
+  let n = 0;
+  for (const target of targets) {
+    const proto = target;
+    for (const [name, fn] of Object.entries(PROTO_HELPERS)) {
+      if (force || typeof proto[name] !== "function") {
+        proto[name] = fn;
+        n++;
       }
-      results.set(dateStr, [...dayEntries]);
-      curr.add(1, "day");
-    }
-    if (this.settings.includeBlinko) {
-      const allFiles = this.app.vault.getMarkdownFiles();
-      const blinkoFiles = allFiles.filter((f) => f.path.startsWith("Blinko/Notes") || f.path.includes("Blinko"));
-      for (const bf of blinkoFiles) {
-        const bEntry = await this.parseBlinkoFile(bf);
-        if (bEntry && results.has(bEntry.dateStr)) {
-          results.get(bEntry.dateStr).push(bEntry);
-        }
-      }
-    }
-    return results;
-  }
-  // Toggle task status [ ] <-> [x] in source note
-  async toggleTask(entry) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof import_obsidian.TFile)) return;
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-    const targetIdx = entry.lineNum - 1;
-    if (targetIdx >= 0 && targetIdx < lines.length) {
-      const line = lines[targetIdx];
-      let newLine = line;
-      if (line.includes("[ ]")) {
-        newLine = line.replace("[ ]", "[x]");
-        entry.isCompleted = true;
-      } else if (line.includes("[x]") || line.includes("[X]")) {
-        newLine = line.replace(/\[[xX]\]/, "[ ]");
-        entry.isCompleted = false;
-      }
-      lines[targetIdx] = newLine;
-      await this.app.vault.modify(file, lines.join("\n"));
-      this.fileCache.delete(file.path);
     }
   }
-  // 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留
-  async updateEntryTime(entry, startSec, endSec) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof import_obsidian.TFile)) return false;
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-    const line = lines[idx];
-    const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
-    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-    let newLine;
-    if (rangeRe.test(line)) {
-      newLine = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp}`);
-    } else if (singleRe.test(line)) {
-      newLine = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp}`);
-    } else {
-      return false;
-    }
-    newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, "");
-    if (newLine === line) return false;
-    lines[idx] = newLine;
-    await this.app.vault.modify(file, lines.join("\n"));
-    this.fileCache.delete(file.path);
-    return true;
-  }
-  // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
-  // 与 updateEntryTime 分开是为了让「点」永远不会被悄悄扩成「块」；
-  // 范围行、无时间行一律拒绝，缩进 / 复选框 / 列表符 / 标签 / 行尾文字全部原样保留。
-  async updateEntryPointTime(entry, startSec) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof import_obsidian.TFile)) return false;
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-    const line = lines[idx];
-    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)/;
-    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
-    if (rangeRe.test(line) || !singleRe.test(line)) return false;
-    const newLine = line.replace(
-      singleRe,
-      (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp}`
+  installedTargets = n;
+  return n;
+}
+
+// ui/date.ts
+var factory = null;
+function setMomentFactory(f) {
+  if (typeof f !== "function") throw new Error("setMomentFactory \u9700\u8981\u4F20\u5165\u4E00\u4E2A\u51FD\u6570");
+  factory = f;
+}
+function moment(...args) {
+  if (!factory) {
+    throw new Error(
+      "TimeNote: \u672A\u6CE8\u5165\u65E5\u671F\u5B9E\u73B0\u3002\u5BBF\u4E3B\u5FC5\u987B\u5728 onload \u91CC\u8C03\u7528 setMomentFactory(window.moment) \u6216 setMomentFactory(nativeMoment)\u3002"
     );
-    if (newLine === line) return false;
-    lines[idx] = newLine;
-    await this.app.vault.modify(file, lines.join("\n"));
-    this.fileCache.delete(file.path);
-    return true;
   }
-  // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
-  // 只搬「一条记录」，不重写两篇笔记的其它内容；行号对不上时宁可拒绝，绝不误删。
-  async moveEntryToDate(entry, targetDate, startSec, endSec) {
-    if (!entry || !targetDate || entry.dateStr === targetDate) return false;
-    if (entry.source && entry.source !== "daily") return false;
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof import_obsidian.TFile)) return false;
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-    if (lines[idx] !== entry.rawLine) return false;
-    const movedLine = rewriteEntryLineTime(lines[idx], startSec, endSec, isPointEntry(entry));
-    if (movedLine === null) return false;
-    const moving = [movedLine, ...collectSubItemLines(lines, idx)];
-    try {
-      await this.addEntry(targetDate, "", "", false, [], "", moving);
-    } catch (err) {
-      return false;
-    }
-    const remaining = lines.slice();
-    remaining.splice(idx, moving.length);
-    await this.app.vault.modify(file, remaining.join("\n"));
-    this.fileCache.delete(file.path);
-    return true;
-  }
-  // Append new entry to daily note
-  // rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
-  // 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
-  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
-    let file = this.findDailyNoteFile(dateStr);
-    const tagPart = tags.length > 0 ? " " + tags.map((t) => "#" + t).join(" ") : "";
-    const linePrefix = isTask ? "- [ ] " : "- ";
-    const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
-    const timePrefix = rangeStr ? `${rangeStr} ` : "";
-    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
-    const newLine = rawLines && rawLines.length ? rawLines.join("\n") : generatedLine;
-    const section = parseQuickAddSection(this.settings.quickAddSection);
-    const headerRe = sectionHeaderRegex(section.title);
-    if (!file) {
-      const m = window.moment(dateStr);
-      const year = m.format("YYYY");
-      const month = m.format("MM");
-      const targetFolder = `${this.settings.periodicNotesFolder}/${year}/Daily/${month}`;
-      const parts = targetFolder.split("/");
-      let currPath = "";
-      for (const p of parts) {
-        currPath = currPath ? `${currPath}/${p}` : p;
-        if (!await this.app.vault.adapter.exists(currPath)) {
-          await this.app.vault.createFolder(currPath);
-        }
-      }
-      const newPath = `${targetFolder}/${dateStr}.md`;
-      const initialText = `# ${dateStr}
+  return factory(...args);
+}
 
-${section.heading}
-${newLine}
-`;
-      file = await this.app.vault.create(newPath, initialText);
-      this.dailyNoteIndex.set(dateStr, file);
-    } else {
-      let fileText = await this.app.vault.read(file);
-      const lines = fileText.split("\n");
-      const headerIdx = lines.findIndex((l) => headerRe.test(l));
-      if (headerIdx >= 0) {
-        lines.splice(headerIdx + 1, 0, newLine);
-        fileText = lines.join("\n");
-      } else {
-        fileText = fileText.trimEnd() + `
-
-${section.heading}
-${newLine}
-`;
-      }
-      await this.app.vault.modify(file, fileText);
+// ui/native-moment.ts
+var WEEKDAYS_SHORT = ["\u5468\u65E5", "\u5468\u4E00", "\u5468\u4E8C", "\u5468\u4E09", "\u5468\u56DB", "\u5468\u4E94", "\u5468\u516D"];
+var WEEKDAYS_FULL = ["\u661F\u671F\u65E5", "\u661F\u671F\u4E00", "\u661F\u671F\u4E8C", "\u661F\u671F\u4E09", "\u661F\u671F\u56DB", "\u661F\u671F\u4E94", "\u661F\u671F\u516D"];
+var MONTHS_FULL = ["\u4E00\u6708", "\u4E8C\u6708", "\u4E09\u6708", "\u56DB\u6708", "\u4E94\u6708", "\u516D\u6708", "\u4E03\u6708", "\u516B\u6708", "\u4E5D\u6708", "\u5341\u6708", "\u5341\u4E00\u6708", "\u5341\u4E8C\u6708"];
+var pad = (n, w = 2) => String(n).padStart(w, "0");
+function daysInMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+}
+function parseDate(args) {
+  const first = args[0];
+  if (first === void 0 || first === null) return /* @__PURE__ */ new Date();
+  if (first instanceof Date) return new Date(first.getTime());
+  if (typeof first === "number") return new Date(first);
+  if (typeof first === "string") {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/.exec(first);
+    if (m) {
+      return new Date(
+        Number(m[1]),
+        Number(m[2]) - 1,
+        Number(m[3]),
+        Number(m[4] || 0),
+        Number(m[5] || 0),
+        Number(m[6] || 0),
+        0
+      );
     }
-    this.fileCache.delete(file.path);
+    return new Date(first);
   }
-};
-var SubItemsModal = class extends import_obsidian.Modal {
-  constructor(app, entry) {
-    super(app);
-    this.entry = entry;
+  return /* @__PURE__ */ new Date();
+}
+function addMonthsClamped(d, delta) {
+  const y = d.getFullYear();
+  const m = d.getMonth() + delta;
+  const day = d.getDate();
+  const target = new Date(y, m, 1, d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds());
+  target.setDate(Math.min(day, daysInMonth(target)));
+  d.setTime(target.getTime());
+}
+function isoWeekNumber(d) {
+  const t = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = (t.getDay() + 6) % 7;
+  t.setDate(t.getDate() - day + 3);
+  const firstThursday = new Date(t.getFullYear(), 0, 4);
+  const fday = (firstThursday.getDay() + 6) % 7;
+  firstThursday.setDate(firstThursday.getDate() - fday + 3);
+  return 1 + Math.round((t.getTime() - firstThursday.getTime()) / (7 * 864e5));
+}
+function startOfUnit(src, unit) {
+  const d = new Date(src.getTime());
+  const u = String(unit || "").replace(/s$/, "");
+  switch (u) {
+    case "year":
+      d.setMonth(0, 1);
+      d.setHours(0, 0, 0, 0);
+      break;
+    case "quarter":
+      d.setMonth(Math.floor(d.getMonth() / 3) * 3, 1);
+      d.setHours(0, 0, 0, 0);
+      break;
+    case "month":
+      d.setDate(1);
+      d.setHours(0, 0, 0, 0);
+      break;
+    case "isoWeek":
+    case "week": {
+      const back = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - back);
+      d.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "day":
+      d.setHours(0, 0, 0, 0);
+      break;
+    case "hour":
+      d.setMinutes(0, 0, 0);
+      break;
+    case "minute":
+      d.setSeconds(0, 0);
+      break;
+    case "second":
+      d.setMilliseconds(0);
+      break;
   }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: `\u{1F4CB} ${this.entry.text}` });
-    contentEl.createEl("div", {
-      text: `\u6765\u6E90\uFF1A${this.entry.dateStr} [${this.entry.timeStr || "\u5168\u5929"}]`,
-      cls: "text-muted",
-      style: "font-size: 0.82rem; margin-bottom: 12px;"
-    });
-    const list = contentEl.createEl("ul", { cls: "timenote-subitems-list" });
-    this.entry.subItems.forEach((item) => {
-      list.createEl("li", { text: item });
-    });
-    const btnRow = contentEl.createEl("div", { style: "display: flex; justify-content: flex-end; margin-top: 16px; gap: 8px;" });
-    const jumpBtn = btnRow.createEl("button", { text: "\u6253\u5F00\u539F\u7B14\u8BB0\u5B9A\u4F4D", cls: "mod-cta" });
-    jumpBtn.onclick = async () => {
-      this.close();
-      const file = this.app.vault.getAbstractFileByPath(this.entry.filePath);
-      if (file instanceof import_obsidian.TFile) {
-        const leaf = this.app.workspace.getLeaf(false);
-        await leaf.openFile(file, { eState: { line: Math.max(0, this.entry.lineNum - 1) } });
-      }
+  return d;
+}
+var NativeMomentImpl = class _NativeMomentImpl {
+  constructor(d) {
+    this.d = d;
+  }
+  format(pattern) {
+    const d = this.d;
+    const tokens = {
+      YYYY: () => String(d.getFullYear()),
+      MMMM: () => MONTHS_FULL[d.getMonth()],
+      MM: () => pad(d.getMonth() + 1),
+      DD: () => pad(d.getDate()),
+      dddd: () => WEEKDAYS_FULL[d.getDay()],
+      ddd: () => WEEKDAYS_SHORT[d.getDay()],
+      HH: () => pad(d.getHours()),
+      mm: () => pad(d.getMinutes()),
+      ss: () => pad(d.getSeconds()),
+      M: () => String(d.getMonth() + 1),
+      D: () => String(d.getDate()),
+      H: () => String(d.getHours()),
+      m: () => String(d.getMinutes()),
+      s: () => String(d.getSeconds())
     };
+    const re = /(YYYY|MMMM|dddd|ddd|MM|DD|HH|mm|ss|M|D|H|m|s)/g;
+    return String(pattern).replace(re, (tok) => tokens[tok] ? tokens[tok]() : tok);
   }
-  onClose() {
-    this.contentEl.empty();
+  clone() {
+    return new _NativeMomentImpl(new Date(this.d.getTime()));
+  }
+  add(amount, unit) {
+    const u = String(unit || "").replace(/s$/, "");
+    switch (u) {
+      case "day":
+        this.d.setDate(this.d.getDate() + amount);
+        break;
+      case "week":
+      case "isoWeek":
+        this.d.setDate(this.d.getDate() + amount * 7);
+        break;
+      case "month":
+        addMonthsClamped(this.d, amount);
+        break;
+      case "quarter":
+        addMonthsClamped(this.d, amount * 3);
+        break;
+      case "year":
+        addMonthsClamped(this.d, amount * 12);
+        break;
+      case "hour":
+        this.d.setHours(this.d.getHours() + amount);
+        break;
+      case "minute":
+        this.d.setMinutes(this.d.getMinutes() + amount);
+        break;
+      case "second":
+        this.d.setSeconds(this.d.getSeconds() + amount);
+        break;
+    }
+    return this;
+  }
+  subtract(amount, unit) {
+    return this.add(-amount, unit);
+  }
+  startOf(unit) {
+    this.d = startOfUnit(this.d, unit);
+    return this;
+  }
+  endOf(unit) {
+    const next = startOfUnit(this.d, unit);
+    const adder = new _NativeMomentImpl(new Date(next.getTime()));
+    adder.add(1, unit);
+    this.d = new Date(adder.valueOf() - 1);
+    return this;
+  }
+  cmp(other, unit) {
+    if (unit) {
+      return [startOfUnit(this.d, unit).getTime(), startOfUnit(new Date(other.valueOf()), unit).getTime()];
+    }
+    return [this.d.getTime(), other.valueOf()];
+  }
+  isSame(other, unit) {
+    const [a, b] = this.cmp(other, unit);
+    return a === b;
+  }
+  isSameOrBefore(other, unit) {
+    const [a, b] = this.cmp(other, unit);
+    return a <= b;
+  }
+  isSameOrAfter(other, unit) {
+    const [a, b] = this.cmp(other, unit);
+    return a >= b;
+  }
+  isBefore(other, unit) {
+    const [a, b] = this.cmp(other, unit);
+    return a < b;
+  }
+  isAfter(other, unit) {
+    const [a, b] = this.cmp(other, unit);
+    return a > b;
+  }
+  year(value) {
+    if (value === void 0) return this.d.getFullYear();
+    const day = this.d.getDate();
+    this.d.setFullYear(value);
+    this.d.setDate(Math.min(day, daysInMonth(this.d)));
+    return this;
+  }
+  month(value) {
+    if (value === void 0) return this.d.getMonth();
+    addMonthsClamped(this.d, value - this.d.getMonth());
+    return this;
+  }
+  date(value) {
+    if (value === void 0) return this.d.getDate();
+    this.d.setDate(value);
+    return this;
+  }
+  day() {
+    return this.d.getDay();
+  }
+  daysInMonth() {
+    return daysInMonth(this.d);
+  }
+  quarter() {
+    return Math.floor(this.d.getMonth() / 3) + 1;
+  }
+  isoWeek() {
+    return isoWeekNumber(this.d);
+  }
+  hours() {
+    return this.d.getHours();
+  }
+  minutes() {
+    return this.d.getMinutes();
+  }
+  seconds() {
+    return this.d.getSeconds();
+  }
+  hour() {
+    return this.hours();
+  }
+  minute() {
+    return this.minutes();
+  }
+  second() {
+    return this.seconds();
+  }
+  valueOf() {
+    return this.d.getTime();
   }
 };
-var TimenoteView = class extends import_obsidian.ItemView {
-  constructor(leaf, plugin) {
-    super(leaf);
-    this.plugin = plugin;
-    this.currentDate = window.moment();
-    this.currentViewMode = plugin.settings.defaultView || "week";
+function nativeMoment(...args) {
+  return new NativeMomentImpl(parseDate(args));
+}
+
+// ui/view.ts
+var TimenoteRenderer = class {
+  constructor(root, host) {
+    this.root = root;
+    this.host = host;
+    this.currentDate = moment();
+    this.currentViewMode = host.settings.defaultView || "week";
     this.currentFilterType = "all";
     this.searchQuery = "";
     this.entriesMap = /* @__PURE__ */ new Map();
     this.currentTooltip = null;
-  }
-  getViewType() {
-    return VIEW_TYPE_TIMENOTE;
-  }
-  getDisplayText() {
-    return "\u65F6\u95F4\u7B14\u8BB0\u65E5\u5386 (TimeNote)";
-  }
-  getIcon() {
-    return "calendar-clock";
+    this._unsubExternalChange = null;
   }
   async onOpen() {
-    this.registerEvent(
-      this.app.vault.on("modify", () => {
+    if (!this._unsubExternalChange) {
+      this._unsubExternalChange = this.host.onExternalChange(() => {
         this.renderView();
-      })
-    );
+      });
+    }
     await this.renderView();
   }
   async onClose() {
+    if (this._unsubExternalChange) {
+      this._unsubExternalChange();
+      this._unsubExternalChange = null;
+    }
     this.hideHoverTooltip();
     this.stopNowClock();
   }
@@ -920,7 +1718,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       });
     } else {
       header.createEl("span", {
-        text: entry.source === "blinko" ? "\u{1F7E3} Blinko" : "\u{1F4DD} \u7075\u611F\u95EA\u5FF5",
+        text: sourceBadge(entry.source),
         cls: "timenote-hover-badge"
       });
     }
@@ -954,9 +1752,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
       }
     }
     const footer = tooltip.createEl("div", { cls: "timenote-hover-footer" });
-    const fileName = entry.filePath ? entry.filePath.split(/[\\/]/).pop() : "";
-    footer.createEl("span", { text: `\u{1F4C4} ${fileName} #L${entry.lineNum}` });
-    footer.createEl("span", { text: "\u{1F4A1} \u70B9\u51FB\u5B9A\u4F4D\u65E5\u8BB0", style: "color: var(--color-accent);" });
+    if (entry.readonly) {
+      footer.createEl("span", { text: sourceBadge(entry.source) });
+      footer.createEl("span", { text: "\u{1F512} \u8FDC\u7A0B\u6765\u6E90 \xB7 \u53EA\u8BFB", style: "color: var(--text-muted);" });
+    } else {
+      const fileName = entry.filePath ? entry.filePath.split(/[\\/]/).pop() : "";
+      footer.createEl("span", { text: `\u{1F4C4} ${fileName} #L${entry.lineNum}` });
+      footer.createEl("span", { text: "\u{1F4A1} \u70B9\u51FB\u5B9A\u4F4D\u65E5\u8BB0", style: "color: var(--color-accent);" });
+    }
     document.body.appendChild(tooltip);
     const rect = targetEl.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
@@ -1002,13 +1805,13 @@ var TimenoteView = class extends import_obsidian.ItemView {
       startMoment = this.currentDate.clone().startOf("day");
       endMoment = this.currentDate.clone().add(6, "days").endOf("day");
     }
-    this.entriesMap = await this.plugin.dailyNoteService.getEntriesForRange(startMoment, endMoment);
+    this.entriesMap = await this.host.getEntriesForRange(startMoment, endMoment);
   }
   async renderView() {
     this.hideHoverTooltip();
     const gen = (this.renderGeneration || 0) + 1;
     this.renderGeneration = gen;
-    const container = this.contentEl;
+    const container = this.root;
     container.empty();
     container.addClass("timenote-container");
     await this.refreshData();
@@ -1049,9 +1852,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const todayBtn = nav.createEl("button", { text: "\u4ECA\u5929", cls: "timenote-tab-btn" });
     todayBtn.onclick = () => {
       if (this.currentViewMode === "week") {
-        this.currentDate = window.moment().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
+        this.currentDate = moment().startOf(this.host.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
       } else {
-        this.currentDate = window.moment();
+        this.currentDate = moment();
       }
       this.renderView();
     };
@@ -1095,7 +1898,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       });
       btn.onclick = () => {
         if (m.id === "week") {
-          this.currentDate = this.currentDate.clone().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
+          this.currentDate = this.currentDate.clone().startOf(this.host.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
         }
         this.currentViewMode = m.id;
         this.renderView();
@@ -1106,8 +1909,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
       cls: "timenote-layout-toggle"
     });
     layoutBtn.onclick = async () => {
-      this.plugin.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
-      await this.plugin.saveSettings();
+      this.host.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
+      await this.host.saveSettings();
     };
     const addTypeBtn = actions.createEl("button", {
       text: this.getAddType() === "point" ? "\u65B0\u589E\uFF1A\u65F6\u95F4\u70B9" : "\u65B0\u589E\uFF1A\u65F6\u95F4\u5757",
@@ -1117,25 +1920,24 @@ var TimenoteView = class extends import_obsidian.ItemView {
       }
     });
     addTypeBtn.onclick = async () => {
-      this.plugin.settings.defaultAddType = this.getAddType() === "point" ? "block" : "point";
-      await this.plugin.saveSettings();
+      this.host.settings.defaultAddType = this.getAddType() === "point" ? "block" : "point";
+      await this.host.saveSettings();
       const isPoint = this.getAddType() === "point";
       addTypeBtn.textContent = isPoint ? "\u65B0\u589E\uFF1A\u65F6\u95F4\u70B9" : "\u65B0\u589E\uFF1A\u65F6\u95F4\u5757";
-      new import_obsidian.Notice(isPoint ? "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" : "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09");
+      this.host.notice(isPoint ? "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09" : "\u65B0\u5EFA\u8BB0\u5F55\uFF1A\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09");
     };
     const addBtn = actions.createEl("button", { text: "+ \u8BB0\u4E00\u6761", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
-      new QuickAddModal(this.app, this.plugin, this.currentDate.format("YYYY-MM-DD"), () => {
+      this.host.openQuickAdd(this.currentDate.format("YYYY-MM-DD"), () => {
         this.renderView();
-      }).open();
+      });
     };
     const refreshBtn = actions.createEl("button", { cls: "clickable-icon" });
-    (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
+    this.host.setIcon(refreshBtn, "refresh-cw");
     refreshBtn.onclick = () => {
-      this.plugin.dailyNoteService.fileCache.clear();
-      this.plugin.dailyNoteService.dailyNoteIndex.clear();
+      this.host.invalidateCache();
       this.renderView();
-      new import_obsidian.Notice("\u5DF2\u5237\u65B0\u65F6\u95F4\u7B14\u8BB0\u6570\u636E\uFF01");
+      this.host.notice("\u5DF2\u5237\u65B0\u65F6\u95F4\u7B14\u8BB0\u6570\u636E\uFF01");
     };
   }
   renderSubHeader(container) {
@@ -1145,7 +1947,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
       { id: "all", label: "\u5168\u90E8" },
       { id: "task", label: "\u5F85\u529E" },
       { id: "memo", label: "\u95EA\u5FF5" },
-      { id: "blinko", label: "Blinko" }
+      // 原为「Blinko」，接入 memos 后改为覆盖全部聚合来源（DEC-023）
+      { id: "external", label: "\u5916\u90E8\u6765\u6E90" }
     ];
     filters.forEach((f) => {
       const pill = pillsWrap.createEl("button", {
@@ -1235,8 +2038,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
       result = result.filter((e) => e.isTask);
     } else if (this.currentFilterType === "memo") {
       result = result.filter((e) => !e.isTask);
-    } else if (this.currentFilterType === "blinko") {
-      result = result.filter((e) => e.source === "blinko");
+    } else if (this.currentFilterType === "external") {
+      result = result.filter((e) => isExternalSource(e.source));
     }
     if (this.searchQuery) {
       result = result.filter((e) => {
@@ -1278,11 +2081,11 @@ var TimenoteView = class extends import_obsidian.ItemView {
     return this.renderBlockGrid(container, days);
   }
   getLayoutMode() {
-    return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
+    return this.host.settings.layoutMode === "compact" ? "compact" : "block";
   }
   // 新建记录类型：设置页与工具栏共用同一个状态，非法值一律回退成时间块（DEC-022）
   getAddType() {
-    return normalizeAddType(this.plugin.settings.defaultAddType);
+    return normalizeAddType(this.host.settings.defaultAddType);
   }
   // 拖动时按指针横坐标找目标日期列。只认当前视图里真实存在的列：
   // 落在刻度列 / 容器外返回 null，不臆造视图范围之外的日期。
@@ -1309,7 +2112,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const headerDays = header.createEl("div", { cls: "timenote-header-days" });
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
+      const isToday = d.isSame(moment(), "day");
       const dayCol = headerDays.createEl("div", {
         cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
       });
@@ -1334,7 +2137,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           cb.onclick = async (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
-            await this.plugin.dailyNoteService.toggleTask(entry);
+            await this.host.toggleTask(entry);
             this.renderView();
           };
         }
@@ -1348,7 +2151,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           badge.onclick = (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
-            new SubItemsModal(this.app, entry).open();
+            this.host.openSubItems(entry);
           };
         }
         chip.onmouseenter = (ev) => {
@@ -1368,7 +2171,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container" });
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
+      const isToday = d.isSame(moment(), "day");
       const col = colsContainer.createEl("div", {
         cls: `timenote-column ${isToday ? "is-today" : ""}`
       });
@@ -1385,9 +2188,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
           cls: "timenote-compressed-gap-text"
         });
         emptyRow.onclick = () => {
-          new QuickAddModal(this.app, this.plugin, dateStr, () => {
+          this.host.openQuickAdd(dateStr, () => {
             this.renderView();
-          }, "09:00").open();
+          }, "09:00");
         };
         return;
       }
@@ -1409,14 +2212,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
             cls: "timenote-compressed-gap-text"
           });
           gapRow.onclick = () => {
-            new QuickAddModal(this.app, this.plugin, dateStr, () => {
+            this.host.openQuickAdd(dateStr, () => {
               this.renderView();
-            }, gapStartStr.slice(0, 5)).open();
+            }, gapStartStr.slice(0, 5));
           };
         }
-        const isBlinko = entry.source === "blinko";
+        const srcCls = sourceCssClass(entry.source);
         const lineRow = col.createEl("div", {
-          cls: `timenote-time-line-row ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
+          cls: `timenote-time-line-row ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "is-completed" : ""} ${srcCls}`
         });
         const lineWrapper = lineRow.createEl("div", { cls: "timenote-line-wrapper" });
         lineWrapper.createEl("span", { text: entry.timeStr, cls: "timenote-line-time" });
@@ -1432,7 +2235,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           cb.onclick = async (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
-            await this.plugin.dailyNoteService.toggleTask(entry);
+            await this.host.toggleTask(entry);
             this.renderView();
           };
         }
@@ -1456,7 +2259,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           subBadge.onclick = (ev) => {
             ev.stopPropagation();
             this.hideHoverTooltip();
-            new SubItemsModal(this.app, entry).open();
+            this.host.openSubItems(entry);
           };
         }
         lineRow.onmouseenter = (ev) => {
@@ -1482,9 +2285,9 @@ var TimenoteView = class extends import_obsidian.ItemView {
           cls: "timenote-compressed-gap-text"
         });
         gapRow.onclick = () => {
-          new QuickAddModal(this.app, this.plugin, dateStr, () => {
+          this.host.openQuickAdd(dateStr, () => {
             this.renderView();
-          }, gapStartStr.slice(0, 5)).open();
+          }, gapStartStr.slice(0, 5));
         };
       }
     });
@@ -1527,10 +2330,10 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const rulerSpacer = headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
     rulerSpacer.createEl("div", { cls: "timenote-ruler-corner" });
     rulerSpacer.createEl("div", { cls: "timenote-allday-ruler-label", text: "ALL DAY" });
-    const allDayHeight = Math.max(32, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)));
+    const allDayHeight = Math.max(32, Math.min(320, Number((_a = this.host.settings.allDayHeight) != null ? _a : 36)));
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
+      const isToday = d.isSame(moment(), "day");
       const dayCol = headerDays.createEl("div", {
         cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
       });
@@ -1552,14 +2355,14 @@ var TimenoteView = class extends import_obsidian.ItemView {
         chip.onclick = () => this.jumpToFileLine(entry);
       });
     });
-    const startHour = Number((_b = this.plugin.settings.startHour) != null ? _b : 0);
-    const endHour = Number((_c = this.plugin.settings.endHour) != null ? _c : 24);
-    const slotHeight = Number((_d = this.plugin.settings.slotHeight) != null ? _d : 52);
+    const startHour = Number((_b = this.host.settings.startHour) != null ? _b : 0);
+    const endHour = Number((_c = this.host.settings.endHour) != null ? _c : 24);
+    const slotHeight = Number((_d = this.host.settings.slotHeight) != null ? _d : 52);
     const dayStartSec = startHour * 3600;
     const dayEndSec = endHour * 3600;
-    const nowAtRender = window.moment();
+    const nowAtRender = moment();
     const hasToday = days.some((d) => d.isSame(nowAtRender, "day"));
-    const elastic = this.plugin.settings.elasticTimeline !== false;
+    const elastic = this.host.settings.elasticTimeline !== false;
     const viewWidth = Math.max(320, wrapper.clientWidth || 880);
     const colWidth = Math.max(150, (viewWidth - BLOCK_RULER_W) / Math.max(1, days.length));
     const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
@@ -1646,7 +2449,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
     }
     days.forEach((d) => {
       const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
+      const isToday = d.isSame(moment(), "day");
       const col = colsContainer.createEl("div", {
         cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
       });
@@ -1672,7 +2475,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
           const height = spanH;
           const widthPct = 100 / cluster.laneCount;
           const block = col.createEl("div", {
-            cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
+            cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${sourceCssClass(e.source)} ${e.isRange ? "is-range" : ""}`
           });
           block.style.top = `${top}px`;
           block.style.height = `${height}px`;
@@ -1691,7 +2494,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
             cb.onclick = async (ev) => {
               ev.stopPropagation();
               this.hideHoverTooltip();
-              await this.plugin.dailyNoteService.toggleTask(e);
+              await this.host.toggleTask(e);
               this.renderView();
             };
           }
@@ -1710,7 +2513,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
             badge.onclick = (ev) => {
               ev.stopPropagation();
               this.hideHoverTooltip();
-              new SubItemsModal(this.app, e).open();
+              this.host.openSubItems(e);
             };
           }
           this.attachBlockDrag(block, e, meta, duration, scale);
@@ -1728,7 +2531,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         var _a2;
         const e = p.entry;
         const line = col.createEl("div", {
-          cls: `timenote-point-line ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""}`
+          cls: `timenote-point-line ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${sourceCssClass(e.source)}`
         });
         line.style.top = `${scale.yOf(p.sec)}px`;
         line.style.setProperty(
@@ -1845,7 +2648,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         if (ghost) ghost.remove();
         const rawSec = secAt(e.clientY);
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
-        const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
+        const endSec = Math.min(dayEndSec, snapped + (Number(this.host.settings.defaultDuration) || 60) * 60);
         this.openQuickAdd(dateStr, snapped, endSec, "block");
       };
       window.addEventListener("pointermove", onMove);
@@ -1854,22 +2657,24 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
   openQuickAdd(dateStr, startSec, endSec, type = "block") {
     const isPoint = normalizeAddType(type) === "point";
-    new QuickAddModal(
-      this.app,
-      this.plugin,
+    this.host.openQuickAdd(
       dateStr,
       () => this.renderView(),
       formatSecondsToTime(startSec),
       isPoint ? "" : formatSecondsToTime(endSec),
       isPoint ? "point" : "block"
-    ).open();
+    );
   }
   attachBlockDrag(block, entry, meta, duration, scale) {
     if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
+    if (entry.readonly) {
+      block.addClass("is-readonly");
+      return;
+    }
     const col = block.parentElement;
     const columns = col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
     const homeDate = entry.dateStr;
-    const canMoveDay = !entry.source || entry.source === "daily";
+    const canMoveDay = !entry.readonly && (!entry.source || entry.source === "daily");
     const origStart = Number(entry.startSeconds) || 0;
     const origEnd = Number(entry.endSeconds) || origStart + 1800;
     const baseStartY = scale.yOf(origStart);
@@ -1968,40 +2773,40 @@ var TimenoteView = class extends import_obsidian.ItemView {
     };
   }
   async commitEntryRange(entry, startSec, endSec) {
-    const ok = await this.plugin.dailyNoteService.updateEntryTime(entry, startSec, endSec);
+    const ok = await this.host.updateEntryTime(entry, startSec, endSec);
     if (!ok) {
-      new import_obsidian.Notice("\u65F6\u95F4\u8303\u56F4\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.host.notice("\u65F6\u95F4\u8303\u56F4\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
       this.renderView();
       return;
     }
-    new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.host.notice(`\u5DF2\u66F4\u65B0\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
     this.renderView();
   }
   // 跨天拖动回写（DEC-022）：与只改时刻的两个 commit 分开，失败一律整视图重渲染复原
   async commitEntryMove(entry, targetDate, startSec, endSec) {
-    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, endSec);
+    const ok = await this.host.moveEntryToDate(entry, targetDate, startSec, endSec);
     if (!ok) {
-      new import_obsidian.Notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.host.notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
       this.renderView();
       return;
     }
-    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
+    this.host.notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
     this.renderView();
   }
   async commitEntryPointMove(entry, targetDate, startSec) {
-    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, startSec);
+    const ok = await this.host.moveEntryToDate(entry, targetDate, startSec, startSec);
     if (!ok) {
-      new import_obsidian.Notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.host.notice("\u8DE8\u5929\u79FB\u52A8\u672A\u5199\u5165\uFF1A\u76EE\u6807\u884C\u5DF2\u53D8\u5316\u6216\u6765\u6E90\u53EA\u8BFB\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
       this.renderView();
       return;
     }
-    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)}`);
+    this.host.notice(`\u5DF2\u79FB\u52A8\u5230 ${targetDate}\uFF1A${formatSecondsToTime(startSec)}`);
     this.renderView();
   }
   // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
   // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
   attachPointDrag(line, entry, timeBadge, scale) {
-    if (entry.source && entry.source !== "daily") {
+    if (entry.readonly || entry.source && entry.source !== "daily") {
       line.addClass("is-readonly");
       return;
     }
@@ -2065,13 +2870,13 @@ var TimenoteView = class extends import_obsidian.ItemView {
     };
   }
   async commitEntryPoint(entry, startSec) {
-    const ok = await this.plugin.dailyNoteService.updateEntryPointTime(entry, startSec);
+    const ok = await this.host.updateEntryPointTime(entry, startSec);
     if (!ok) {
-      new import_obsidian.Notice("\u65F6\u95F4\u70B9\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
+      this.host.notice("\u65F6\u95F4\u70B9\u672A\u5199\u5165\uFF1A\u627E\u4E0D\u5230\u76EE\u6807\u884C\uFF0C\u5DF2\u6062\u590D\u539F\u72B6");
       this.renderView();
       return;
     }
-    new import_obsidian.Notice(`\u5DF2\u66F4\u65B0\u65F6\u95F4\u70B9\uFF1A${formatSecondsToTime(startSec)}`);
+    this.host.notice(`\u5DF2\u66F4\u65B0\u65F6\u95F4\u70B9\uFF1A${formatSecondsToTime(startSec)}`);
     this.renderView();
   }
   attachAllDayResizer(resizer, header) {
@@ -2080,7 +2885,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       if (ev.button !== 0) return;
       ev.preventDefault();
       const startY = ev.clientY;
-      const startH = Math.max(32, Math.min(320, Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)));
+      const startH = Math.max(32, Math.min(320, Number((_a = this.host.settings.allDayHeight) != null ? _a : 36)));
       const containers = Array.from(header.querySelectorAll(".timenote-day-allday-container"));
       let next = startH;
       const apply = (h) => {
@@ -2099,8 +2904,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
         window.removeEventListener("pointerup", onUp);
         resizer.removeClass("is-active");
         if (next !== startH) {
-          this.plugin.settings.allDayHeight = next;
-          void this.plugin.saveSettings();
+          this.host.settings.allDayHeight = next;
+          void this.host.saveSettings();
         }
       };
       resizer.addClass("is-active");
@@ -2124,7 +2929,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
   tickNowLine() {
     const el = this.nowLineEl;
     if (!el || !el.isConnected) return;
-    const now = window.moment();
+    const now = moment();
     const scale = this.currentTimeScale;
     if (!scale) {
       el.style.display = "none";
@@ -2162,7 +2967,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
       return (a.startSeconds || 0) - (b.startSeconds || 0);
     });
     entries.forEach((entry) => {
-      const isBlinko = entry.source === "blinko";
+      const srcCls = sourceCssClass(entry.source);
       const item = group.createEl("div", { cls: "timenote-timeline-item" });
       const spanSec = entry.hasTime ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0) : 0;
       item.createEl("div", {
@@ -2170,7 +2975,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         cls: "timenote-timeline-badge"
       });
       item.createEl("div", {
-        cls: `timenote-timeline-dot ${entry.isTask ? "is-task" : ""} ${entry.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
+        cls: `timenote-timeline-dot ${entry.isTask ? "is-task" : ""} ${entry.isCompleted ? "is-completed" : ""} ${srcCls}`
       });
       const card = item.createEl("div", { cls: "timenote-timeline-content" });
       if (entry.isTask) {
@@ -2182,7 +2987,7 @@ var TimenoteView = class extends import_obsidian.ItemView {
         cb.onclick = async (ev) => {
           ev.stopPropagation();
           this.hideHoverTooltip();
-          await this.plugin.dailyNoteService.toggleTask(entry);
+          await this.host.toggleTask(entry);
           this.renderView();
         };
       }
@@ -2227,18 +3032,18 @@ var TimenoteView = class extends import_obsidian.ItemView {
   renderMonthView(container) {
     const monthContainer = container.createEl("div", { cls: "timenote-month-container" });
     const weekdays = monthContainer.createEl("div", { cls: "timenote-month-weekdays" });
-    const weekLabels = this.plugin.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
+    const weekLabels = this.host.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
     weekLabels.forEach((l) => weekdays.createEl("div", { text: `\u5468${l}` }));
     const grid = monthContainer.createEl("div", { cls: "timenote-month-grid" });
     const startOfMonth = this.currentDate.clone().startOf("month");
     const endOfMonth = this.currentDate.clone().endOf("month");
-    const startGrid = startOfMonth.clone().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
-    const endGrid = endOfMonth.clone().endOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
+    const startGrid = startOfMonth.clone().startOf(this.host.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
+    const endGrid = endOfMonth.clone().endOf(this.host.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
     const curr = startGrid.clone();
     while (curr.isSameOrBefore(endGrid, "day")) {
       const dateStr = curr.format("YYYY-MM-DD");
       const isOtherMonth = curr.month() !== this.currentDate.month();
-      const isToday = curr.isSame(window.moment(), "day");
+      const isToday = curr.isSame(moment(), "day");
       const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
       const cell = grid.createEl("div", {
         cls: `timenote-month-cell ${isOtherMonth ? "is-other-month" : ""} ${isToday ? "is-today" : ""}`
@@ -2270,9 +3075,8 @@ var TimenoteView = class extends import_obsidian.ItemView {
         displayItems = entries.slice(0, 3);
       }
       displayItems.forEach((e) => {
-        const isBlinko = e.source === "blinko";
         const itemPill = itemsWrap.createEl("div", {
-          cls: `timenote-month-item-pill ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
+          cls: `timenote-month-item-pill ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${sourceCssClass(e.source)}`
         });
         if (e.hasTime) {
           itemPill.createEl("span", { text: e.timeStr.slice(0, 5), cls: "timenote-month-pill-time" });
@@ -2357,12 +3161,12 @@ var TimenoteView = class extends import_obsidian.ItemView {
     const grid = quarterContainer.createEl("div", { cls: "timenote-quarter-grid" });
     const startMonthIndex = (currentQ - 1) * 3;
     for (let offset = 0; offset < 3; offset++) {
-      const monthMoment = window.moment().year(year).month(startMonthIndex + offset).startOf("month");
+      const monthMoment = moment().year(year).month(startMonthIndex + offset).startOf("month");
       const monthNum = monthMoment.month() + 1;
       const card = grid.createEl("div", { cls: "timenote-quarter-month-card" });
       let monthCount = 0;
-      const daysInMonth = monthMoment.daysInMonth();
-      for (let d = 1; d <= daysInMonth; d++) {
+      const daysInMonth2 = monthMoment.daysInMonth();
+      for (let d = 1; d <= daysInMonth2; d++) {
         const dStr = monthMoment.clone().date(d).format("YYYY-MM-DD");
         monthCount += this.filterEntries(this.entriesMap.get(dStr) || []).length;
       }
@@ -2375,22 +3179,22 @@ var TimenoteView = class extends import_obsidian.ItemView {
         this.renderView();
       };
       const weekdaysRow = card.createEl("div", { cls: "timenote-mini-month-grid", style: "font-weight: 600; color: var(--text-muted); margin-bottom: 4px;" });
-      const weekLabels = this.plugin.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
+      const weekLabels = this.host.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
       weekLabels.forEach((w) => weekdaysRow.createEl("div", { text: w }));
       const miniGrid = card.createEl("div", { cls: "timenote-mini-month-grid" });
       const firstDay = monthMoment.clone().startOf("month");
       let dayOfWeek = firstDay.day();
-      if (this.plugin.settings.firstDayOfWeek === 1) {
+      if (this.host.settings.firstDayOfWeek === 1) {
         dayOfWeek = (dayOfWeek + 6) % 7;
       }
-      for (let pad = 0; pad < dayOfWeek; pad++) {
+      for (let pad2 = 0; pad2 < dayOfWeek; pad2++) {
         miniGrid.createEl("div", { cls: "timenote-mini-cell", style: "pointer-events: none;" });
       }
-      for (let day = 1; day <= daysInMonth; day++) {
+      for (let day = 1; day <= daysInMonth2; day++) {
         const dMom = monthMoment.clone().date(day);
         const dStr = dMom.format("YYYY-MM-DD");
         const dEntries = this.filterEntries(this.entriesMap.get(dStr) || []);
-        const isToday = dMom.isSame(window.moment(), "day");
+        const isToday = dMom.isSame(moment(), "day");
         const hasEvents = dEntries.length > 0;
         const cell = miniGrid.createEl("div", {
           cls: `timenote-mini-cell ${hasEvents ? "has-events" : ""} ${isToday ? "is-today" : ""}`,
@@ -2464,12 +3268,12 @@ var TimenoteView = class extends import_obsidian.ItemView {
     legendRow.createEl("span", { text: "\u591A" });
     const grid = yearContainer.createEl("div", { cls: "timenote-year-grid" });
     for (let m = 0; m < 12; m++) {
-      const monthMoment = window.moment().year(year).month(m).startOf("month");
+      const monthMoment = moment().year(year).month(m).startOf("month");
       const monthNum = m + 1;
       const card = grid.createEl("div", { cls: "timenote-year-month-card" });
       let monthCount = 0;
-      const daysInMonth = monthMoment.daysInMonth();
-      for (let d = 1; d <= daysInMonth; d++) {
+      const daysInMonth2 = monthMoment.daysInMonth();
+      for (let d = 1; d <= daysInMonth2; d++) {
         const dStr = monthMoment.clone().date(d).format("YYYY-MM-DD");
         monthCount += this.filterEntries(this.entriesMap.get(dStr) || []).length;
       }
@@ -2484,22 +3288,22 @@ var TimenoteView = class extends import_obsidian.ItemView {
         this.renderView();
       };
       const weekdaysRow = card.createEl("div", { cls: "timenote-mini-month-grid", style: "font-size: 0.65rem; color: var(--text-muted); margin-bottom: 2px;" });
-      const weekLabels = this.plugin.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
+      const weekLabels = this.host.settings.firstDayOfWeek === 1 ? ["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u65E5"] : ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
       weekLabels.forEach((w) => weekdaysRow.createEl("div", { text: w }));
       const miniGrid = card.createEl("div", { cls: "timenote-mini-month-grid" });
       const firstDay = monthMoment.clone().startOf("month");
       let dayOfWeek = firstDay.day();
-      if (this.plugin.settings.firstDayOfWeek === 1) {
+      if (this.host.settings.firstDayOfWeek === 1) {
         dayOfWeek = (dayOfWeek + 6) % 7;
       }
-      for (let pad = 0; pad < dayOfWeek; pad++) {
+      for (let pad2 = 0; pad2 < dayOfWeek; pad2++) {
         miniGrid.createEl("div", { cls: "timenote-mini-cell", style: "pointer-events: none;" });
       }
-      for (let day = 1; day <= daysInMonth; day++) {
+      for (let day = 1; day <= daysInMonth2; day++) {
         const dMom = monthMoment.clone().date(day);
         const dStr = dMom.format("YYYY-MM-DD");
         const dEntries = this.filterEntries(this.entriesMap.get(dStr) || []);
-        const isToday = dMom.isSame(window.moment(), "day");
+        const isToday = dMom.isSame(moment(), "day");
         const count = dEntries.length;
         let heatClass = "timenote-heat-0";
         if (count >= 10) heatClass = "timenote-heat-4";
@@ -2525,47 +3329,369 @@ var TimenoteView = class extends import_obsidian.ItemView {
   }
   // Jump to specific line in daily note file
   async jumpToFileLine(entry) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof import_obsidian.TFile)) return;
-    const leaf = this.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { eState: { line: Math.max(0, entry.lineNum - 1) } });
+    return this.host.openEntry(entry);
   }
   // 打开某一天的日记：存在则直接打开，不存在时按 QuickAdd 的目录规则创建后再打开（DEC-017）。
   // 日 / 3 天 / 周视图的日期标题、时间线视图的「打开日记 ↗」共用这一入口。
   async openDailyNoteForDate(dateStr) {
-    const svc = this.plugin.dailyNoteService;
-    svc.dailyNoteIndex.clear();
-    let file = svc.findDailyNoteFile(dateStr);
-    if (!file) {
-      const m = window.moment(dateStr);
-      const folder = `${this.plugin.settings.periodicNotesFolder}/${m.format("YYYY")}/Daily/${m.format("MM")}`;
-      let curr = "";
-      for (const part of folder.split("/")) {
-        curr = curr ? `${curr}/${part}` : part;
-        if (!await this.app.vault.adapter.exists(curr)) {
-          await this.app.vault.createFolder(curr);
-        }
-      }
-      const notePath = (0, import_obsidian.normalizePath)(`${folder}/${dateStr}.md`);
-      const heading = parseQuickAddSection(this.plugin.settings.quickAddSection).heading;
-      file = await this.app.vault.create(notePath, `# ${dateStr}
-
-${heading}
-`);
-      svc.dailyNoteIndex.set(dateStr, file);
-      new import_obsidian.Notice(`\u5DF2\u521B\u5EFA\u5E76\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
-    }
-    const leaf = this.app.workspace.getLeaf(false);
-    await leaf.openFile(file);
+    return this.host.openDailyNote(dateStr);
   }
 };
-var QuickAddModal = class extends import_obsidian.Modal {
+
+// apps/bootstrap.ts
+function prepareHostEnvironment(opts = {}) {
+  var _a;
+  installDomHelpers(opts.forceDomHelpers === true);
+  setMomentFactory((_a = opts.momentFactory) != null ? _a : nativeMoment);
+}
+function mountTimeNote(root, host) {
+  return new TimenoteRenderer(root, host);
+}
+
+// hosts/obsidian/adapter.ts
+var import_obsidian2 = require("obsidian");
+function createObsidianHostAdapter(deps) {
+  const { app, plugin, service } = deps;
+  return {
+    get settings() {
+      return plugin.settings;
+    },
+    async saveSettings() {
+      await plugin.saveSettings();
+    },
+    notice(message) {
+      new import_obsidian2.Notice(message);
+    },
+    setIcon(el, icon) {
+      (0, import_obsidian2.setIcon)(el, icon);
+    },
+    openQuickAdd(dateStr, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "") {
+      new deps.QuickAddModal(
+        app,
+        plugin,
+        dateStr,
+        onSaved,
+        prefillTime,
+        prefillEndTime,
+        prefillType
+      ).open();
+    },
+    openSubItems(entry) {
+      new deps.SubItemsModal(app, entry).open();
+    },
+    async openEntry(entry) {
+      if (entry && entry.readonly) {
+        new import_obsidian2.Notice(`${sourceLabel(entry.source)} \u8BB0\u5F55\u6765\u81EA\u8FDC\u7A0B\u63A5\u53E3\uFF0CObsidian \u91CC\u6CA1\u6709\u5BF9\u5E94\u7B14\u8BB0`);
+        return;
+      }
+      const file = app.vault.getAbstractFileByPath(entry.filePath);
+      if (!(file instanceof import_obsidian2.TFile)) return;
+      const leaf = app.workspace.getLeaf(false);
+      await leaf.openFile(file, { eState: { line: Math.max(0, entry.lineNum - 1) } });
+    },
+    // DEC-017：存在则直接打开，不存在时按 QuickAdd 的目录规则创建后再打开。
+    // 日 / 3 天 / 周视图的日期标题、时间线视图的「打开日记 ↗」共用这一入口。
+    async openDailyNote(dateStr) {
+      service.clearIndex();
+      let note = await service.findDailyNoteFile(dateStr);
+      let file = note ? app.vault.getAbstractFileByPath(note.path) : null;
+      if (!(file instanceof import_obsidian2.TFile)) {
+        note = await service.ensureDailyNote(dateStr);
+        file = app.vault.getAbstractFileByPath(note.path);
+        if (file instanceof import_obsidian2.TFile) new import_obsidian2.Notice(`\u5DF2\u521B\u5EFA\u5E76\u6253\u5F00 ${dateStr} \u65E5\u8BB0`);
+      }
+      if (!(file instanceof import_obsidian2.TFile)) return;
+      const leaf = app.workspace.getLeaf(false);
+      await leaf.openFile(file);
+    },
+    onExternalChange(cb) {
+      const ref = app.vault.on("modify", cb);
+      if (plugin.registerEvent) plugin.registerEvent(ref);
+      return () => app.vault.offref(ref);
+    },
+    getEntriesForRange(start, end) {
+      return service.getEntriesForRange(start, end);
+    },
+    invalidateCache() {
+      service.fileCache.clear();
+      service.dailyNoteIndex.clear();
+      service.blinkoCache.clear();
+    },
+    toggleTask(entry) {
+      return service.toggleTask(entry);
+    },
+    updateEntryTime(entry, startSec, endSec) {
+      return service.updateEntryTime(entry, startSec, endSec);
+    },
+    updateEntryPointTime(entry, startSec) {
+      return service.updateEntryPointTime(entry, startSec);
+    },
+    moveEntryToDate(entry, targetDate, startSec, endSec) {
+      return service.moveEntryToDate(entry, targetDate, startSec, endSec);
+    }
+  };
+}
+
+// main.ts
+var VIEW_TYPE_TIMENOTE = "timenote-calendar-view";
+var REMOTE_CACHE_TTL = 60 * 1e3;
+var REMOTE_CACHE_MAX = 16;
+var DEFAULT_SETTINGS = {
+  periodicNotesFolder: "SpiralNotes",
+  includeBlinko: true,
+  defaultView: "week",
+  // 'day', '3day', 'week', 'month', 'quarter', 'year', 'timeline'
+  startHour: 0,
+  endHour: 24,
+  slotHeight: 52,
+  firstDayOfWeek: 1,
+  // 1: Monday, 0: Sunday
+  parseAllBullets: true,
+  // 允许直接写 "## 灵感闪念" / "### 随手记" 指定层级与标题；纯文本（旧配置）按二级兼容
+  quickAddSection: "## \u7075\u611F\u95EA\u5FF5",
+  layoutMode: "block",
+  defaultDuration: 60,
+  // 新建记录的默认类型：block = 起止时间块，point = 只有一个时刻的时间点（DEC-022）
+  defaultAddType: "block",
+  allDayHeight: 36,
+  // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
+  elasticTimeline: true,
+  // ---- 远程来源聚合（DEC-023）----
+  // 这里走 HTTP API，与上面 includeBlinko 的「读 vault 里的导出 md 文件」是两回事：
+  // 一个是本地文件（可写、可拖拽），一个是远程接口（只读聚合）。
+  // 聚合进来的条目一律只读（entry.readonly = true）。
+  memosEnabled: false,
+  memosBaseUrl: "",
+  // 如 https://memos.example.com
+  memosToken: "",
+  // memos 的 Access Token（Bearer）
+  blinkoApiEnabled: false,
+  blinkoBaseUrl: "",
+  // 如 https://blinko.example.com
+  blinkoApiKey: ""
+  // Blinko 的 API Token（Bearer）
+};
+var DailyNoteService = class {
+  constructor(app, settings) {
+    this.app = app;
+    this.settings = settings;
+    this.store = createObsidianFileStore(app);
+    this.daily = new DailySource({ store: this.store, settings });
+    this.blinkoLocal = new BlinkoLocalSource({ store: this.store });
+    this.lastRemoteErrors = {};
+    this.remoteCache = /* @__PURE__ */ new Map();
+  }
+  // ---- 本地日记：全部转发到 DailySource ----
+  // 保留这两个 Map 的 getter，是因为 HostAdapter 与设置页仍在调
+  // `service.fileCache.clear()` / `service.dailyNoteIndex.clear()`。
+  // 改成方法会让改动扩散到 adapter，而这些调用语义本来就只是「清缓存」。
+  get fileCache() {
+    return this.daily.fileCache;
+  }
+  get dailyNoteIndex() {
+    return this.daily.index;
+  }
+  /** 本地 Blinko 导出的解析缓存（DEC-027）。原实现与日记共用一个 Map，
+   *  迁成独立来源后必须单独清 —— 否则「刷新」按钮清不掉它 */
+  get blinkoCache() {
+    return this.blinkoLocal.fileCache;
+  }
+  buildIndexIfNeeded() {
+    return this.daily.buildIndexIfNeeded();
+  }
+  findDailyNoteFile(dateStr) {
+    return this.daily.findDailyNoteFile(dateStr);
+  }
+  ensureDailyNote(dateStr) {
+    return this.daily.ensureDailyNote(dateStr);
+  }
+  clearIndex() {
+    return this.daily.clearIndex();
+  }
+  toggleTask(entry) {
+    return this.daily.toggleTask(entry);
+  }
+  updateEntryTime(entry, startSec, endSec) {
+    return this.daily.updateEntryTime(entry, startSec, endSec);
+  }
+  updateEntryPointTime(entry, startSec) {
+    return this.daily.updateEntryPointTime(entry, startSec);
+  }
+  moveEntryToDate(entry, targetDate, startSec, endSec) {
+    return this.daily.moveEntryToDate(entry, targetDate, startSec, endSec);
+  }
+  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
+    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines);
+  }
+  // Scan entries for a date range [startMoment, endMoment]
+  // 返回 Map<dateStr, NoteEntry[]>，**每一天都建桶**（哪怕是空数组）——
+  // Blinko / 远程合并时只在桶存在时 push，空桶是「这一天可见」的标记。
+  async getEntriesForRange(startMoment, endMoment) {
+    const results = /* @__PURE__ */ new Map();
+    const days = [];
+    const curr = startMoment.clone();
+    while (curr.isSameOrBefore(endMoment, "day")) {
+      days.push(curr.format("YYYY-MM-DD"));
+      curr.add(1, "day");
+    }
+    for (const d of days) results.set(d, []);
+    if (days.length) {
+      const localEntries = await this.daily.listEntries(days[0], days[days.length - 1]);
+      for (const entry of localEntries) {
+        const bucket = results.get(entry.dateStr);
+        if (bucket) bucket.push(entry);
+      }
+    }
+    if (this.settings.includeBlinko && days.length) {
+      const blinkoEntries = await this.blinkoLocal.listEntries(days[0], days[days.length - 1]);
+      this.mergeIntoBuckets(results, blinkoEntries);
+    }
+    await this.collectRemoteEntries(results, startMoment, endMoment);
+    return results;
+  }
+  /**
+   * 按当前设置装配远程来源。
+   *
+   * 每次调用都新建实例：设置改了立即生效，不必重启插件或重建服务。
+   * 只在「启用 + 地址 + 令牌」三项齐全时才挂载，避免设置页填一半就开始
+   * 发无效请求（那会在控制台刷一堆 401）。
+   */
+  buildRemoteSources() {
+    const s = this.settings || {};
+    const sources = [];
+    if (s.memosEnabled && s.memosBaseUrl && s.memosToken) {
+      sources.push(new MemosSource({ baseUrl: s.memosBaseUrl, token: s.memosToken }));
+    }
+    if (s.blinkoApiEnabled && s.blinkoBaseUrl && s.blinkoApiKey) {
+      sources.push(new BlinkoSource({ baseUrl: s.blinkoBaseUrl, apiKey: s.blinkoApiKey }));
+    }
+    return sources;
+  }
+  /**
+   * 拉取远程来源并合并进 results（dateStr → 条目数组）。
+   *
+   * 区间外的条目直接丢弃：memos / Blinko 的接口是按时间过滤的，但服务端
+   * 支持的过滤精度不一（有的按天、有的按秒），本地再挡一道才不会越界。
+   */
+  async collectRemoteEntries(results, startMoment, endMoment) {
+    const sources = this.buildRemoteSources();
+    if (!sources.length) return;
+    const startDate = startMoment.format("YYYY-MM-DD");
+    const endDate = endMoment.format("YYYY-MM-DD");
+    const cacheKey = `${startDate}..${endDate}`;
+    const cached = this.remoteCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < REMOTE_CACHE_TTL) {
+      this.mergeIntoBuckets(results, cached.entries);
+      return;
+    }
+    const agg = new AggregateSource(sources);
+    const { entries, errors } = await agg.listEntries(startDate, endDate);
+    this.lastRemoteErrors = errors;
+    this.cacheRemoteEntries(cacheKey, entries);
+    this.mergeIntoBuckets(results, entries);
+  }
+  /**
+   * 把条目按 dateStr 装进可见日期桶。
+   * 区间外的条目没有桶，直接丢弃 —— 服务端过滤精度不一，本地再挡一道。
+   */
+  mergeIntoBuckets(results, entries) {
+    for (const entry of entries) {
+      const bucket = results.get(entry.dateStr);
+      if (bucket) bucket.push(entry);
+    }
+  }
+  /** 写缓存并做容量上限：只留最近若干个区间，别让 Map 无限长 */
+  cacheRemoteEntries(key, entries) {
+    this.remoteCache.set(key, { at: Date.now(), entries });
+    while (this.remoteCache.size > REMOTE_CACHE_MAX) {
+      const oldest = this.remoteCache.keys().next().value;
+      this.remoteCache.delete(oldest);
+    }
+  }
+  /** 设置变更 / 手动刷新时调用：下次渲染一定重新拉取 */
+  clearRemoteCache() {
+    this.remoteCache.clear();
+  }
+};
+var SubItemsModal = class extends import_obsidian3.Modal {
+  constructor(app, entry) {
+    super(app);
+    this.entry = entry;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: `\u{1F4CB} ${this.entry.text}` });
+    contentEl.createEl("div", {
+      text: `\u6765\u6E90\uFF1A${this.entry.dateStr} [${this.entry.timeStr || "\u5168\u5929"}]`,
+      cls: "text-muted",
+      style: "font-size: 0.82rem; margin-bottom: 12px;"
+    });
+    const list = contentEl.createEl("ul", { cls: "timenote-subitems-list" });
+    this.entry.subItems.forEach((item) => {
+      list.createEl("li", { text: item });
+    });
+    const btnRow = contentEl.createEl("div", { style: "display: flex; justify-content: flex-end; margin-top: 16px; gap: 8px;" });
+    const jumpBtn = btnRow.createEl("button", { text: "\u6253\u5F00\u539F\u7B14\u8BB0\u5B9A\u4F4D", cls: "mod-cta" });
+    jumpBtn.style.display = this.entry.readonly ? "none" : "";
+    jumpBtn.onclick = async () => {
+      this.close();
+      const file = this.app.vault.getAbstractFileByPath(this.entry.filePath);
+      if (file instanceof import_obsidian3.TFile) {
+        const leaf = this.app.workspace.getLeaf(false);
+        await leaf.openFile(file, { eState: { line: Math.max(0, this.entry.lineNum - 1) } });
+      }
+    };
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var TimenoteView = class extends import_obsidian3.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.renderer = null;
+  }
+  getViewType() {
+    return VIEW_TYPE_TIMENOTE;
+  }
+  getDisplayText() {
+    return "\u65F6\u95F4\u7B14\u8BB0\u65E5\u5386 (TimeNote)";
+  }
+  getIcon() {
+    return "calendar-clock";
+  }
+  async onOpen() {
+    if (!this.renderer) {
+      this.renderer = mountTimeNote(
+        this.contentEl,
+        createObsidianHostAdapter({
+          app: this.app,
+          plugin: this.plugin,
+          service: this.plugin.dailyNoteService,
+          QuickAddModal,
+          SubItemsModal
+        })
+      );
+    }
+    await this.renderer.onOpen();
+  }
+  async onClose() {
+    if (this.renderer) await this.renderer.onClose();
+  }
+  /** 供设置页 / QuickAdd 保存回调触发重渲染 */
+  renderView() {
+    return this.renderer ? this.renderer.renderView() : void 0;
+  }
+};
+var QuickAddModal = class extends import_obsidian3.Modal {
   constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "") {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
     this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
-    this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
+    this.timeStr = prefillTime || moment().format("HH:mm:ss");
     this.endTimeStr = prefillEndTime !== void 0 ? prefillEndTime : this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
     this.isTask = false;
     this.content = "";
@@ -2661,13 +3787,13 @@ var QuickAddModal = class extends import_obsidian.Modal {
     const saveBtn = btnRow.createEl("button", { text: "\u4FDD\u5B58\u5E76\u63D2\u5165\u65E5\u8BB0", cls: "mod-cta" });
     saveBtn.onclick = async () => {
       if (!this.content.trim()) {
-        new import_obsidian.Notice("\u8BF7\u8F93\u5165\u5185\u5BB9\uFF01");
+        new import_obsidian3.Notice("\u8BF7\u8F93\u5165\u5185\u5BB9\uFF01");
         return;
       }
       const startStr = this.timeStr.trim();
       const hasExplicitRange = /[-~至到]/.test(startStr);
       if (this.addType === "point" && hasExplicitRange) {
-        new import_obsidian.Notice("\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\uFF1A\u8BF7\u53BB\u6389\u5F00\u59CB\u65F6\u95F4\u91CC\u7684\u8303\u56F4\uFF0C\u6216\u5207\u6362\u6210\u65F6\u95F4\u5757");
+        new import_obsidian3.Notice("\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\uFF1A\u8BF7\u53BB\u6389\u5F00\u59CB\u65F6\u95F4\u91CC\u7684\u8303\u56F4\uFF0C\u6216\u5207\u6362\u6210\u65F6\u95F4\u5757");
         return;
       }
       let endStr = this.addType === "point" ? "" : this.endTimeStr.trim();
@@ -2675,18 +3801,18 @@ var QuickAddModal = class extends import_obsidian.Modal {
         endStr = addMinutesToTime(startStr, this.plugin.settings.defaultDuration || 60);
       }
       if (startStr && !hasExplicitRange && parseTimeToSeconds(startStr) === null) {
-        new import_obsidian.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
+        new import_obsidian3.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
         return;
       }
       if (!hasExplicitRange && endStr) {
         const sSec = parseTimeToSeconds(startStr);
         const eSec = parseTimeToSeconds(endStr);
         if (sSec === null || eSec === null) {
-          new import_obsidian.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
+          new import_obsidian3.Notice("\u65F6\u95F4\u683C\u5F0F\u4E0D\u6B63\u786E\uFF0C\u8BF7\u4F7F\u7528 HH:mm\uFF01");
           return;
         }
         if (eSec <= sSec) {
-          new import_obsidian.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u5F00\u59CB\u65F6\u95F4\uFF08\u6682\u4E0D\u652F\u6301\u8DE8\u65E5\uFF09\uFF01");
+          new import_obsidian3.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u5F00\u59CB\u65F6\u95F4\uFF08\u6682\u4E0D\u652F\u6301\u8DE8\u65E5\uFF09\uFF01");
           return;
         }
       }
@@ -2699,7 +3825,7 @@ var QuickAddModal = class extends import_obsidian.Modal {
         tags,
         hasExplicitRange ? "" : endStr
       );
-      new import_obsidian.Notice(`\u2705 \u5DF2\u8BB0\u5F55${this.addType === "point" ? "\u65F6\u95F4\u70B9" : "\u65F6\u95F4\u5757"}\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
+      new import_obsidian3.Notice(`\u2705 \u5DF2\u8BB0\u5F55${this.addType === "point" ? "\u65F6\u95F4\u70B9" : "\u65F6\u95F4\u5757"}\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
       this.close();
       if (this.onSaved) this.onSaved();
     };
@@ -2708,7 +3834,7 @@ var QuickAddModal = class extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 };
-var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
+var TimenoteSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2717,16 +3843,79 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "TimeNote \u8BBE\u7F6E" });
-    new import_obsidian.Setting(containerEl).setName("\u5468\u671F\u7B14\u8BB0\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u65E5\u8BB0\uFF08Daily Notes\uFF09\u6240\u5728\u7684\u6839\u76EE\u5F55\u3002\u63D2\u4EF6\u4F1A\u8BFB\u53D6\u5176\u4E2D\u683C\u5F0F\u4E3A YYYY-MM-DD \u7684\u7B14\u8BB0\u6587\u4EF6\u3002").addText((text) => text.setPlaceholder("SpiralNotes").setValue(this.plugin.settings.periodicNotesFolder).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u5468\u671F\u7B14\u8BB0\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u65E5\u8BB0\uFF08Daily Notes\uFF09\u6240\u5728\u7684\u6839\u76EE\u5F55\u3002\u63D2\u4EF6\u4F1A\u8BFB\u53D6\u5176\u4E2D\u683C\u5F0F\u4E3A YYYY-MM-DD \u7684\u7B14\u8BB0\u6587\u4EF6\u3002").addText((text) => text.setPlaceholder("SpiralNotes").setValue(this.plugin.settings.periodicNotesFolder).onChange(async (val) => {
       this.plugin.settings.periodicNotesFolder = val.trim() || "SpiralNotes";
       this.plugin.dailyNoteService.dailyNoteIndex.clear();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u540C\u65F6\u5728\u65E5\u5386\u4E2D\u805A\u5408 Blinko \u95EA\u5FF5").setDesc("\u5F00\u542F\u540E\uFF0C\u81EA\u52A8\u8BFB\u53D6 Blinko/Notes \u76EE\u5F55\u4E0B\u7684\u5FAE\u7B14\u8BB0\uFF0C\u6309\u5176\u521B\u5EFA\u65F6\u95F4\u4E00\u540C\u5728\u65E5\u5386\u4E0A\u5448\u73B0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.includeBlinko).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u540C\u65F6\u5728\u65E5\u5386\u4E2D\u805A\u5408 Blinko \u95EA\u5FF5").setDesc("\u5F00\u542F\u540E\uFF0C\u81EA\u52A8\u8BFB\u53D6 Blinko/Notes \u76EE\u5F55\u4E0B\u7684\u5FAE\u7B14\u8BB0\uFF0C\u6309\u5176\u521B\u5EFA\u65F6\u95F4\u4E00\u540C\u5728\u65E5\u5386\u4E0A\u5448\u73B0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.includeBlinko).onChange(async (val) => {
       this.plugin.settings.includeBlinko = val;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u9ED8\u8BA4\u89C6\u56FE\u6A21\u5F0F").setDesc("\u6253\u5F00\u65E5\u5386\u65F6\u9ED8\u8BA4\u5C55\u793A\u7684\u89C6\u56FE\u3002").addDropdown((drop) => drop.addOption("day", "\u65E5\u89C6\u56FE (Day)").addOption("3day", "3\u5929\u89C6\u56FE (3-Day)").addOption("week", "\u5468\u89C6\u56FE (Week)").addOption("month", "\u6708\u89C6\u56FE (Month)").addOption("quarter", "\u5B63\u5EA6\u89C6\u56FE (Quarter)").addOption("year", "\u5E74\u5EA6\u89C6\u56FE (Year)").addOption("timeline", "\u65F6\u95F4\u7EBF\u89C6\u56FE (Timeline)").setValue(this.plugin.settings.defaultView).onChange(async (val) => {
+    containerEl.createEl("h3", { text: "\u805A\u5408\u8FDC\u7A0B\u6765\u6E90" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "\u4ECE memos / Blinko \u7684 HTTP API \u62C9\u53D6\u8BB0\u5F55\uFF0C\u4E00\u5E76\u753B\u5728\u65E5\u5386\u4E0A\u3002\u805A\u5408\u8FDB\u6765\u7684\u8BB0\u5F55\u662F\u53EA\u8BFB\u7684\uFF1A\u4E0D\u80FD\u62D6\u62FD\u6539\u65F6\u95F4\u3001\u4E0D\u80FD\u8DE8\u5929\u79FB\u52A8\u3001\u4E0D\u80FD\u52FE\u9009\u4EFB\u52A1\uFF08\u4E0E\u672C\u5730\u65E5\u8BB0\u533A\u5206\u5F00\uFF09\u3002"
+    });
+    new import_obsidian3.Setting(containerEl).setName("\u542F\u7528 Memos").setDesc("\u4ECE memos \u5B9E\u4F8B\u62C9\u53D6\u8BB0\u5F55\u3002\u9700\u8981\u5B9E\u4F8B\u5730\u5740\u4E0E\u8BBF\u95EE\u4EE4\u724C\uFF08memos \u2192 \u8BBE\u7F6E \u2192 \u8BBF\u95EE\u4EE4\u724C\uFF09\u3002").addToggle((toggle) => toggle.setValue(!!this.plugin.settings.memosEnabled).onChange(async (val) => {
+      this.plugin.settings.memosEnabled = val;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Memos \u5730\u5740").setDesc("\u5F62\u5982 https://memos.example.com\uFF0C\u672B\u5C3E\u4E0D\u8981\u5E26 /api/v1\u3002").addText((text) => text.setPlaceholder("https://memos.example.com").setValue(this.plugin.settings.memosBaseUrl || "").onChange(async (val) => {
+      this.plugin.settings.memosBaseUrl = val.trim();
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Memos \u8BBF\u95EE\u4EE4\u724C").setDesc("\u4EE5 Bearer \u65B9\u5F0F\u53D1\u9001\u3002\u4EE4\u724C\u5B58\u5728\u63D2\u4EF6\u76EE\u5F55\u7684 data.json \u91CC\uFF0C\u6CE8\u610F\u8BE5\u6587\u4EF6\u662F\u660E\u6587\u7684\u3002").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("memos \u8BBF\u95EE\u4EE4\u724C").setValue(this.plugin.settings.memosToken || "").onChange(async (val) => {
+        this.plugin.settings.memosToken = val.trim();
+        await this.plugin.saveSettings();
+      });
+    }).addButton((btn) => btn.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").onClick(async () => {
+      btn.setButtonText("\u6D4B\u8BD5\u4E2D\u2026").setDisabled(true);
+      const s = this.plugin.settings;
+      try {
+        const src = new MemosSource({ baseUrl: s.memosBaseUrl, token: s.memosToken });
+        if (!src.configured) throw new Error("\u5730\u5740\u6216\u4EE4\u724C\u4E3A\u7A7A");
+        const today = moment().format("YYYY-MM-DD");
+        const list = await src.listEntries(today, today);
+        new import_obsidian3.Notice(`Memos \u8FDE\u63A5\u6210\u529F\uFF1A\u4ECA\u5929\u6709 ${list.length} \u6761 memo`);
+      } catch (err) {
+        new import_obsidian3.Notice(`Memos \u8FDE\u63A5\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        btn.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").setDisabled(false);
+      }
+    }));
+    new import_obsidian3.Setting(containerEl).setName("\u542F\u7528 Blinko API").setDesc("\u4ECE Blinko \u5B9E\u4F8B\u5B9E\u65F6\u62C9\u53D6\u7B14\u8BB0\u3002\u4E0E\u4E0A\u9762\u7684\u300C\u805A\u5408 Blinko \u95EA\u5FF5\uFF08\u672C\u5730\u5BFC\u51FA\u6587\u4EF6\uFF09\u300D\u4E92\u4E0D\u5F71\u54CD\uFF0C\u53EF\u4EE5\u53EA\u5F00\u4E00\u4E2A\u3002").addToggle((toggle) => toggle.setValue(!!this.plugin.settings.blinkoApiEnabled).onChange(async (val) => {
+      this.plugin.settings.blinkoApiEnabled = val;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Blinko \u5730\u5740").setDesc("\u5F62\u5982 https://blinko.example.com\u3002").addText((text) => text.setPlaceholder("https://blinko.example.com").setValue(this.plugin.settings.blinkoBaseUrl || "").onChange(async (val) => {
+      this.plugin.settings.blinkoBaseUrl = val.trim();
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Blinko API Key").setDesc("\u4EE5 Bearer \u65B9\u5F0F\u53D1\u9001\u3002\u5728 Blinko \u7684\u300C\u8BBE\u7F6E \u2192 \u8BBF\u95EE\u4EE4\u724C\u300D\u91CC\u751F\u6210\u3002").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("Blinko API Key").setValue(this.plugin.settings.blinkoApiKey || "").onChange(async (val) => {
+        this.plugin.settings.blinkoApiKey = val.trim();
+        await this.plugin.saveSettings();
+      });
+    }).addButton((btn) => btn.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").onClick(async () => {
+      btn.setButtonText("\u6D4B\u8BD5\u4E2D\u2026").setDisabled(true);
+      const s = this.plugin.settings;
+      try {
+        const src = new BlinkoSource({ baseUrl: s.blinkoBaseUrl, apiKey: s.blinkoApiKey });
+        if (!src.configured) throw new Error("\u5730\u5740\u6216 API Key \u4E3A\u7A7A");
+        const today = moment().format("YYYY-MM-DD");
+        const list = await src.listEntries(today, today);
+        new import_obsidian3.Notice(`Blinko \u8FDE\u63A5\u6210\u529F\uFF1A\u4ECA\u5929\u6709 ${list.length} \u6761\u7B14\u8BB0`);
+      } catch (err) {
+        new import_obsidian3.Notice(`Blinko \u8FDE\u63A5\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        btn.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").setDisabled(false);
+      }
+    }));
+    new import_obsidian3.Setting(containerEl).setName("\u9ED8\u8BA4\u89C6\u56FE\u6A21\u5F0F").setDesc("\u6253\u5F00\u65E5\u5386\u65F6\u9ED8\u8BA4\u5C55\u793A\u7684\u89C6\u56FE\u3002").addDropdown((drop) => drop.addOption("day", "\u65E5\u89C6\u56FE (Day)").addOption("3day", "3\u5929\u89C6\u56FE (3-Day)").addOption("week", "\u5468\u89C6\u56FE (Week)").addOption("month", "\u6708\u89C6\u56FE (Month)").addOption("quarter", "\u5B63\u5EA6\u89C6\u56FE (Quarter)").addOption("year", "\u5E74\u5EA6\u89C6\u56FE (Year)").addOption("timeline", "\u65F6\u95F4\u7EBF\u89C6\u56FE (Timeline)").setValue(this.plugin.settings.defaultView).onChange(async (val) => {
       this.plugin.settings.defaultView = val;
       await this.plugin.saveSettings();
     }));
@@ -2734,7 +3923,7 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
       const h = from + i;
       return { value: String(h), label: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00` };
     });
-    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u8D77\u59CB\u65F6\u95F4").setDesc("\u65E5 / 3\u5929 / \u5468\u89C6\u56FE\u65F6\u95F4\u7F51\u683C\u7684\u8D77\u59CB\u5C0F\u65F6\u3002\u9ED8\u8BA4 00:00\uFF08\u5168\u5929\uFF09\uFF0C\u53EF\u6309\u4F5C\u606F\u6536\u7A84\uFF0C\u4F8B\u5982 06:00\u3002").addDropdown((drop) => {
+    new import_obsidian3.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u8D77\u59CB\u65F6\u95F4").setDesc("\u65E5 / 3\u5929 / \u5468\u89C6\u56FE\u65F6\u95F4\u7F51\u683C\u7684\u8D77\u59CB\u5C0F\u65F6\u3002\u9ED8\u8BA4 00:00\uFF08\u5168\u5929\uFF09\uFF0C\u53EF\u6309\u4F5C\u606F\u6536\u7A84\uFF0C\u4F8B\u5982 06:00\u3002").addDropdown((drop) => {
       var _a;
       hourChoices(0, 23).forEach((o) => drop.addOption(o.value, o.label));
       drop.setValue(String((_a = this.plugin.settings.startHour) != null ? _a : 0));
@@ -2744,13 +3933,13 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.settings.startHour = h;
         if (((_a2 = this.plugin.settings.endHour) != null ? _a2 : 24) <= h) {
           this.plugin.settings.endHour = Math.min(24, h + 1);
-          new import_obsidian.Notice(`\u7ED3\u675F\u65F6\u95F4\u5DF2\u81EA\u52A8\u8C03\u6574\u4E3A ${String(this.plugin.settings.endHour).padStart(2, "0")}:00`);
+          new import_obsidian3.Notice(`\u7ED3\u675F\u65F6\u95F4\u5DF2\u81EA\u52A8\u8C03\u6574\u4E3A ${String(this.plugin.settings.endHour).padStart(2, "0")}:00`);
         }
         await this.plugin.saveSettings();
         this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u7ED3\u675F\u65F6\u95F4").setDesc("\u65F6\u95F4\u7F51\u683C\u7684\u7ED3\u675F\u5C0F\u65F6\uFF0C\u9ED8\u8BA4 24:00\uFF08\u5168\u5929\uFF09\u3002\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\u3002").addDropdown((drop) => {
+    new import_obsidian3.Setting(containerEl).setName("\u65F6\u95F4\u8F74\u7ED3\u675F\u65F6\u95F4").setDesc("\u65F6\u95F4\u7F51\u683C\u7684\u7ED3\u675F\u5C0F\u65F6\uFF0C\u9ED8\u8BA4 24:00\uFF08\u5168\u5929\uFF09\u3002\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\u3002").addDropdown((drop) => {
       var _a;
       hourChoices(1, 24).forEach((o) => drop.addOption(o.value, o.label));
       drop.setValue(String((_a = this.plugin.settings.endHour) != null ? _a : 24));
@@ -2758,7 +3947,7 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         var _a2;
         const h = parseInt(val, 10);
         if (h <= ((_a2 = this.plugin.settings.startHour) != null ? _a2 : 0)) {
-          new import_obsidian.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\uFF01");
+          new import_obsidian3.Notice("\u7ED3\u675F\u65F6\u95F4\u5FC5\u987B\u665A\u4E8E\u8D77\u59CB\u65F6\u95F4\uFF01");
           return;
         }
         this.plugin.settings.endHour = h;
@@ -2766,7 +3955,7 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u6BCF\u5C0F\u65F6\u69FD\u9AD8").setDesc("\u65F6\u95F4\u7F51\u683C\u4E2D\u6BCF\u5C0F\u65F6\u5360\u7528\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u8C03\u5927\u65F6\u95F4\u5757\u66F4\u5BBD\u677E\uFF0C\u8C03\u5C0F\u53EF\u4E00\u5C4F\u770B\u5230\u66F4\u591A\u5C0F\u65F6\uFF1B\u9ED8\u8BA4 52\u3002").addSlider((slider) => {
+    new import_obsidian3.Setting(containerEl).setName("\u6BCF\u5C0F\u65F6\u69FD\u9AD8").setDesc("\u65F6\u95F4\u7F51\u683C\u4E2D\u6BCF\u5C0F\u65F6\u5360\u7528\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u8C03\u5927\u65F6\u95F4\u5757\u66F4\u5BBD\u677E\uFF0C\u8C03\u5C0F\u53EF\u4E00\u5C4F\u770B\u5230\u66F4\u591A\u5C0F\u65F6\uFF1B\u9ED8\u8BA4 52\u3002").addSlider((slider) => {
       var _a;
       return slider.setLimits(28, 96, 4).setValue(Number((_a = this.plugin.settings.slotHeight) != null ? _a : 52)).setDynamicTooltip().onChange(async (val) => {
         this.plugin.settings.slotHeight = val;
@@ -2777,12 +3966,12 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         }, 150);
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u81EA\u9002\u5E94\u65F6\u95F4\u8F74\uFF08\u5185\u5BB9\u5B9A\u9AD8\uFF09").setDesc("\u884C\u9AD8\u8DDF\u7740\u7B14\u8BB0\u5185\u5BB9\u8D70\uFF1A\u6CA1\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u81EA\u52A8\u538B\u6241\uFF0C\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u6309\u5185\u5BB9\u591A\u5C11\u6491\u5F00\uFF1B\u65F6\u95F4\u5757\u7684\u9AD8\u5EA6\u6052\u7B49\u4E8E\u5B83\u7684\u65F6\u95F4\u8DE8\u5EA6\uFF0C\u6240\u4EE5\u5185\u5BB9\u591A\u7684\u65F6\u6BB5\u5757\u66F4\u9AD8\u3002\u6574\u6761\u8F74\u968F\u5185\u5BB9\u4F38\u7F29\u3002\u5173\u95ED\u5219\u56DE\u5230\u6BCF\u5C0F\u65F6\u7B49\u8DDD\u7684\u4F20\u7EDF\u6837\u5F0F\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.elasticTimeline !== false).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u81EA\u9002\u5E94\u65F6\u95F4\u8F74\uFF08\u5185\u5BB9\u5B9A\u9AD8\uFF09").setDesc("\u884C\u9AD8\u8DDF\u7740\u7B14\u8BB0\u5185\u5BB9\u8D70\uFF1A\u6CA1\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u81EA\u52A8\u538B\u6241\uFF0C\u6709\u8BB0\u5F55\u7684\u5C0F\u65F6\u6309\u5185\u5BB9\u591A\u5C11\u6491\u5F00\uFF1B\u65F6\u95F4\u5757\u7684\u9AD8\u5EA6\u6052\u7B49\u4E8E\u5B83\u7684\u65F6\u95F4\u8DE8\u5EA6\uFF0C\u6240\u4EE5\u5185\u5BB9\u591A\u7684\u65F6\u6BB5\u5757\u66F4\u9AD8\u3002\u6574\u6761\u8F74\u968F\u5185\u5BB9\u4F38\u7F29\u3002\u5173\u95ED\u5219\u56DE\u5230\u6BCF\u5C0F\u65F6\u7B49\u8DDD\u7684\u4F20\u7EDF\u6837\u5F0F\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.elasticTimeline !== false).onChange(async (val) => {
       this.plugin.settings.elasticTimeline = val;
       await this.plugin.saveSettings();
       this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
     }));
-    new import_obsidian.Setting(containerEl).setName("\u5168\u5929\u533A\u9AD8\u5EA6").setDesc("ALL DAY \u884C\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u4E5F\u53EF\u5728\u89C6\u56FE\u91CC\u76F4\u63A5\u62D6\u52A8\u8BE5\u884C\u4E0E\u7F51\u683C\u4E4B\u95F4\u7684\u5206\u9694\u6761\u8C03\u8282\uFF1B\u9ED8\u8BA4 36\uFF0C\u4E0E\u666E\u901A\u6574\u70B9\u884C\u4E00\u81F4\u3002").addSlider((slider) => {
+    new import_obsidian3.Setting(containerEl).setName("\u5168\u5929\u533A\u9AD8\u5EA6").setDesc("ALL DAY \u884C\u7684\u9AD8\u5EA6\uFF08\u50CF\u7D20\uFF09\u3002\u4E5F\u53EF\u5728\u89C6\u56FE\u91CC\u76F4\u63A5\u62D6\u52A8\u8BE5\u884C\u4E0E\u7F51\u683C\u4E4B\u95F4\u7684\u5206\u9694\u6761\u8C03\u8282\uFF1B\u9ED8\u8BA4 36\uFF0C\u4E0E\u666E\u901A\u6574\u70B9\u884C\u4E00\u81F4\u3002").addSlider((slider) => {
       var _a;
       return slider.setLimits(32, 320, 4).setValue(Number((_a = this.plugin.settings.allDayHeight) != null ? _a : 36)).setDynamicTooltip().onChange(async (val) => {
         this.plugin.settings.allDayHeight = val;
@@ -2793,31 +3982,32 @@ var TimenoteSettingTab = class extends import_obsidian.PluginSettingTab {
         }, 150);
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u65F6\u95F4\u7F51\u683C\u5E03\u5C40").setDesc("\u5757\u5E03\u5C40\u6309\u8D77\u6B62\u65F6\u95F4\u7ED8\u5236\u6709\u9AD8\u5EA6\u7684\u8BB0\u5F55\u5757\uFF1B\u7D27\u51D1\u6D41\u6298\u53E0\u7A7A\u95F2\u65F6\u6BB5\u3001\u6309\u884C\u5C55\u793A\u3002\u53EF\u5728\u5DE5\u5177\u680F\u968F\u65F6\u5207\u6362\u3002").addDropdown((drop) => drop.addOption("block", "\u5757\u5E03\u5C40\uFF08\u9ED8\u8BA4\uFF09").addOption("compact", "\u7D27\u51D1\u6D41").setValue(this.plugin.settings.layoutMode || "block").onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u65F6\u95F4\u7F51\u683C\u5E03\u5C40").setDesc("\u5757\u5E03\u5C40\u6309\u8D77\u6B62\u65F6\u95F4\u7ED8\u5236\u6709\u9AD8\u5EA6\u7684\u8BB0\u5F55\u5757\uFF1B\u7D27\u51D1\u6D41\u6298\u53E0\u7A7A\u95F2\u65F6\u6BB5\u3001\u6309\u884C\u5C55\u793A\u3002\u53EF\u5728\u5DE5\u5177\u680F\u968F\u65F6\u5207\u6362\u3002").addDropdown((drop) => drop.addOption("block", "\u5757\u5E03\u5C40\uFF08\u9ED8\u8BA4\uFF09").addOption("compact", "\u7D27\u51D1\u6D41").setValue(this.plugin.settings.layoutMode || "block").onChange(async (val) => {
       this.plugin.settings.layoutMode = val;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u8BB0\u5F55\u9ED8\u8BA4\u7C7B\u578B").setDesc("\u7A7A\u767D\u69FD\u70B9\u51FB / \u62D6\u62FD\u3001\u5DE5\u5177\u680F\u300C+ \u8BB0\u4E00\u6761\u300D\u4E0E\u5FEB\u901F\u8BB0\u5F55\u5F39\u7A97\u9ED8\u8BA4\u521B\u5EFA\u54EA\u79CD\u8BB0\u5F55\u3002\u65F6\u95F4\u5757\u5199\u8D77\u6B62\u65F6\u95F4\uFF1B\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\u3001\u5728\u65E5\u5386\u4E0A\u753B\u6210\u65F6\u523B\u7EBF\u3002\u5DE5\u5177\u680F\u7684\u300C\u65B0\u589E\uFF1A\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u300D\u6309\u94AE\u53EF\u968F\u65F6\u5207\u6362\uFF1B\u5757\u5E03\u5C40\u91CC\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002").addDropdown((drop) => drop.addOption("block", "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09").addOption("point", "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09").setValue(normalizeAddType(this.plugin.settings.defaultAddType)).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u65B0\u5EFA\u8BB0\u5F55\u9ED8\u8BA4\u7C7B\u578B").setDesc("\u7A7A\u767D\u69FD\u70B9\u51FB / \u62D6\u62FD\u3001\u5DE5\u5177\u680F\u300C+ \u8BB0\u4E00\u6761\u300D\u4E0E\u5FEB\u901F\u8BB0\u5F55\u5F39\u7A97\u9ED8\u8BA4\u521B\u5EFA\u54EA\u79CD\u8BB0\u5F55\u3002\u65F6\u95F4\u5757\u5199\u8D77\u6B62\u65F6\u95F4\uFF1B\u65F6\u95F4\u70B9\u53EA\u8BB0\u4E00\u4E2A\u65F6\u523B\u3001\u5728\u65E5\u5386\u4E0A\u753B\u6210\u65F6\u523B\u7EBF\u3002\u5DE5\u5177\u680F\u7684\u300C\u65B0\u589E\uFF1A\u65F6\u95F4\u5757 / \u65F6\u95F4\u70B9\u300D\u6309\u94AE\u53EF\u968F\u65F6\u5207\u6362\uFF1B\u5757\u5E03\u5C40\u91CC\u6309\u4F4F Alt \u70B9\u7A7A\u767D\u69FD\u53EF\u4E34\u65F6\u8BB0\u65F6\u95F4\u70B9\u3002").addDropdown((drop) => drop.addOption("block", "\u65F6\u95F4\u5757\uFF08\u8D77\u6B62\u65F6\u95F4\uFF09").addOption("point", "\u65F6\u95F4\u70B9\uFF08\u53EA\u8BB0\u65F6\u523B\uFF09").setValue(normalizeAddType(this.plugin.settings.defaultAddType)).onChange(async (val) => {
       this.plugin.settings.defaultAddType = normalizeAddType(val);
       await this.plugin.saveSettings();
       this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE).forEach((leaf) => leaf.view.renderView());
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\uFF08\u65F6\u95F4\u70B9\u6A21\u5F0F\u4E0D\u9884\u586B\uFF09\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u65B0\u5EFA\u65F6\u95F4\u5757\u9ED8\u8BA4\u65F6\u957F").setDesc("\u4ECE\u65E5\u5386\u7A7A\u767D\u69FD\u70B9\u51FB\u3001\u6216\u6253\u5F00\u5FEB\u901F\u8BB0\u5F55\u65F6\uFF0C\u9ED8\u8BA4\u9884\u586B\u7684\u7ED3\u675F\u65F6\u95F4\uFF08\u65F6\u95F4\u70B9\u6A21\u5F0F\u4E0D\u9884\u586B\uFF09\u3002").addDropdown((drop) => drop.addOption("30", "30 \u5206\u949F").addOption("60", "1 \u5C0F\u65F6").addOption("90", "1.5 \u5C0F\u65F6").addOption("120", "2 \u5C0F\u65F6").setValue(String(this.plugin.settings.defaultDuration || 60)).onChange(async (val) => {
       this.plugin.settings.defaultDuration = parseInt(val, 10);
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u4E00\u5468\u7B2C\u4E00\u5929").setDesc("\u8BBE\u7F6E\u5468\u89C6\u56FE\u4E2D\u6BCF\u5468\u4EE5\u5468\u4E00\u8FD8\u662F\u5468\u65E5\u5F00\u59CB\u3002").addDropdown((drop) => drop.addOption("1", "\u5468\u4E00").addOption("0", "\u5468\u65E5").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u4E00\u5468\u7B2C\u4E00\u5929").setDesc("\u8BBE\u7F6E\u5468\u89C6\u56FE\u4E2D\u6BCF\u5468\u4EE5\u5468\u4E00\u8FD8\u662F\u5468\u65E5\u5F00\u59CB\u3002").addDropdown((drop) => drop.addOption("1", "\u5468\u4E00").addOption("0", "\u5468\u65E5").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (val) => {
       this.plugin.settings.firstDayOfWeek = parseInt(val, 10);
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u5FEB\u901F\u8BB0\u5F55\u9ED8\u8BA4\u63D2\u5165\u6807\u9898").setDesc("\u5199\u5E26 # \u7684\u6807\u9898\u5373\u53EF\u540C\u65F6\u6307\u5B9A\u5C42\u7EA7\u4E0E\u6807\u9898\uFF0C\u5982\u300C## \u7075\u611F\u95EA\u5FF5\u300D\u6216\u300C### \u968F\u624B\u8BB0\u300D\uFF1B\u4E0D\u5199 # \u65F6\u6309\u4E8C\u7EA7\u6807\u9898\u5904\u7406\u3002\u5DF2\u6709\u65E5\u8BB0\u91CC\u5B58\u5728\u540C\u540D\u6807\u9898\uFF08\u4EFB\u610F\u5C42\u7EA7\uFF09\u65F6\u6CBF\u7528\u90A3\u4E00\u8282\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u6807\u9898\u3002").addText((text) => text.setPlaceholder("## \u7075\u611F\u95EA\u5FF5").setValue(this.plugin.settings.quickAddSection).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u5FEB\u901F\u8BB0\u5F55\u9ED8\u8BA4\u63D2\u5165\u6807\u9898").setDesc("\u5199\u5E26 # \u7684\u6807\u9898\u5373\u53EF\u540C\u65F6\u6307\u5B9A\u5C42\u7EA7\u4E0E\u6807\u9898\uFF0C\u5982\u300C## \u7075\u611F\u95EA\u5FF5\u300D\u6216\u300C### \u968F\u624B\u8BB0\u300D\uFF1B\u4E0D\u5199 # \u65F6\u6309\u4E8C\u7EA7\u6807\u9898\u5904\u7406\u3002\u5DF2\u6709\u65E5\u8BB0\u91CC\u5B58\u5728\u540C\u540D\u6807\u9898\uFF08\u4EFB\u610F\u5C42\u7EA7\uFF09\u65F6\u6CBF\u7528\u90A3\u4E00\u8282\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u6807\u9898\u3002").addText((text) => text.setPlaceholder("## \u7075\u611F\u95EA\u5FF5").setValue(this.plugin.settings.quickAddSection).onChange(async (val) => {
       this.plugin.settings.quickAddSection = val.trim() || DEFAULT_SETTINGS.quickAddSection;
       await this.plugin.saveSettings();
     }));
   }
 };
-var TimenotePlugin = class extends import_obsidian.Plugin {
+var TimenotePlugin = class extends import_obsidian3.Plugin {
   async onload() {
+    prepareHostEnvironment({ momentFactory: window.moment });
     await this.loadSettings();
     this.dailyNoteService = new DailyNoteService(this.app, this.settings);
     this.registerView(
@@ -2838,7 +4028,7 @@ var TimenotePlugin = class extends import_obsidian.Plugin {
       id: "quick-add-time-note",
       name: "\u5FEB\u901F\u8BB0\u4E00\u6761\u5E26\u65F6\u95F4\u7B14\u8BB0 (Quick Add)",
       callback: () => {
-        new QuickAddModal(this.app, this, window.moment().format("YYYY-MM-DD"), () => {
+        new QuickAddModal(this.app, this, moment().format("YYYY-MM-DD"), () => {
           const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE);
           leaves.forEach((leaf) => leaf.view.renderView());
         }).open();
@@ -2854,6 +4044,7 @@ var TimenotePlugin = class extends import_obsidian.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    if (this.dailyNoteService) this.dailyNoteService.clearRemoteCache();
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE);
     leaves.forEach((leaf) => leaf.view.renderView());
   }

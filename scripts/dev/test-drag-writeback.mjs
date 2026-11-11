@@ -5,9 +5,10 @@
 // 用一个假 vault 验证「只改目标行、其余原样保留」这条红线。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadCore, loadSources, loadPluginSources } from "./lib/elastic.mjs";
 
-const src = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const src = loadPluginSources();
+const { DailySource, MemoryFileStore } = await loadSources();
 
 let pass = 0;
 const fails = [];
@@ -16,89 +17,39 @@ const ok = (name, cond, extra) => {
   else fails.push(name + (extra ? `  [${extra}]` : ""));
 };
 
-// ---------- 1) snapSeconds（真实源码 + 真实常量值） ----------
-const snapStart = src.indexOf("function snapSeconds(");
-if (snapStart < 0) throw new Error("main.ts 里找不到 snapSeconds");
-const snapEnd = src.indexOf("\n}\n", snapStart) + 3;
-const snapSrc = src.slice(snapStart, snapEnd);
-
-const constOf = (name, fallback) => {
-  const m = src.match(new RegExp(`const ${name} = ([^;]+);`));
-  return m ? m[1] : fallback;
-};
-const snapConsts = `
-const DRAG_SNAP_MINUTES = ${constOf("DRAG_SNAP_MINUTES", "15")};
-const MIN_BLOCK_SECONDS = ${constOf("MIN_BLOCK_SECONDS", "15 * 60")};
-`;
-const snapSeconds = new Function(`${snapConsts}\n${snapSrc}\nreturn snapSeconds;`)();
-const snapMin = Number(constOf("DRAG_SNAP_MINUTES", "15")) || 15;
+// ---------- 1) snapSeconds（core 的真实实现 + 真实常量值） ----------
+// 平台无关的纯函数直接用 core 的实现（DEC-023）
+const {
+  snapSeconds,
+  blockEdgeHit,
+  DRAG_SNAP_MINUTES
+} = await loadCore();
+const snapMin = Number(DRAG_SNAP_MINUTES) || 15;
 
 // ---------- 2) updateEntryTime（真实源码 + 假 vault） ----------
-const mStart = src.indexOf("  async updateEntryTime(entry, startSec, endSec) {");
-if (mStart < 0) throw new Error("main.ts 里找不到 updateEntryTime");
-let depth = 0;
-let mEnd = -1;
-for (let i = src.indexOf("{", mStart); i < src.length; i++) {
-  if (src[i] === "{") depth++;
-  else if (src[i] === "}") {
-    depth--;
-    if (depth === 0) {
-      mEnd = i + 1;
-      break;
-    }
-  }
-}
-const methodSrc = src.slice(mStart, mEnd);
-const inner = methodSrc
-  .replace(/^\s*async updateEntryTime\(entry, startSec, endSec\) \{/, "")
-  .replace(/\}\s*$/, "");
-
-class FakeTFile {
-  constructor(p, text) {
-    this.path = p;
-    this._text = text;
-  }
-}
-
-const formatSecondsToTime = (sec) => {
-  const c = Math.max(0, Math.min(86400, sec));
-  return (
-    String(Math.floor(c / 3600)).padStart(2, "0") +
-    ":" +
-    String(Math.floor((c % 3600) / 60)).padStart(2, "0")
-  );
-};
-
-const factory = new Function(
-  "TFile",
-  "formatSecondsToTime",
-  `return async function(entry, startSec, endSec){ ${inner} };`
-);
-const runtime = factory(FakeTFile, formatSecondsToTime);
+// updateEntryTime 已随 DEC-026 迁进 sources/daily.ts，成为可 import 的真实现。
+// 不再按源码位置切片 —— 那套做法在方法搬家后必然错位（本轮就是这么炸的）。
+const FILE = "SpiralNotes/2026/Daily/11/2026-11-08.md";
 
 function buildRunner(text) {
-  const file = new FakeTFile("SpiralNotes/2026/Daily/11/2026-11-08.md", text);
-  const app = {
-    vault: {
-      getAbstractFileByPath: (p) => (p === file.path ? file : null),
-      read: async () => file._text,
-      modify: async (_f, t) => {
-        file._text = t;
-      }
-    }
+  const store = new MemoryFileStore({ [FILE]: text });
+  const daily = new DailySource({
+    store,
+    settings: { periodicNotesFolder: "SpiralNotes" }
+  });
+  const file = {
+    path: FILE,
+    // 保留 _text 这个读法，断言不必改写：每次 getter 都读存储里的最新内容
+    get _text() { return store.peek(FILE); }
   };
-  const service = { app, fileCache: new Map([["x", 1]]) };
   return {
     file,
-    run: (entry, s, e) => runtime.call(service, entry, s, e)
+    run: (entry, startSec, endSec) => daily.updateEntryTime(entry, startSec, endSec)
   };
 }
 
-// ---------- 3) 无把手边缘命中区（DEC-014，真实源码） ----------
-const eStart = src.indexOf("function blockEdgeHit(");
-if (eStart < 0) throw new Error("main.ts 里找不到 blockEdgeHit");
-const eEnd = src.indexOf("\n}\n", eStart) + 3;
-const blockEdgeHit = new Function(`${src.slice(eStart, eEnd)}\nreturn blockEdgeHit;`)();
+// ---------- 3) 无把手边缘命中区（DEC-014，用 core 的真实实现） ----------
+// blockEdgeHit 已从上面 await loadCore() 一并取到
 
 // ---------- 4) 断言 ----------
 console.log(`--- snapSeconds（吸附粒度 ${snapMin} 分钟）---`);

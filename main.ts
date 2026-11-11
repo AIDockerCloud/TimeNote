@@ -1,5 +1,9 @@
 // TimeNote 源码：TypeScript 入口，构建产物为根目录 main.js
 // 请修改本文件后执行 npm run build，不要直接编辑 main.js
+//
+// ⚠️ 本文件是 **Obsidian 宿主适配层**（DEC-023）。平台无关的纯逻辑
+// （时间轴数学 / 解析 / 布局 / 配色 / 行首改写）都在 core/ 里，由 Blinko、
+// 思源两个宿主共用 —— 改核心逻辑请改 core/，不要在这里改出一份副本。
 import {
   Plugin,
   ItemView,
@@ -12,6 +16,77 @@ import {
   setIcon,
   normalizePath
 } from "obsidian";
+import {
+  // 时间轴与布局
+  buildTimeScale,
+  estimateBlockNeed,
+  layoutTimeBlockClusters,
+  layoutPointLines,
+  isPointEntry,
+  ELASTIC_EMPTY_RATIO,
+  ELASTIC_CONTENT_RATIO,
+  ELASTIC_MIN_EMPTY_ROW,
+  ELASTIC_MIN_CONTENT_ROW,
+  ELASTIC_ROW_PAD,
+  ELASTIC_MAX_BLOCK,
+  ELASTIC_MAX_VIEWPORT_SCALE,
+  MIN_RENDER_BLOCK_PX,
+  POINT_ROW_H,
+  POINT_LABEL_GAP,
+  POINT_CLUSTER_WINDOW_SEC,
+  POINT_SNAP_MINUTES,
+  // 时间工具
+  formatSecondsToTime,
+  parseTimeToSeconds,
+  addMinutesToTime,
+  snapSeconds,
+  blockEdgeHit,
+  formatDuration,
+  getTagColor,
+  BLOCK_TOP_GUTTER,
+  BLOCK_BOTTOM_GUTTER,
+  BLOCK_RULER_W,
+  DRAG_SNAP_MINUTES,
+  MIN_BLOCK_SECONDS,
+  POINT_CREATE_SNAP_MINUTES,
+  // 配色
+  assignDayTints,
+  resolveTint,
+  tintCssOf,
+  tintEntryKey,
+  hashTintKey,
+  BLOCK_TINTS,
+  // 解析与改写
+  parseLine,
+  normalizeAddType,
+  rewriteEntryLineTime,
+  collectSubItemLines,
+  parseQuickAddSection,
+  sectionHeaderRegex
+} from "./core/index";
+import {
+  // 数据源层（DEC-023）：聚合远程来源
+  AggregateSource,
+  MemosSource,
+  BlinkoSource,
+  isExternalSource,
+  sourceBadge,
+  sourceCssClass,
+  sourceLabel
+} from "./sources/index";
+// 本地日记数据源（DEC-026）：第一个可写 NoteSource。
+// 解析 / 回写逻辑全在 sources/daily.ts，这里只做装配与转发。
+import { DailySource } from "./sources/daily";
+// 本地 Blinko 导出 md（DEC-027）：读写 vault 里的 Blinko/Notes/*.md，
+// 与上面走 HTTP API 的 BlinkoSource 是两回事，只是共用 source="blinko"。
+import { BlinkoLocalSource } from "./sources/blinko-local";
+import { createObsidianFileStore } from "./hosts/obsidian/vault-store";
+import {
+  // 共享浏览器基础设施（DEC-024）：宿主注入的日期实现
+  moment
+} from "./ui/index";
+import { prepareHostEnvironment, mountTimeNote } from "./apps/bootstrap";
+import { createObsidianHostAdapter } from "./hosts/obsidian/adapter";
 
 // 渐进类型化：现有实现大量依赖运行时动态挂载的实例属性。
 // 先以索引签名放行，后续按模块逐步替换为显式字段与具体类型。
@@ -22,6 +97,12 @@ declare global {
 }
 
 const VIEW_TYPE_TIMENOTE = "timenote-calendar-view";
+
+// 远程来源的渲染缓存（DEC-023）。
+// 视图重渲染很频繁，每次重拉 HTTP 既慢又费流量；60 秒足够挡住同一批操作里的
+// 重复请求，又不至于让用户觉得「刚在 memos 写的没出现」。
+const REMOTE_CACHE_TTL = 60 * 1000;
+const REMOTE_CACHE_MAX = 16;
 
 const DEFAULT_SETTINGS = {
   periodicNotesFolder: "SpiralNotes",
@@ -40,52 +121,31 @@ const DEFAULT_SETTINGS = {
   defaultAddType: "block",
   allDayHeight: 36,
   // 自适应时间轴：行高由内容决定，轴高随内容伸缩（DEC-013）
-  elasticTimeline: true
+  elasticTimeline: true,
+
+  // ---- 远程来源聚合（DEC-023）----
+  // 这里走 HTTP API，与上面 includeBlinko 的「读 vault 里的导出 md 文件」是两回事：
+  // 一个是本地文件（可写、可拖拽），一个是远程接口（只读聚合）。
+  // 聚合进来的条目一律只读（entry.readonly = true）。
+  memosEnabled: false,
+  memosBaseUrl: "", // 如 https://memos.example.com
+  memosToken: "", // memos 的 Access Token（Bearer）
+  blinkoApiEnabled: false,
+  blinkoBaseUrl: "", // 如 https://blinko.example.com
+  blinkoApiKey: "" // Blinko 的 API Token（Bearer）
 };
 
 // --- BLOCK_TINT_BEGIN ---
 // 同一天的时间块默认使用互不相同的颜色（DEC-016）。
 // 调色板直接借用 Obsidian 官方扩展色变量：明暗主题自动适配，不必维护两套色值。
 // 「指定」通道：日记行里写 #color/blue 或 #色/蓝；未指定则由本模块按天自动分配。
-const BLOCK_TINTS = ["purple", "blue", "cyan", "green", "yellow", "orange", "red", "pink"];
 // 主题若没定义某个扩展色，也不能让块变成全透明（DEC-015 的教训）
-const TINT_FALLBACKS = {
-  purple: "#7852ee", blue: "#086ddd", cyan: "#00bfbc", green: "#08b94e",
-  yellow: "#e0ac00", orange: "#ec7500", red: "#e93147", pink: "#d53984"
-};
-const TINT_ALIASES = {
-  紫: "purple", 蓝: "blue", 青: "cyan", 绿: "green",
-  黄: "yellow", 橙: "orange", 红: "red", 粉: "pink"
-};
 
-function tintCssOf(index) {
-  const name = BLOCK_TINTS[index];
-  return `var(--color-${name}, ${TINT_FALLBACKS[name]})`;
-}
 
-function hashTintKey(key) {
-  let hash = 0;
-  const s = String(key);
-  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
-  return Math.abs(hash);
-}
 
-function tintEntryKey(entry, dateStr) {
-  return entry.id || `${dateStr}#${entry.lineNum || 0}#${entry.text || ""}`;
-}
 
 // 把 #color/blue、#色/绿、#7c5cff、未知名字都解析成一个确定的 CSS 颜色值。
 // 返回 index 仅用于「占位」：显式指定的调色板色不应再被自动分配的块占用。
-function resolveTint(value) {
-  if (!value) return null;
-  const raw = String(value).trim();
-  const lower = raw.toLowerCase();
-  const idx = BLOCK_TINTS.indexOf(TINT_ALIASES[raw] || lower);
-  if (idx >= 0) return { css: tintCssOf(idx), index: idx };
-  if (/^(#|hsl\(|rgb\(|var\()/i.test(raw)) return { css: raw, index: -1 };
-  const fallback = hashTintKey(raw) % BLOCK_TINTS.length;
-  return { css: tintCssOf(fallback), index: fallback };
-}
 
 /**
  * 为「一天」的所有定时块分配颜色，返回与 items 等长的 CSS 颜色值数组。
@@ -94,155 +154,30 @@ function resolveTint(value) {
  * - 因此只要当天块数不超过调色板容量，颜色必然两两不同，新块自动拿到当天未用色；
  * - 纯函数 + 稳定排序（由调用方保证），重渲染不会跳色。
  */
-function assignDayTints(items) {
-  const used = new Set();
-  const result = new Array(items.length);
-
-  items.forEach((it, i) => {
-    const resolved = resolveTint(it.tint);
-    if (!resolved) return;
-    result[i] = resolved.css;
-    if (resolved.index >= 0) used.add(resolved.index);
-  });
-
-  const n = BLOCK_TINTS.length;
-  items.forEach((it, i) => {
-    if (result[i]) return;
-    const preferred = hashTintKey(it.key) % n;
-    let chosen = -1;
-    for (let k = 0; k < n; k++) {
-      const c = (preferred + k) % n;
-      if (!used.has(c)) { chosen = c; break; }
-    }
-    if (chosen < 0) {
-      // 超过调色板容量时允许复用，但至少不与相邻块同色
-      const prev = i > 0 ? result[i - 1] : null;
-      for (let k = 0; k < n; k++) {
-        const c = (preferred + k) % n;
-        if (tintCssOf(c) !== prev) { chosen = c; break; }
-      }
-      if (chosen < 0) chosen = preferred;
-    }
-    used.add(chosen);
-    result[i] = tintCssOf(chosen);
-  });
-  return result;
-}
 // --- BLOCK_TINT_END ---
 
 // Deterministic tag color generator
-function getTagColor(tag) {
-  let hash = 0;
-  for (let i = 0; i < tag.length; i++) {
-    hash = tag.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const hue = Math.abs(hash % 360);
-  return {
-    bg: `hsla(${hue}, 70%, 50%, 0.15)`,
-    text: `hsl(${hue}, 75%, 45%)`,
-    border: `hsla(${hue}, 70%, 50%, 0.3)`
-  };
-}
 
-function formatSecondsToTime(sec) {
-  const clamped = Math.max(0, Math.min(86400, sec));
-  const h = Math.floor(clamped / 3600);
-  const m = Math.floor((clamped % 3600) / 60);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
 
 // 块布局网格的上下留白（px）：
 // 顶部 —— 必须为 0：任何留白都会在「全天区」和第一个整点之间多出一条空行。
 //          起始时刻的刻度标签改用 .is-first 规则下移贴住轴线，不再靠留白躲避裁切。
 // 底部 —— 结束小时的刻度标签需要半行余量，同时让最后一行尽量贴近底部。
-const BLOCK_TOP_GUTTER = 0;
-const BLOCK_BOTTOM_GUTTER = 14;
 // 时间刻度列宽度：必须与 styles.css 的 --tn-ruler-w 一致。
 // 列宽估算、当前时间线起点都依赖它，改一处就要改另一处。
-const BLOCK_RULER_W = 64;
 
 // 时间吸附：拖拽创建 / 调节范围时按 N 分钟取整，避免出现 14:37 这种脏时间
-const DRAG_SNAP_MINUTES = 15;
-const MIN_BLOCK_SECONDS = 15 * 60;
 // 从空白槽新建「时间点」也按 15 分钟吸附；已有点线的拖动仍是 1 分钟（DEC-018），
 // 两者不能混：一个是凭空定时刻，一个是微调已有记录。
-const POINT_CREATE_SNAP_MINUTES = 15;
 
-function snapSeconds(sec, minutes = DRAG_SNAP_MINUTES) {
-  const step = Math.max(1, minutes) * 60;
-  return Math.round(sec / step) * step;
-}
 
 // 无把手边缘命中区（DEC-014）：按块高的 1/3 取，2–9px 夹取。
 // 任何高度都留得出「上沿 / 中部平移 / 下沿」三段，最矮的 16px 块也不例外。
-function blockEdgeHit(px) {
-  return Math.max(2, Math.min(9, (Number(px) || 0) / 3));
-}
 
-function formatDuration(seconds) {
-  const mins = Math.max(1, Math.round(Math.abs(seconds) / 60));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  if (h > 0 && m > 0) return `${h}h ${m}m`;
-  if (h > 0) return `${h}h`;
-  return `${m}m`;
-}
 
-function parseTimeToSeconds(str) {
-  if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  const sec = m[3] ? parseInt(m[3], 10) : 0;
-  if (h > 24 || (h === 24 && (min > 0 || sec > 0)) || min > 59 || sec > 59) return null;
-  return h * 3600 + min * 60 + sec;
-}
 
-function addMinutesToTime(timeStr, minutes) {
-  const sec = parseTimeToSeconds(timeStr);
-  if (sec === null) return "";
-  const total = Math.min(1440, Math.floor(sec / 60) + minutes);
-  if (total >= 1440) return "24:00";
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-}
 
 // 只在真正重叠的区间内分列；不重叠的区间占满整列（借鉴 TaskNotes lane 策略）
-function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
-  const items = entries.map(e => {
-    const st = Math.max(dayStartSec, e.startSeconds || 0);
-    const rawEnd = e.endSeconds || (e.startSeconds || 0) + 1800;
-    const en = Math.min(dayEndSec, Math.max(st + 60, rawEnd));
-    return { entry: e, s: st, en, lane: 0 };
-  }).sort((a, b) => a.s - b.s || a.en - b.en);
-
-  const clusters = [];
-  let current = null;
-  items.forEach(it => {
-    if (!current || it.s >= current.end) {
-      current = { end: it.en, items: [], laneCount: 1 };
-      clusters.push(current);
-    }
-    current.items.push(it);
-    current.end = Math.max(current.end, it.en);
-  });
-
-  clusters.forEach(c => {
-    const laneEnds = [];
-    c.items.forEach(it => {
-      let lane = laneEnds.findIndex(end => end <= it.s);
-      if (lane === -1) {
-        lane = laneEnds.length;
-        laneEnds.push(it.en);
-      } else {
-        laneEnds[lane] = it.en;
-      }
-      it.lane = lane;
-    });
-    c.laneCount = Math.max(1, laneEnds.length);
-  });
-  return clusters;
-}
 
 // ============================================================================
 // Elastic Time Scale（弹性时间轴）
@@ -260,407 +195,10 @@ function layoutTimeBlockClusters(entries, dayStartSec, dayEndSec) {
 // 关键约束：sec -> y 的映射必须在整条轴上严格单调递增且连续 ——
 // 时间块的 top/height、整点刻度线、当前时间线、拖拽的像素↔时间换算全部依赖它。
 // 一旦出现高度为 0 的行，映射就不再是一一对应，拖拽会直接失效。
-const ELASTIC_EMPTY_RATIO = 0.34;    // 空档行高度 = slotHeight * 该系数
-const ELASTIC_CONTENT_RATIO = 0.9;   // 有条目行的最小高度 = slotHeight * 该系数
-const ELASTIC_MIN_EMPTY_ROW = 16;    // 空档行绝对下限（再矮刻度标签就糊成一团）
-const ELASTIC_MIN_CONTENT_ROW = 40;  // 有条目行绝对下限（够放标题 + 时间两行）
-const ELASTIC_ROW_PAD = 8;           // 行内给块留的上下呼吸
-const ELASTIC_MAX_BLOCK = 240;       // 行高计算时单个条目按内容撑高的上限
-const ELASTIC_MAX_VIEWPORT_SCALE = 1.5; // 内容不足一屏时行距最多放大到 1.5 倍（块高恒等于跨度，不能再放宽）
-const MIN_RENDER_BLOCK_PX = 16;      // 时间块最小渲染高度（低于它的极短记录会轻微溢出一两像素）
-
-// 估算一条记录「按内容」需要多高（不依赖 DOM，纯字数折算）
-// 中文按 2 个宽度单位、西文按 1 个，宽度用列宽近似，行高 15.5px 对 0.775rem
-function estimateBlockNeed(entry, widthPx) {
-  const text = String(entry && entry.text ? entry.text : "");
-  let units = 0;
-  for (const ch of text) {
-    units += /[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? 2 : 1;
-  }
-  const usable = Math.max(40, (Number(widthPx) || 200) - 22);
-  const perLine = Math.max(5, Math.floor(usable / 6.9));
-  // 周 / 3 天视图列很窄，折太多行会把整条轴撑爆；窄列只给 3 行
-  const maxLines = (Number(widthPx) || 200) < 200 ? 3 : 6;
-  const lines = Math.min(maxLines, Math.max(1, Math.ceil(units / perLine)));
-  let h = 10 + lines * 15.5;                                  // 上下内边距 + 标题行
-  h += 15;                                                    // 时间行
-  if (entry && entry.subItems && entry.subItems.length) h += 14;
-  return Math.max(28, Math.min(ELASTIC_MAX_BLOCK, h));
-}
-
-function buildTimeScale(opts) {
-  const { startHour, endHour, slotHeight, top, entries, elastic, viewportHeight, pointNeeds } = opts;
-  const rowCount = Math.max(1, endHour - startHour);
-  const dayStartSec = startHour * 3600;
-  const dayEndSec = endHour * 3600;
-  let heights: number[] = [];
-
-  if (!elastic) {
-    // 等距模式：与原实现完全一致，出问题可一键退回
-    for (let i = 0; i < rowCount; i++) heights.push(slotHeight);
-  } else {
-    const emptyH = Math.max(ELASTIC_MIN_EMPTY_ROW, Math.round(slotHeight * ELASTIC_EMPTY_RATIO));
-    const contentH = Math.max(ELASTIC_MIN_CONTENT_ROW, Math.round(slotHeight * ELASTIC_CONTENT_RATIO));
-
-    // 1) 每行先给基础高度：有条目起点的行才拿到「内容行」的额度
-    const startsAt = new Array(rowCount).fill(0);
-    (entries || []).forEach(e => {
-      const s = Math.max(Number(e.s) || 0, dayStartSec);
-      if (s >= dayEndSec) return;
-      const idx = Math.floor((s - dayStartSec) / 3600);
-      if (idx >= 0 && idx < rowCount) startsAt[idx] += 1;
-    });
-    for (let i = 0; i < rowCount; i++) heights[i] = startsAt[i] > 0 ? contentH : emptyH;
-
-    // 2) 每行按「块真正需要的高度」撑开：把落在该行的块按时间先后塞进纵向槽位，
-    //    同时发生的块左右并排（不同槽）、先后发生的块上下叠放（同一槽），取最满的一个槽。
-    //    这样块永远不会因为被压扁而互相盖住，内容多的行自然变高。
-    const rowItems = Array.from({ length: rowCount }, () => []);
-    (entries || []).forEach(e => {
-      const s = Math.max(Number(e.s) || 0, dayStartSec);
-      const en = Math.min(Number(e.en) || 0, dayEndSec);
-      const needH = Math.min(ELASTIC_MAX_BLOCK, Number(e.needH) || 0);
-      if (en <= s) return;
-      const span = en - s;
-      for (let i = 0; i < rowCount; i++) {
-        const rs = dayStartSec + i * 3600;
-        const ov = Math.min(en, rs + 3600) - Math.max(s, rs);
-        if (ov > 0) rowItems[i].push({ s, en, need: needH * (ov / span) });
-      }
-    });
-
-    for (let i = 0; i < rowCount; i++) {
-      const items = rowItems[i];
-      // 时间点线不画块，但每条要占一行标签（DEC-018）。pointNeeds 由渲染层按小时
-      // 聚合好传进来；多天并排时各天取最大值，不能把 7 天累加成一条巨高的行。
-      const pointNeed = Math.max(0, Number((pointNeeds && pointNeeds[i]) || 0));
-      if (!items.length) {
-        if (pointNeed > 0) heights[i] = Math.max(heights[i], contentH + pointNeed);
-        continue;
-      }
-      // 被记录覆盖到的小时（含跨行长条目的中间段）至少给最小内容行高：
-      // 块高恒等于跨度，中间段若被压成空档高度，长条目会被掐成细细一条
-      if (heights[i] < contentH) heights[i] = contentH;
-      items.sort((a, b) => a.s - b.s || a.en - b.en);
-      const slots: { end: number; sum: number }[] = [];
-      items.forEach(it => {
-        let slot = slots.find(x => x.end <= it.s);
-        if (!slot) { slot = { end: it.en, sum: 0 }; slots.push(slot); }
-        slot.sum += it.need;
-        slot.end = it.en;
-      });
-      // 点线标签与块在同一列里纵向叠加，需求直接加进这一行的总高
-      const need = Math.max(...slots.map(x => x.sum)) + ELASTIC_ROW_PAD + pointNeed;
-      if (need > heights[i]) heights[i] = need;
-    }
-
-    // 3) 内容不足一屏：整体等比放大行距，避免 24 小时全挤在上半屏、下面一大片空白。
-    //    块高恒等于跨度，所以放大倍数必须封顶，否则一条记录的小时会连同块一起被拉虚。
-    const sum = heights.reduce((a, b) => a + b, 0);
-    const vh = Number(viewportHeight) || 0;
-    if (vh > 0 && sum > 0 && sum < vh) {
-      const k = Math.min(ELASTIC_MAX_VIEWPORT_SCALE, vh / sum);
-      heights = heights.map(h => h * k);
-    }
-  }
-
-  const bounds = [0];
-  for (let i = 0; i < rowCount; i++) bounds.push(bounds[i] + heights[i]);
-  const totalHeight = bounds[rowCount];
-
-  const yOf = (sec) => {
-    const rel = Math.max(0, Math.min(rowCount, ((Number(sec) || 0) - dayStartSec) / 3600));
-    const i = Math.min(rowCount - 1, Math.floor(rel));
-    return top + bounds[i] + (rel - i) * heights[i];
-  };
-
-  const secOf = (y) => {
-    const rel = Math.max(0, Math.min(totalHeight, (Number(y) || 0) - top));
-    let lo = 0;
-    let hi = rowCount - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (rel < bounds[mid + 1]) hi = mid;
-      else lo = mid + 1;
-    }
-    const frac = heights[lo] > 0 ? (rel - bounds[lo]) / heights[lo] : 0;
-    return dayStartSec + (lo + frac) * 3600;
-  };
-
-  return {
-    yOf, secOf, top, totalHeight, rowCount, heights, bounds,
-    startHour, endHour, dayStartSec, dayEndSec,
-    elastic: !!elastic
-  };
-}
-
-// ============================================================================
-// Point Lines（时间点记录 — DEC-018）
-// ============================================================================
-// 只有 HH:mm、没有结束时间也没有 30m/1h 时长标签的记录是「时间点」，不是任务块：
-// 块布局里画成一条精确落在 yOf(startSeconds) 的水平线，信息列在线下。
-// 15 分钟内的点记录归为同一簇，簇内按行号向下错开标签，避免文字互相盖住。
-// 线整条上下拖动只改时刻，没有任何边缘命中区，也绝不会把点扩成时间块。
-const POINT_ROW_H = 20;                     // 簇内每条记录占的垂直高度
-const POINT_LABEL_GAP = 3;                  // 线到第一行标签的间距
-const POINT_CLUSTER_WINDOW_SEC = 15 * 60;   // 归簇窗口
-const POINT_SNAP_MINUTES = 1;               // 点线拖动按 1 分钟吸附（块仍是 15 分钟）
-// --- POINT_LINE_BEGIN ---
-// 判定放在模块级纯函数里：开发脚本可以直接从产物里切出来测，不依赖 DOM / Obsidian。
-function isPointEntry(entry) {
-  return !!entry && !!entry.hasTime && !entry.isRange;
-}
-
-// 把一天的点记录排好序、分簇，给出每条的簇号 / 簇内行号 / 簇大小。
-// 稳定排序保证重渲染不跳位；越出可见时间轴的点直接丢掉，避免线画到轴外。
-function layoutPointLines(entries, dayStartSec, dayEndSec) {
-  const list = (entries || [])
-    .filter(e => isPointEntry(e))
-    .map(e => ({ entry: e, sec: Number(e.startSeconds) || 0 }))
-    .filter(p => p.sec >= dayStartSec && p.sec <= dayEndSec)
-    .sort((a, b) =>
-      a.sec - b.sec ||
-      (a.entry.lineNum || 0) - (b.entry.lineNum || 0) ||
-      String(a.entry.text || "").localeCompare(String(b.entry.text || ""))
-    );
-
-  const clusters = [];
-  list.forEach(p => {
-    const last = clusters[clusters.length - 1];
-    if (!last || p.sec - last.sec >= POINT_CLUSTER_WINDOW_SEC) {
-      clusters.push({ sec: p.sec, items: [] });
-    }
-    clusters[clusters.length - 1].items.push(p);
-  });
-
-  const out = [];
-  clusters.forEach((c, ci) => {
-    c.items.forEach((p, ri) => {
-      out.push({
-        entry: p.entry,
-        sec: p.sec,
-        clusterIndex: ci,
-        rowInCluster: ri,
-        clusterSize: c.items.length
-      });
-    });
-  });
-  return out;
-}
-// --- POINT_LINE_END ---
-
-// --- CROSS_DAY_BEGIN ---
-// 跨天拖动（DEC-022）：把一条定时记录从 A 天日记搬到 B 天日记。
-// 判定 / 行首改写 / 子项收集都放在模块级纯函数里，方便开发脚本抽真实实现验证
-// 「只搬目标行、绝不误删用户内容」这条红线。
-function normalizeAddType(raw) {
-  return String(raw || "").toLowerCase() === "point" ? "point" : "block";
-}
-
-// 按记录类型改写行首时间前缀：块写 HH:mm-HH:mm，点只写一个 HH:mm。
-// 不认识的行返回 null —— 调用方必须据此放弃整个移动，不能删任何东西。
-function rewriteEntryLineTime(line, startSec, endSec, isPoint) {
-  const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-  const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
-  if (isPoint) {
-    // 点永远不能被悄悄扩成块：范围行直接拒绝，单时间行只换那一刻
-    if (rangeRe.test(line) || !singleRe.test(line)) return null;
-    return line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp || ""}`);
-  }
-  const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
-  let out;
-  if (rangeRe.test(line)) {
-    out = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp || ""}`);
-  } else if (singleRe.test(line)) {
-    out = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp || ""}`);
-  } else {
-    return null;
-  }
-  // 行尾时长标签（30m / 1h）与新范围冲突，去掉那一个，其余正文一字不动
-  return out.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, '');
-}
-
-// 目标行后面连续的缩进子项属于这条记录，必须一起搬走；否则它们会留在
-// 原日记变成没有父项的孤儿行（parseDailyFile 会直接忽略）。
-function collectSubItemLines(lines, idx) {
-  const out = [];
-  for (let i = idx + 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (!l.trim() || !/^(?:\t+| {2,})/.test(l)) break;
-    out.push(l);
-  }
-  return out;
-}
-// --- CROSS_DAY_END ---
-
-// --- SECTION_HEADING_BEGIN ---
-// 快速记录默认插入标题允许自带层级：设置里写 "## 灵感闪念" / "### 随手记"
-// 就用二级 / 三级标题；写纯文本（旧 data.json 里的值）时按二级标题兼容。
-// 两个纯函数供下面各处与 scripts/dev/test-quick-add-section.mjs 共用。
-function parseQuickAddSection(raw) {
-  const FALLBACK_TITLE = "灵感闪念";
-  const text = String(raw == null ? "" : raw).trim();
-  let level = 2;
-  let title = text;
-  const m = /^(#+)\s*(.*)$/.exec(text);
-  if (m) {
-    level = Math.min(m[1].length, 6); // Markdown 标题最多 6 级
-    title = (m[2] || "").trim();
-  }
-  // ATX 标题也允许行尾闭合井号，如 "## 灵感闪念 ##"
-  title = title.replace(/\s+#+\s*$/, "").trim() || FALLBACK_TITLE;
-  return { level, title, heading: `${"#".repeat(level)} ${title}` };
-}
-
-function sectionHeaderRegex(title) {
-  const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
-}
-// --- SECTION_HEADING_END ---
-
+//
 // ============================================================================
 // Parser & Data Engine
 // ============================================================================
-
-function parseLine(line, lineNum, dateStr, filePath, inMemoSection = false) {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("---") || trimmed.startsWith("```")) {
-    return null;
-  }
-
-  // Check if task checkbox
-  const taskMatch = line.match(/^(\s*[-*+]?\s*)\[([ xX\-\/])\]\s*(.*)$/);
-  const isTask = !!taskMatch;
-  const isCompleted = isTask && (taskMatch[2] === 'x' || taskMatch[2] === 'X');
-
-  // Extract core content after bullet/checkbox
-  let content = isTask ? taskMatch[3] : line.replace(/^\s*[-*+]?\s*/, '').trim();
-
-  // Time range regex: e.g. 14:00:00-15:30:00, 14:00-15:30, 09:30 ~ 11:00, 14:00至15:00
-  const rangeRegex = /(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*[-~至到/]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s|$)/;
-  // Single time regex: e.g. 14:00:31, 14:00, 09:15
-  const singleRegex = /(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s|$)/;
-
-  let hasTime = false;
-  let startMinutes = 0;
-  let endMinutes = 0;
-  let startSeconds = 0;
-  let endSeconds = 0;
-  let timeStr = "";
-  let explicitRange = false;
-
-  const rangeMatch = content.match(rangeRegex);
-  if (rangeMatch) {
-    hasTime = true;
-    explicitRange = true;
-    const sh = parseInt(rangeMatch[1], 10);
-    const sm = parseInt(rangeMatch[2], 10);
-    const ss1 = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : 0;
-    const eh = parseInt(rangeMatch[4], 10);
-    const em = parseInt(rangeMatch[5], 10);
-    const ss2 = rangeMatch[6] ? parseInt(rangeMatch[6], 10) : 0;
-
-    startSeconds = sh * 3600 + sm * 60 + ss1;
-    endSeconds = eh * 3600 + em * 60 + ss2;
-    if (endSeconds <= startSeconds) {
-      // 一期不支持跨零点：兜底为 30 分钟块，避免负高度
-      endSeconds = Math.min(86400, startSeconds + 1800);
-    }
-    startMinutes = Math.floor(startSeconds / 60);
-    endMinutes = Math.floor(endSeconds / 60);
-
-    const hasSeconds = !!(rangeMatch[3] || rangeMatch[6]);
-    const startPart = hasSeconds
-      ? `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}:${String(ss1).padStart(2, '0')}`
-      : `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`;
-    const endPart = hasSeconds
-      ? `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}:${String(ss2).padStart(2, '0')}`
-      : `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}`;
-
-    timeStr = `${startPart} - ${endPart}`;
-    content = content.replace(rangeMatch[0], ' ').trim();
-  } else {
-    const singleMatch = content.match(singleRegex);
-    if (singleMatch) {
-      hasTime = true;
-      const sh = parseInt(singleMatch[1], 10);
-      const sm = parseInt(singleMatch[2], 10);
-      const ss = singleMatch[3] ? parseInt(singleMatch[3], 10) : 0;
-
-      startSeconds = sh * 3600 + sm * 60 + ss;
-      startMinutes = Math.floor(startSeconds / 60);
-
-      // Check duration tag e.g. 30m, 1h, 45min
-      const durationMatch = content.match(/(?:^|\s)(\d+)(m|min|h|小时|分钟)(?:\s|$)/i);
-      let durationSeconds = 1800; // default 30 min duration
-      if (durationMatch) {
-        explicitRange = true;
-        const val = parseInt(durationMatch[1], 10);
-        const unit = durationMatch[2].toLowerCase();
-        durationSeconds = (unit.startsWith('h') || unit === '小时') ? val * 3600 : val * 60;
-        content = content.replace(durationMatch[0], ' ').trim();
-      }
-      endSeconds = Math.min(86400, startSeconds + durationSeconds);
-      endMinutes = Math.floor(endSeconds / 60);
-
-      if (singleMatch[3]) {
-        timeStr = `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-      } else {
-        timeStr = `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`;
-      }
-      content = content.replace(singleMatch[0], ' ').trim();
-    }
-  }
-
-  // Remove block reference ^1770058242
-  content = content.replace(/\s*\^[a-zA-Z0-9_-]+\s*$/, '').trim();
-  // Remove task completion date ✅ 2026-02-24
-  content = content.replace(/✅\s*\d{4}-\d{2}-\d{2}/, '').trim();
-
-  // Extract tags。#color/blue、#色/蓝（或 #color/#7c5cff）是显式配色指令（DEC-016），
-  // 先摘出来，不算普通标签 —— 这样它不会出现在块内 meta、hover 标签列表里，却能决定块的颜色。
-  const tags = [];
-  let tint = null;
-  content = content.replace(/#(?:color|色)\/(#?[\w\u4e00-\u9fa5-]+)/gi, (_, v) => {
-    tint = v;
-    return "";
-  }).trim();
-  content = content.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (_, t) => {
-    tags.push(t);
-    return "";
-  }).trim();
-
-  // If no time, only parse if it's a task, explicit list bullet, OR inside a designated memo section
-  if (!hasTime) {
-    if (!isTask && !line.trim().startsWith('-') && !line.trim().startsWith('*') && !line.trim().startsWith('+') && !inMemoSection) {
-      return null;
-    }
-  }
-
-  const displayText = content || (tags.length > 0 ? tags.map(t => '#' + t).join(' ') : (isTask ? "待办事项" : "随手记录"));
-
-  return {
-    id: `${filePath}#L${lineNum}`,
-    filePath,
-    dateStr,
-    lineNum,
-    rawLine: line,
-    isTask,
-    isCompleted,
-    hasTime,
-    isRange: explicitRange,
-    startSeconds,
-    endSeconds,
-    startMinutes,
-    endMinutes,
-    timeStr,
-    text: displayText,
-    tags,
-    tint,
-    subItems: [],
-    source: "daily"
-  };
-}
 
 class DailyNoteService {
   // TODO(types): 渐进替换为显式字段声明
@@ -668,376 +206,156 @@ class DailyNoteService {
   constructor(app, settings) {
     this.app = app;
     this.settings = settings;
-    this.fileCache = new Map(); // filePath -> { mtime, entries }
-    this.dailyNoteIndex = new Map(); // dateStr -> TFile
-    this.indexBuiltTime = 0;
+    // 本地日记的解析 / 索引 / 回写已迁到 sources/daily.ts（DEC-026），
+    // 本地 Blinko 导出 md 的解析迁到 sources/blinko-local.ts（DEC-027）。
+    // 这里只保留两件宿主侧的事：装配文件存储、远程来源聚合编排。
+    this.store = createObsidianFileStore(app);
+    this.daily = new DailySource({ store: this.store, settings });
+    this.blinkoLocal = new BlinkoLocalSource({ store: this.store });
+    // 上一轮远程来源的错误（id -> message）。设置页「测试连接」与排障用，
+    // 不在打开日历时弹 Notice —— 那太吵了（DEC-023）。
+    this.lastRemoteErrors = {};
+    // 远程条目的区间缓存："2026-11-10..2026-11-16" -> { at, entries }
+    this.remoteCache = new Map();
   }
 
-  buildIndexIfNeeded() {
-    const now = Date.now();
-    if (this.dailyNoteIndex.size > 0 && (now - this.indexBuiltTime < 5000)) {
-      return;
-    }
-    this.dailyNoteIndex.clear();
-    const files = this.app.vault.getMarkdownFiles();
-    const folder = (this.settings.periodicNotesFolder || "SpiralNotes").toLowerCase();
+  // ---- 本地日记：全部转发到 DailySource ----
+  // 保留这两个 Map 的 getter，是因为 HostAdapter 与设置页仍在调
+  // `service.fileCache.clear()` / `service.dailyNoteIndex.clear()`。
+  // 改成方法会让改动扩散到 adapter，而这些调用语义本来就只是「清缓存」。
+  get fileCache() { return this.daily.fileCache; }
+  get dailyNoteIndex() { return this.daily.index; }
+  /** 本地 Blinko 导出的解析缓存（DEC-027）。原实现与日记共用一个 Map，
+   *  迁成独立来源后必须单独清 —— 否则「刷新」按钮清不掉它 */
+  get blinkoCache() { return this.blinkoLocal.fileCache; }
 
-    for (const f of files) {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(f.basename)) {
-        const inFolder = f.path.toLowerCase().includes(folder);
-        if (inFolder || !this.dailyNoteIndex.has(f.basename)) {
-          this.dailyNoteIndex.set(f.basename, f);
-        }
-      }
-    }
-    this.indexBuiltTime = now;
+  buildIndexIfNeeded() { return this.daily.buildIndexIfNeeded(); }
+  findDailyNoteFile(dateStr) { return this.daily.findDailyNoteFile(dateStr); }
+  ensureDailyNote(dateStr) { return this.daily.ensureDailyNote(dateStr); }
+  clearIndex() { return this.daily.clearIndex(); }
+  toggleTask(entry) { return this.daily.toggleTask(entry); }
+  updateEntryTime(entry, startSec, endSec) { return this.daily.updateEntryTime(entry, startSec, endSec); }
+  updateEntryPointTime(entry, startSec) { return this.daily.updateEntryPointTime(entry, startSec); }
+  moveEntryToDate(entry, targetDate, startSec, endSec) {
+    return this.daily.moveEntryToDate(entry, targetDate, startSec, endSec);
   }
-
-  // Find daily note file for a specific date (YYYY-MM-DD)
-  findDailyNoteFile(dateStr) {
-    this.buildIndexIfNeeded();
-    return this.dailyNoteIndex.get(dateStr) || null;
-  }
-
-  // Parse a single daily note file (only top-level items, skip/attach sub-items)
-  async parseDailyFile(file, dateStr) {
-    const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.stat.mtime) {
-      return cached.entries;
-    }
-
-    const content = await this.app.vault.read(file);
-    const lines = content.split('\n');
-    const entries = [];
-    let currentParent = null;
-    let currentSection = "";
-    // 自定义标题也要能被识别为「随手记区」；旧的关键词启发式保留，兼容已有日记
-    const memoTitle = parseQuickAddSection(this.settings.quickAddSection).title;
-
-    for (let i = 0; i < lines.length; i++) {
-      const rawLine = lines[i];
-      const trimmed = rawLine.trim();
-
-      // Skip codeblocks, frontmatter delimiters, obsidian comments
-      if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("```") || trimmed.startsWith("%%")) {
-        currentParent = null;
-        continue;
-      }
-
-      // Track section headings (e.g. ## 灵感闪念, ## 任务计划)
-      if (trimmed.startsWith("#")) {
-        currentSection = trimmed.replace(/^#+\s*/, '').replace(/\s+#+\s*$/, '').trim();
-        currentParent = null;
-        continue;
-      }
-
-      // Check if this line is an indented sub-item (starts with tab or 2+ spaces before list symbol)
-      const isSubItem = /^(?:\t+| {2,})/.test(rawLine);
-
-      if (isSubItem) {
-        // Child item: append to parent's subItems for context, do NOT create standalone entry
-        if (currentParent) {
-          const cleanSub = trimmed.replace(/^[-*+]\s*(?:\[[ xX\-\/]\]\s*)?/, '').trim();
-          if (cleanSub) {
-            currentParent.subItems.push(cleanSub);
-          }
-        }
-        continue;
-      }
-
-      // Top-level main item
-      const inMemoSection = currentSection === memoTitle ||
-        currentSection.includes("灵感") || currentSection.includes("闪念") ||
-        currentSection.includes("Inspirations") || currentSection.includes("Memos");
-      const entry = parseLine(rawLine, i + 1, dateStr, file.path, inMemoSection);
-      if (entry) {
-        entries.push(entry);
-        currentParent = entry;
-      } else {
-        currentParent = null;
-      }
-    }
-
-    this.fileCache.set(file.path, { mtime: file.stat.mtime, entries });
-    return entries;
-  }
-
-  // Parse Blinko note
-  async parseBlinkoFile(file) {
-    const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.stat.mtime) {
-      return cached.entry;
-    }
-
-    const content = await this.app.vault.read(file);
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fmMatch) return null;
-
-    const yaml = fmMatch[1];
-    const dateMatch = yaml.match(/date:\s*(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (!dateMatch) return null;
-
-    const dateStr = dateMatch[1];
-    const sh = parseInt(dateMatch[2], 10);
-    const sm = parseInt(dateMatch[3], 10);
-    const ss = dateMatch[4] ? parseInt(dateMatch[4], 10) : 0;
-    const startSeconds = sh * 3600 + sm * 60 + ss;
-    const endSeconds = Math.min(86400, startSeconds + 1800);
-    const startMinutes = Math.floor(startSeconds / 60);
-    const endMinutes = Math.floor(endSeconds / 60);
-    const timeStr = dateMatch[4]
-      ? `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
-      : `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`;
-
-    // Extract tags from yaml or body
-    const tags = [];
-    const tagMatch = yaml.match(/tags:\s*\[(.*?)\]/);
-    if (tagMatch && tagMatch[1]) {
-      tagMatch[1].split(',').forEach(t => {
-        const clean = t.trim().replace(/^['"]|['"]$/g, '');
-        if (clean) tags.push(clean);
-      });
-    }
-
-    // Clean body
-    let body = content.replace(/^---\n[\s\S]*?\n---/, '').trim();
-    body = body.replace(/#([\w\u4e00-\u9fa5\/-]+)/g, (_, t) => {
-      if (!tags.includes(t)) tags.push(t);
-      return "";
-    }).trim();
-
-    const entry = {
-      id: `${file.path}#blinko`,
-      filePath: file.path,
-      dateStr,
-      lineNum: 1,
-      rawLine: body,
-      isTask: false,
-      isCompleted: false,
-      hasTime: true,
-      startSeconds,
-      endSeconds,
-      startMinutes,
-      endMinutes,
-      timeStr,
-      text: body.slice(0, 80) || (tags.length > 0 ? tags.map(t => '#' + t).join(' ') : "Blinko 闪念"),
-      tags,
-      subItems: [],
-      source: "blinko"
-    };
-
-    this.fileCache.set(file.path, { mtime: file.stat.mtime, entry });
-    return entry;
+  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
+    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines);
   }
 
   // Scan entries for a date range [startMoment, endMoment]
+  // 返回 Map<dateStr, NoteEntry[]>，**每一天都建桶**（哪怕是空数组）——
+  // Blinko / 远程合并时只在桶存在时 push，空桶是「这一天可见」的标记。
   async getEntriesForRange(startMoment, endMoment) {
-    this.buildIndexIfNeeded();
-    const results = new Map(); // dateStr -> TimeEntry[]
+    const results = new Map(); // dateStr -> NoteEntry[]
+    const days = [];
     const curr = startMoment.clone();
-
     while (curr.isSameOrBefore(endMoment, 'day')) {
-      const dateStr = curr.format('YYYY-MM-DD');
-      const file = this.findDailyNoteFile(dateStr);
-      let dayEntries = [];
-
-      if (file) {
-        dayEntries = await this.parseDailyFile(file, dateStr);
-      }
-      results.set(dateStr, [...dayEntries]);
+      days.push(curr.format('YYYY-MM-DD'));
       curr.add(1, 'day');
     }
+    for (const d of days) results.set(d, []);
 
-    // Optional Blinko notes integration
-    if (this.settings.includeBlinko) {
-      const allFiles = this.app.vault.getMarkdownFiles();
-      const blinkoFiles = allFiles.filter(f => f.path.startsWith('Blinko/Notes') || f.path.includes('Blinko'));
-
-      for (const bf of blinkoFiles) {
-        const bEntry = await this.parseBlinkoFile(bf);
-        if (bEntry && results.has(bEntry.dateStr)) {
-          results.get(bEntry.dateStr).push(bEntry);
-        }
+    // 本地日记：走 NoteSource 契约（DEC-026），这里不再直接读 vault
+    if (days.length) {
+      const localEntries = await this.daily.listEntries(days[0], days[days.length - 1]);
+      for (const entry of localEntries) {
+        const bucket = results.get(entry.dateStr);
+        if (bucket) bucket.push(entry);
       }
     }
+
+    // 本地 Blinko 导出 md（DEC-027）：同样走 NoteSource 契约，
+    // 不再直接摸 vault.getMarkdownFiles()。
+    // 注意 includeBlinko 是「读 vault 里的导出文件」，与 blinkoApiEnabled
+    // 的 HTTP 聚合是两套开关，别混。
+    if (this.settings.includeBlinko && days.length) {
+      const blinkoEntries = await this.blinkoLocal.listEntries(days[0], days[days.length - 1]);
+      this.mergeIntoBuckets(results, blinkoEntries);
+    }
+
+    // 远程来源聚合（DEC-023）：memos / Blinko API。
+    // 单个来源失败只记错误、不清空日历 —— 这是聚合模式的硬要求。
+    await this.collectRemoteEntries(results, startMoment, endMoment);
 
     return results;
   }
 
-  // Toggle task status [ ] <-> [x] in source note
-  async toggleTask(entry) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof TFile)) return;
+  /**
+   * 按当前设置装配远程来源。
+   *
+   * 每次调用都新建实例：设置改了立即生效，不必重启插件或重建服务。
+   * 只在「启用 + 地址 + 令牌」三项齐全时才挂载，避免设置页填一半就开始
+   * 发无效请求（那会在控制台刷一堆 401）。
+   */
+  buildRemoteSources() {
+    const s = this.settings || {};
+    const sources = [];
 
-    const content = await this.app.vault.read(file);
-    const lines = content.split('\n');
-    const targetIdx = entry.lineNum - 1;
+    if (s.memosEnabled && s.memosBaseUrl && s.memosToken) {
+      sources.push(new MemosSource({ baseUrl: s.memosBaseUrl, token: s.memosToken }));
+    }
+    if (s.blinkoApiEnabled && s.blinkoBaseUrl && s.blinkoApiKey) {
+      sources.push(new BlinkoSource({ baseUrl: s.blinkoBaseUrl, apiKey: s.blinkoApiKey }));
+    }
+    return sources;
+  }
 
-    if (targetIdx >= 0 && targetIdx < lines.length) {
-      const line = lines[targetIdx];
-      let newLine = line;
-      if (line.includes('[ ]')) {
-        newLine = line.replace('[ ]', '[x]');
-        entry.isCompleted = true;
-      } else if (line.includes('[x]') || line.includes('[X]')) {
-        newLine = line.replace(/\[[xX]\]/, '[ ]');
-        entry.isCompleted = false;
-      }
-      lines[targetIdx] = newLine;
-      await this.app.vault.modify(file, lines.join('\n'));
-      this.fileCache.delete(file.path);
+  /**
+   * 拉取远程来源并合并进 results（dateStr → 条目数组）。
+   *
+   * 区间外的条目直接丢弃：memos / Blinko 的接口是按时间过滤的，但服务端
+   * 支持的过滤精度不一（有的按天、有的按秒），本地再挡一道才不会越界。
+   */
+  async collectRemoteEntries(results, startMoment, endMoment) {
+    const sources = this.buildRemoteSources();
+    if (!sources.length) return;
+
+    const startDate = startMoment.format("YYYY-MM-DD");
+    const endDate = endMoment.format("YYYY-MM-DD");
+
+    // 渲染很频繁（切视图、改设置、时钟/文件变更都会触发），每次重拉远程接口
+    // 既慢又费流量 —— 这台机器可能是走手机热点的。用 60 秒的区间缓存兜住，
+    // 用户感觉不到延迟，也不会把配额浪费在重复请求上。
+    const cacheKey = `${startDate}..${endDate}`;
+    const cached = this.remoteCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < REMOTE_CACHE_TTL) {
+      this.mergeIntoBuckets(results, cached.entries);
+      return;
+    }
+
+    const agg = new AggregateSource(sources);
+    const { entries, errors } = await agg.listEntries(startDate, endDate);
+
+    // 失败信息不弹 Notice 打扰用户（打开日历就弹太吵），只落到实例上供设置页查询
+    this.lastRemoteErrors = errors;
+    this.cacheRemoteEntries(cacheKey, entries);
+    this.mergeIntoBuckets(results, entries);
+  }
+
+  /**
+   * 把条目按 dateStr 装进可见日期桶。
+   * 区间外的条目没有桶，直接丢弃 —— 服务端过滤精度不一，本地再挡一道。
+   */
+  mergeIntoBuckets(results, entries) {
+    for (const entry of entries) {
+      const bucket = results.get(entry.dateStr);
+      if (bucket) bucket.push(entry);
     }
   }
 
-  // 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留
-  async updateEntryTime(entry, startSec, endSec) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof TFile)) return false;
-
-    const content = await this.app.vault.read(file);
-    const lines = content.split('\n');
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-
-    const line = lines[idx];
-    const rangeStr = `${formatSecondsToTime(startSec)}-${formatSecondsToTime(endSec)}`;
-    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+)/;
-
-    let newLine;
-    if (rangeRe.test(line)) {
-      newLine = line.replace(rangeRe, (_m, pre, _s, _r, sp) => `${pre}${rangeStr}${sp}`);
-    } else if (singleRe.test(line)) {
-      newLine = line.replace(singleRe, (_m, pre, _t, sp) => `${pre}${rangeStr}${sp}`);
-    } else {
-      return false;
+  /** 写缓存并做容量上限：只留最近若干个区间，别让 Map 无限长 */
+  cacheRemoteEntries(key, entries) {
+    this.remoteCache.set(key, { at: Date.now(), entries });
+    while (this.remoteCache.size > REMOTE_CACHE_MAX) {
+      const oldest = this.remoteCache.keys().next().value;
+      this.remoteCache.delete(oldest);
     }
-
-    // 旧的时长标签（30m / 1h）与新范围冲突，去掉行尾那一个
-    newLine = newLine.replace(/\s+\d+(?:\.\d+)?\s*(?:m|min|h|小时|分钟)(?=\s*$)/i, '');
-    if (newLine === line) return false;
-
-    lines[idx] = newLine;
-    await this.app.vault.modify(file, lines.join('\n'));
-    this.fileCache.delete(file.path);
-    return true;
   }
 
-  // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
-  // 与 updateEntryTime 分开是为了让「点」永远不会被悄悄扩成「块」；
-  // 范围行、无时间行一律拒绝，缩进 / 复选框 / 列表符 / 标签 / 行尾文字全部原样保留。
-  async updateEntryPointTime(entry, startSec) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof TFile)) return false;
-
-    const content = await this.app.vault.read(file);
-    const lines = content.split('\n');
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-
-    const line = lines[idx];
-    const rangeRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s*[-~至到/]\s*\d{1,2}:\d{2}(?::\d{2})?)/;
-    const singleRe = /^(\s*[-*+]\s*(?:\[[ xX]\]\s*)?)(\d{1,2}:\d{2}(?::\d{2})?)(\s+|$)/;
-    if (rangeRe.test(line) || !singleRe.test(line)) return false;
-
-    const newLine = line.replace(
-      singleRe,
-      (_m, pre, _t, sp) => `${pre}${formatSecondsToTime(startSec)}${sp}`
-    );
-    if (newLine === line) return false;
-
-    lines[idx] = newLine;
-    await this.app.vault.modify(file, lines.join('\n'));
-    this.fileCache.delete(file.path);
-    return true;
-  }
-
-  // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
-  // 只搬「一条记录」，不重写两篇笔记的其它内容；行号对不上时宁可拒绝，绝不误删。
-  async moveEntryToDate(entry, targetDate, startSec, endSec) {
-    if (!entry || !targetDate || entry.dateStr === targetDate) return false;
-    // Blinko 等外部来源没有可安全删除的日记行，只读
-    if (entry.source && entry.source !== "daily") return false;
-
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof TFile)) return false;
-
-    const content = await this.app.vault.read(file);
-    const lines = content.split('\n');
-    const idx = entry.lineNum - 1;
-    if (idx < 0 || idx >= lines.length) return false;
-    // 解析之后日记可能被外部改过：行号漂移时整笔操作作废，防止删掉别人的内容
-    if (lines[idx] !== entry.rawLine) return false;
-
-    const movedLine = rewriteEntryLineTime(lines[idx], startSec, endSec, isPointEntry(entry));
-    if (movedLine === null) return false;
-    const moving = [movedLine, ...collectSubItemLines(lines, idx)];
-
-    // 先写目标文件再删源行：中途失败最多留下一份重复，绝不会把记录弄丢。
-    // 复用 addEntry 的建目录 / 建日记 / 找标题下插入逻辑，避免第二套路径约定。
-    // 目标文件写失败时直接放弃，源文件一个字都不动。
-    try {
-      await this.addEntry(targetDate, "", "", false, [], "", moving);
-    } catch (err) {
-      return false;
-    }
-
-    const remaining = lines.slice();
-    remaining.splice(idx, moving.length);
-    await this.app.vault.modify(file, remaining.join('\n'));
-    this.fileCache.delete(file.path);
-    return true;
-  }
-
-  // Append new entry to daily note
-  // rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
-  // 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
-  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
-    let file = this.findDailyNoteFile(dateStr);
-    const tagPart = tags.length > 0 ? ' ' + tags.map(t => '#' + t).join(' ') : '';
-    const linePrefix = isTask ? '- [ ] ' : '- ';
-    const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
-    const timePrefix = rangeStr ? `${rangeStr} ` : '';
-    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
-    const newLine = (rawLines && rawLines.length) ? rawLines.join('\n') : generatedLine;
-    // 层级与标题都来自设置，不再写死 "## "
-    const section = parseQuickAddSection(this.settings.quickAddSection);
-    const headerRe = sectionHeaderRegex(section.title);
-
-    if (!file) {
-      const m = window.moment(dateStr);
-      const year = m.format('YYYY');
-      const month = m.format('MM');
-      const targetFolder = `${this.settings.periodicNotesFolder}/${year}/Daily/${month}`;
-
-      const parts = targetFolder.split('/');
-      let currPath = "";
-      for (const p of parts) {
-        currPath = currPath ? `${currPath}/${p}` : p;
-        if (!await this.app.vault.adapter.exists(currPath)) {
-          await this.app.vault.createFolder(currPath);
-        }
-      }
-
-      const newPath = `${targetFolder}/${dateStr}.md`;
-      const initialText = `# ${dateStr}\n\n${section.heading}\n${newLine}\n`;
-      file = await this.app.vault.create(newPath, initialText);
-      this.dailyNoteIndex.set(dateStr, file);
-    } else {
-      let fileText = await this.app.vault.read(file);
-      const lines = fileText.split('\n');
-      // 已有同名标题（任意层级）就插在它下面、不新建重复标题；
-      // 完全没有才按配置层级在文末追加一节。逐行精确匹配，避免正文里的同名文字误命中。
-      const headerIdx = lines.findIndex(l => headerRe.test(l));
-      if (headerIdx >= 0) {
-        lines.splice(headerIdx + 1, 0, newLine);
-        fileText = lines.join('\n');
-      } else {
-        fileText = fileText.trimEnd() + `\n\n${section.heading}\n${newLine}\n`;
-      }
-      await this.app.vault.modify(file, fileText);
-    }
-    this.fileCache.delete(file.path);
+  /** 设置变更 / 手动刷新时调用：下次渲染一定重新拉取 */
+  clearRemoteCache() {
+    this.remoteCache.clear();
   }
 }
 
@@ -1070,6 +388,8 @@ class SubItemsModal extends Modal {
 
     const btnRow = contentEl.createEl("div", { style: "display: flex; justify-content: flex-end; margin-top: 16px; gap: 8px;" });
     const jumpBtn = btnRow.createEl("button", { text: "打开原笔记定位", cls: "mod-cta" });
+    // 远程聚合来源没有本地笔记可定位：藏掉按钮，别让用户点了没反应（DEC-023）
+    jumpBtn.style.display = this.entry.readonly ? "none" : "";
     jumpBtn.onclick = async () => {
       this.close();
       const file = this.app.vault.getAbstractFileByPath(this.entry.filePath);
@@ -1089,2057 +409,51 @@ class SubItemsModal extends Modal {
 // Calendar View Component
 // ============================================================================
 
+// ============================================================================
+// Calendar View Component — Obsidian 宿主薄壳（DEC-025）
+// ============================================================================
+// 全部渲染逻辑在 ui/view.ts 的 TimenoteRenderer 里，由三个宿主共用。
+// 这里只做两件事：把 ItemView 生命周期转发过去，以及装配 HostAdapter。
 class TimenoteView extends ItemView {
   // TODO(types): 渐进替换为显式字段声明
   [key: string]: any;
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
-    this.currentDate = window.moment();
-    this.currentViewMode = plugin.settings.defaultView || "week";
-    this.currentFilterType = "all"; // 'all', 'task', 'memo', 'blinko'
-    this.searchQuery = "";
-    this.entriesMap = new Map();
-    this.currentTooltip = null;
+    // 渲染引擎延迟到 onOpen 再装配：ItemView.contentEl 在构造期不保证已挂好
+    // （Obsidian 内部是 containerEl.children[1]），而 mountTimeNote 会把 root
+    // 引用固定下来。重构前也是 onOpen 才动 DOM，这里保持同一时机。
+    this.renderer = null;
   }
 
-  getViewType() {
-    return VIEW_TYPE_TIMENOTE;
-  }
-
-  getDisplayText() {
-    return "时间笔记日历 (TimeNote)";
-  }
-
-  getIcon() {
-    return "calendar-clock";
-  }
+  getViewType() { return VIEW_TYPE_TIMENOTE; }
+  getDisplayText() { return "时间笔记日历 (TimeNote)"; }
+  getIcon() { return "calendar-clock"; }
 
   async onOpen() {
-    this.registerEvent(
-      this.app.vault.on("modify", () => {
-        this.renderView();
-      })
-    );
-
-    await this.renderView();
+    if (!this.renderer) {
+      this.renderer = mountTimeNote(
+        this.contentEl,
+        createObsidianHostAdapter({
+          app: this.app,
+          plugin: this.plugin,
+          service: this.plugin.dailyNoteService,
+          QuickAddModal,
+          SubItemsModal
+        })
+      );
+    }
+    await this.renderer.onOpen();
   }
 
   async onClose() {
-    this.hideHoverTooltip();
-    this.stopNowClock();
+    if (this.renderer) await this.renderer.onClose();
   }
 
-  showHoverTooltip(entry, targetEl, event) {
-    this.hideHoverTooltip();
-
-    const tooltip = document.createElement("div");
-    tooltip.className = "timenote-hover-card";
-    this.currentTooltip = tooltip;
-
-    // Header: Time & Source
-    const header = tooltip.createEl("div", { cls: "timenote-hover-header" });
-    header.createEl("span", {
-      text: entry.hasTime ? `🕒 ${entry.timeStr}` : "📅 全天",
-      cls: "timenote-hover-time"
-    });
-    if (entry.isTask) {
-      header.createEl("span", {
-        text: entry.isCompleted ? "✅ 已完成" : "⏳ 待办事项",
-        cls: `timenote-hover-badge ${entry.isCompleted ? "is-completed" : "is-task"}`
-      });
-    } else {
-      header.createEl("span", {
-        text: entry.source === "blinko" ? "🟣 Blinko" : "📝 灵感闪念",
-        cls: "timenote-hover-badge"
-      });
-    }
-
-    // Body: Full Text
-    tooltip.createEl("div", {
-      text: entry.text,
-      cls: "timenote-hover-body"
-    });
-
-    // Tags
-    if (entry.tags && entry.tags.length > 0) {
-      const tagsRow = tooltip.createEl("div", { cls: "timenote-hover-tags" });
-      entry.tags.forEach(t => {
-        const colors = getTagColor(t);
-        tagsRow.createEl("span", {
-          text: `#${t}`,
-          cls: "timenote-tag-chip",
-          style: `background-color: ${colors.bg}; color: ${colors.text}; border: 1px solid ${colors.border};`
-        });
-      });
-    }
-
-    // Sub-items
-    if (entry.subItems && entry.subItems.length > 0) {
-      const subWrap = tooltip.createEl("div", { cls: "timenote-hover-subitems" });
-      subWrap.createEl("div", {
-        text: `📋 子项列表 (${entry.subItems.length}项):`,
-        cls: "timenote-hover-sub-title"
-      });
-      const ul = subWrap.createEl("ul");
-      entry.subItems.slice(0, 10).forEach(s => {
-        ul.createEl("li", { text: s });
-      });
-      if (entry.subItems.length > 10) {
-        ul.createEl("li", { text: `...及更多 ${entry.subItems.length - 10} 项`, style: "color: var(--text-muted);" });
-      }
-    }
-
-    // Footer
-    const footer = tooltip.createEl("div", { cls: "timenote-hover-footer" });
-    const fileName = entry.filePath ? entry.filePath.split(/[\\/]/).pop() : "";
-    footer.createEl("span", { text: `📄 ${fileName} #L${entry.lineNum}` });
-    footer.createEl("span", { text: "💡 点击定位日记", style: "color: var(--color-accent);" });
-
-    document.body.appendChild(tooltip);
-
-    // Position tooltip safely near target
-    const rect = targetEl.getBoundingClientRect();
-    const tooltipRect = tooltip.getBoundingClientRect();
-
-    let left = rect.left;
-    if (left + tooltipRect.width > window.innerWidth - 12) {
-      left = window.innerWidth - tooltipRect.width - 12;
-    }
-    if (left < 10) left = 10;
-
-    let top = rect.bottom + 6;
-    if (top + tooltipRect.height > window.innerHeight - 12) {
-      top = rect.top - tooltipRect.height - 6;
-    }
-
-    tooltip.style.left = `${Math.round(left)}px`;
-    tooltip.style.top = `${Math.round(top)}px`;
-  }
-
-  hideHoverTooltip() {
-    if (this.currentTooltip && this.currentTooltip.parentNode) {
-      this.currentTooltip.parentNode.removeChild(this.currentTooltip);
-      this.currentTooltip = null;
-    }
-  }
-
-  async refreshData() {
-    let startMoment, endMoment;
-
-    if (this.currentViewMode === "day" || this.currentViewMode === "timeline") {
-      startMoment = this.currentDate.clone().startOf("day");
-      endMoment = this.currentDate.clone().endOf("day");
-    } else if (this.currentViewMode === "3day") {
-      startMoment = this.currentDate.clone().startOf("day");
-      endMoment = this.currentDate.clone().add(2, "days").endOf("day");
-    } else if (this.currentViewMode === "week") {
-      // 7-day rolling window matching currentDate for seamless day-by-day navigation
-      startMoment = this.currentDate.clone().startOf("day");
-      endMoment = this.currentDate.clone().add(6, "days").endOf("day");
-    } else if (this.currentViewMode === "month") {
-      startMoment = this.currentDate.clone().startOf("month").startOf("week");
-      endMoment = this.currentDate.clone().endOf("month").endOf("week");
-    } else if (this.currentViewMode === "quarter") {
-      startMoment = this.currentDate.clone().startOf("quarter").startOf("day");
-      endMoment = this.currentDate.clone().endOf("quarter").endOf("day");
-    } else if (this.currentViewMode === "year") {
-      startMoment = this.currentDate.clone().startOf("year").startOf("day");
-      endMoment = this.currentDate.clone().endOf("year").endOf("day");
-    } else {
-      startMoment = this.currentDate.clone().startOf("day");
-      endMoment = this.currentDate.clone().add(6, "days").endOf("day");
-    }
-
-    this.entriesMap = await this.plugin.dailyNoteService.getEntriesForRange(startMoment, endMoment);
-  }
-
-  async renderView() {
-    this.hideHoverTooltip();
-
-    // 一次写日记会同时触发两条渲染路径：vault.on("modify") 和 QuickAdd 的 onSaved()。
-    // 本方法是 async：两者都先 empty() 再 await refreshData()，等各自恢复后就会
-    // 往同一个容器 append 一整套 DOM —— 页面下方出现第二个日历视图（刷新才恢复）。
-    // 用递增代号做「只让最后一次渲染落地」，旧调用在 await 后直接丢弃。
-    const gen = (this.renderGeneration || 0) + 1;
-    this.renderGeneration = gen;
-    const container = this.contentEl;
-    container.empty();
-    container.addClass("timenote-container");
-
-    await this.refreshData();
-    if (gen !== this.renderGeneration) return;
-
-    // 1. Primary Header Bar
-    this.renderHeader(container);
-
-    // 2. Sub-Header: Filter Pills & Stats Summary
-    this.renderSubHeader(container);
-
-    // 3. View Mode Body
-    if (this.currentViewMode === "day") {
-      this.renderDayView(container);
-    } else if (this.currentViewMode === "3day") {
-      this.render3DayView(container);
-    } else if (this.currentViewMode === "week") {
-      this.renderWeekView(container);
-    } else if (this.currentViewMode === "month") {
-      this.renderMonthView(container);
-    } else if (this.currentViewMode === "quarter") {
-      this.renderQuarterView(container);
-    } else if (this.currentViewMode === "year") {
-      this.renderYearView(container);
-    } else if (this.currentViewMode === "timeline") {
-      this.renderTimelineView(container);
-    }
-  }
-
-  renderHeader(container) {
-    const header = container.createEl("div", { cls: "timenote-header" });
-
-    // Left: Navigation & Title
-    const nav = header.createEl("div", { cls: "timenote-nav" });
-
-    // 1. Period Prev (⏮ 上周期)
-    const prevPeriodBtn = nav.createEl("button", {
-      text: "⏮ 上周期",
-      cls: "timenote-nav-btn",
-      attr: { title: "按当前视图周期切换 (天/3天/7天/月/季/年)" }
-    });
-    prevPeriodBtn.onclick = () => this.navigatePeriod(-1);
-
-    // 2. Day Prev (◀ -1天)
-    const prevDayBtn = nav.createEl("button", {
-      text: "◀ -1天",
-      cls: "timenote-nav-btn",
-      attr: { title: "向前翻动 1 天" }
-    });
-    prevDayBtn.onclick = () => this.navigateDay(-1);
-
-    // 3. Today (今天)
-    const todayBtn = nav.createEl("button", { text: "今天", cls: "timenote-tab-btn" });
-    todayBtn.onclick = () => {
-      if (this.currentViewMode === "week") {
-        this.currentDate = window.moment().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
-      } else {
-        this.currentDate = window.moment();
-      }
-      this.renderView();
-    };
-
-    // 4. Day Next (+1天 ▶)
-    const nextDayBtn = nav.createEl("button", {
-      text: "+1天 ▶",
-      cls: "timenote-nav-btn",
-      attr: { title: "向后翻动 1 天" }
-    });
-    nextDayBtn.onclick = () => this.navigateDay(1);
-
-    // 5. Period Next (下周期 ⏭)
-    const nextPeriodBtn = nav.createEl("button", {
-      text: "下周期 ⏭",
-      cls: "timenote-nav-btn",
-      attr: { title: "按当前视图周期切换 (天/3天/7天/月/季/年)" }
-    });
-    nextPeriodBtn.onclick = () => this.navigatePeriod(1);
-
-    const titleText = this.getTitleString();
-    nav.createEl("span", { text: titleText, cls: "timenote-title" });
-
-    // Right: Actions (Search, Mode Tabs, Add, Refresh)
-    const actions = header.createEl("div", { cls: "timenote-actions" });
-
-    // Search Input
-    const searchInput = actions.createEl("input", {
-      cls: "timenote-search",
-      attr: { placeholder: "搜索记录/标签...", value: this.searchQuery }
-    });
-    searchInput.oninput = (e) => {
-      this.searchQuery = (e.target as HTMLInputElement).value.toLowerCase();
-      this.renderView();
-    };
-
-    // View Mode Tabs: 日, 3天, 周, 月, 季度, 年度, 时间线
-    const tabs = actions.createEl("div", { cls: "timenote-tabs" });
-    const modes = [
-      { id: "day", label: "日" },
-      { id: "3day", label: "3天" },
-      { id: "week", label: "周" },
-      { id: "month", label: "月" },
-      { id: "quarter", label: "季度" },
-      { id: "year", label: "年度" },
-      { id: "timeline", label: "时间线" }
-    ];
-
-    modes.forEach(m => {
-      const btn = tabs.createEl("button", {
-        text: m.label,
-        cls: `timenote-tab-btn ${this.currentViewMode === m.id ? "active" : ""}`
-      });
-      btn.onclick = () => {
-        if (m.id === "week") {
-          this.currentDate = this.currentDate.clone().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
-        }
-        this.currentViewMode = m.id;
-        this.renderView();
-      };
-    });
-
-    // 布局切换：显示密度，不是视图模式
-    const layoutBtn = actions.createEl("button", {
-      text: this.getLayoutMode() === "block" ? "块布局" : "紧凑流",
-      cls: "timenote-layout-toggle"
-    });
-    layoutBtn.onclick = async () => {
-      this.plugin.settings.layoutMode = this.getLayoutMode() === "block" ? "compact" : "block";
-      await this.plugin.saveSettings();
-    };
-
-    // 新增类型切换（DEC-022）：决定空白槽点击 / 拖拽与「+ 记一条」默认创建块还是时间点。
-    // 只改设置与按钮文字，不重渲染 —— 槽位交互每次按下时都读当前设置，切换立即生效，
-    // 也不会像整视图重建那样把用户的滚动位置重置掉。
-    const addTypeBtn = actions.createEl("button", {
-      text: this.getAddType() === "point" ? "新增：时间点" : "新增：时间块",
-      cls: "timenote-layout-toggle",
-      attr: {
-        title: "切换新建记录类型：时间块（起止时间）/ 时间点（只有时刻）。按住 Alt 点空白槽可临时记时间点。"
-      }
-    });
-    addTypeBtn.onclick = async () => {
-      this.plugin.settings.defaultAddType = this.getAddType() === "point" ? "block" : "point";
-      await this.plugin.saveSettings();
-      const isPoint = this.getAddType() === "point";
-      addTypeBtn.textContent = isPoint ? "新增：时间点" : "新增：时间块";
-      new Notice(isPoint ? "新建记录：时间点（只记时刻）" : "新建记录：时间块（起止时间）");
-    };
-
-    // Quick Add Button
-    const addBtn = actions.createEl("button", { text: "+ 记一条", cls: "timenote-btn-primary" });
-    addBtn.onclick = () => {
-      new QuickAddModal(this.app, this.plugin, this.currentDate.format("YYYY-MM-DD"), () => {
-        this.renderView();
-      }).open();
-    };
-
-    // Refresh Button
-    const refreshBtn = actions.createEl("button", { cls: "clickable-icon" });
-    setIcon(refreshBtn, "refresh-cw");
-    refreshBtn.onclick = () => {
-      this.plugin.dailyNoteService.fileCache.clear();
-      this.plugin.dailyNoteService.dailyNoteIndex.clear();
-      this.renderView();
-      new Notice("已刷新时间笔记数据！");
-    };
-  }
-
-  renderSubHeader(container) {
-    const subHeader = container.createEl("div", { cls: "timenote-sub-header" });
-
-    // Filter pills
-    const pillsWrap = subHeader.createEl("div", { cls: "timenote-filter-pills" });
-    const filters = [
-      { id: "all", label: "全部" },
-      { id: "task", label: "待办" },
-      { id: "memo", label: "闪念" },
-      { id: "blinko", label: "Blinko" }
-    ];
-
-    filters.forEach(f => {
-      const pill = pillsWrap.createEl("button", {
-        text: f.label,
-        cls: `timenote-filter-pill ${this.currentFilterType === f.id ? "active" : ""}`
-      });
-      pill.onclick = () => {
-        this.currentFilterType = f.id;
-        this.renderView();
-      };
-    });
-
-    // Compute stats across current entries
-    let totalTasks = 0;
-    let completedTasks = 0;
-    let totalMemos = 0;
-
-    for (const [_, entries] of this.entriesMap.entries()) {
-      const filtered = this.filterEntries(entries);
-      filtered.forEach(e => {
-        if (e.isTask) {
-          totalTasks++;
-          if (e.isCompleted) completedTasks++;
-        } else {
-          totalMemos++;
-        }
-      });
-    }
-
-    const statsBadge = subHeader.createEl("div", { cls: "timenote-stats-badge" });
-    statsBadge.createEl("span", { text: `📊 待办：` });
-    statsBadge.createEl("strong", { text: `${completedTasks}/${totalTasks}` });
-    statsBadge.createEl("span", { text: ` · 闪念：` });
-    statsBadge.createEl("strong", { text: `${totalMemos}` });
-  }
-
-  getTitleString() {
-    if (this.currentViewMode === "day" || this.currentViewMode === "timeline") {
-      return this.currentDate.format("YYYY年MM月DD日 dddd");
-    } else if (this.currentViewMode === "3day") {
-      const end = this.currentDate.clone().add(2, "days");
-      if (this.currentDate.year() === end.year()) {
-        return `${this.currentDate.format("YYYY年MM月DD日")} - ${end.format("MM月DD日")} (3天)`;
-      } else {
-        return `${this.currentDate.format("YYYY年MM月DD日")} - ${end.format("YYYY年MM月DD日")} (3天)`;
-      }
-    } else if (this.currentViewMode === "week") {
-      const start = this.currentDate.clone();
-      const end = start.clone().add(6, "days");
-      if (start.isoWeekday() === 1 && end.isoWeekday() === 7) {
-        return `${start.format("YYYY年MM月DD日")} - ${end.format("MM月DD日")} (第${start.isoWeek()}周)`;
-      } else {
-        return `${start.format("YYYY年MM月DD日")} - ${end.format("MM月DD日")} (7天)`;
-      }
-    } else if (this.currentViewMode === "month") {
-      return this.currentDate.format("YYYY年 MM月");
-    } else if (this.currentViewMode === "quarter") {
-      const q = this.currentDate.quarter();
-      const sm = (q - 1) * 3 + 1;
-      const em = q * 3;
-      return `${this.currentDate.format("YYYY年")} 第${q}季度 (${sm}月 - ${em}月)`;
-    } else if (this.currentViewMode === "year") {
-      return `${this.currentDate.format("YYYY年")} 全景概览`;
-    }
-    return "";
-  }
-
-  // Navigate by view-specific period (1d, 3d, 7d, 1m, 1q, 1y)
-  navigatePeriod(direction) {
-    if (this.currentViewMode === "day" || this.currentViewMode === "timeline") {
-      this.currentDate.add(direction, "days");
-    } else if (this.currentViewMode === "3day") {
-      this.currentDate.add(direction * 3, "days");
-    } else if (this.currentViewMode === "week") {
-      this.currentDate.add(direction * 7, "days");
-    } else if (this.currentViewMode === "month") {
-      this.currentDate.add(direction, "months");
-    } else if (this.currentViewMode === "quarter") {
-      this.currentDate.add(direction, "quarters");
-    } else if (this.currentViewMode === "year") {
-      this.currentDate.add(direction, "years");
-    }
-    this.renderView();
-  }
-
-  // Strictly navigate by 1 day (shifts week and 3day windows day-by-day!)
-  navigateDay(direction) {
-    this.currentDate.add(direction, "days");
-    this.renderView();
-  }
-
-  filterEntries(entries) {
-    let result = entries;
-
-    if (this.currentFilterType === "task") {
-      result = result.filter(e => e.isTask);
-    } else if (this.currentFilterType === "memo") {
-      result = result.filter(e => !e.isTask);
-    } else if (this.currentFilterType === "blinko") {
-      result = result.filter(e => e.source === "blinko");
-    }
-
-    if (this.searchQuery) {
-      result = result.filter(e => {
-        const matchText = e.text.toLowerCase().includes(this.searchQuery);
-        const matchTag = e.tags.some(t => t.toLowerCase().includes(this.searchQuery));
-        return matchText || matchTag;
-      });
-    }
-    return result;
-  }
-
-  // ==========================================================================
-  // Week, 3-Day & Day Grid View Renderer
-  // ==========================================================================
-
-  renderDayView(container) {
-    this.renderTimeGrid(container, [this.currentDate.clone()]);
-  }
-
-  render3DayView(container) {
-    const days = [];
-    for (let i = 0; i < 3; i++) {
-      days.push(this.currentDate.clone().add(i, "days"));
-    }
-    this.renderTimeGrid(container, days);
-  }
-
-  renderWeekView(container) {
-    const days = [];
-    for (let i = 0; i < 7; i++) {
-      days.push(this.currentDate.clone().add(i, "days"));
-    }
-    this.renderTimeGrid(container, days);
-  }
-
-  renderTimeGrid(container, days) {
-    // 每次重渲染前先停表并清引用，避免指向已移除的 DOM
-    this.stopNowClock();
-    this.nowLineEl = null;
-    this.nowLabelEl = null;
-    this.currentTimeScale = null;
-    if (this.getLayoutMode() === "compact") {
-      return this.renderCompactGrid(container, days);
-    }
-    return this.renderBlockGrid(container, days);
-  }
-
-  getLayoutMode() {
-    return this.plugin.settings.layoutMode === "compact" ? "compact" : "block";
-  }
-
-  // 新建记录类型：设置页与工具栏共用同一个状态，非法值一律回退成时间块（DEC-022）
-  getAddType() {
-    return normalizeAddType(this.plugin.settings.defaultAddType);
-  }
-
-  // 拖动时按指针横坐标找目标日期列。只认当前视图里真实存在的列：
-  // 落在刻度列 / 容器外返回 null，不臆造视图范围之外的日期。
-  findDropDate(clientX, homeDate, columns) {
-    for (const c of columns) {
-      const r = c.getBoundingClientRect();
-      if (clientX >= r.left && clientX <= r.right) {
-        const ds = c.dataset.dateStr;
-        return ds && ds !== homeDate ? ds : null;
-      }
-    }
-    return null;
-  }
-
-  // 拖动中的落点提示：高亮目标列，其余列清掉
-  markDropDate(columns, targetDate) {
-    columns.forEach(c => {
-      if (c.dataset.dateStr === targetDate) c.classList.add("is-drop-target");
-      else c.classList.remove("is-drop-target");
-    });
-  }
-
-  renderCompactGrid(container, days) {
-    const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
-
-    // 1. Fixed Header: Dedicated Day column for EACH day (Title on top, that day's all-day box below)
-    const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
-    const headerDays = header.createEl("div", { cls: "timenote-header-days" });
-
-    days.forEach(d => {
-      const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
-
-      const dayCol = headerDays.createEl("div", {
-        cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
-      });
-
-      // Top: Day Title
-      const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
-      titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
-      titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      // 日期标题直接打开当天的日记（DEC-017）；下钻到日视图仍可用顶部「日」标签
-      titleRow.setAttribute("title", `打开 ${dateStr} 日记`);
-      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
-
-      // Bottom: Dedicated All-Day box strictly inside THIS day's column
-      const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
-      const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
-      const allDayEntries = entries.filter(e => !e.hasTime);
-
-      allDayEntries.forEach(entry => {
-        const chip = allDayContainer.createEl("div", {
-          cls: `timenote-all-day-chip ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "completed" : ""}`
-        });
-
-        if (entry.isTask) {
-          const cb = chip.createEl("input", {
-            cls: "timenote-card-checkbox",
-            attr: { type: "checkbox" }
-          });
-          cb.checked = entry.isCompleted;
-          cb.onclick = async (ev) => {
-            ev.stopPropagation();
-            this.hideHoverTooltip();
-            await this.plugin.dailyNoteService.toggleTask(entry);
-            this.renderView();
-          };
-        }
-
-        chip.createEl("span", { text: entry.text, cls: "timenote-all-day-chip-text" });
-
-        if (entry.subItems && entry.subItems.length > 0) {
-          const badge = chip.createEl("span", {
-            text: `▾${entry.subItems.length}`,
-            cls: "timenote-tag-chip",
-            style: "cursor: pointer; flex-shrink: 0;"
-          });
-          badge.onclick = (ev) => {
-            ev.stopPropagation();
-            this.hideHoverTooltip();
-            new SubItemsModal(this.app, entry).open();
-          };
-        }
-
-        chip.onmouseenter = (ev) => {
-          this.showHoverTooltip(entry, chip, ev);
-        };
-        chip.onmouseleave = () => {
-          this.hideHoverTooltip();
-        };
-
-        chip.onclick = () => {
-          this.hideHoverTooltip();
-          this.jumpToFileLine(entry);
-        };
-      });
-    });
-
-    // 2. Scrollable Body: Columns matching header columns 1:1
-    const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area" });
-    scrollArea.onscroll = () => this.hideHoverTooltip();
-
-    const colsContainer = scrollArea.createEl("div", { cls: "timenote-columns-container" });
-
-    days.forEach(d => {
-      const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
-      const col = colsContainer.createEl("div", {
-        cls: `timenote-column ${isToday ? "is-today" : ""}`
-      });
-
-      const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
-      const timeEntries = entries.filter(e => e.hasTime);
-
-      // Sort strictly by exact startSeconds (down to seconds)
-      timeEntries.sort((a, b) => (a.startSeconds || 0) - (b.startSeconds || 0));
-
-      // If no timed entries for the whole day:
-      if (timeEntries.length === 0) {
-        const emptyRow = col.createEl("div", {
-          cls: "timenote-compressed-gap",
-          attr: { title: `点击在 ${dateStr} 快速记一条` }
-        });
-        emptyRow.createEl("span", {
-          text: "00:00 ~ 24:00 (全天无定时记录)",
-          cls: "timenote-compressed-gap-text"
-        });
-        emptyRow.onclick = () => {
-          new QuickAddModal(this.app, this.plugin, dateStr, () => {
-            this.renderView();
-          }, "09:00").open();
-        };
-        return;
-      }
-
-      // Generate compressed stream: Gaps + Lines
-      const dayStartSec = 0; // 00:00:00
-      const dayEndSec = 86400; // 24:00:00
-      const MIN_GAP_SECONDS = 1800; // 30 minutes threshold for gap compression
-
-      let lastEndSec = dayStartSec;
-
-      timeEntries.forEach(entry => {
-        const entryStartSec = entry.startSeconds || 0;
-
-        // Gap before this entry
-        if (entryStartSec - lastEndSec >= MIN_GAP_SECONDS) {
-          const gapStartStr = formatSecondsToTime(lastEndSec);
-          const gapEndStr = formatSecondsToTime(entryStartSec);
-          const gapRow = col.createEl("div", {
-            cls: "timenote-compressed-gap",
-            attr: { title: `点击在 ${gapStartStr} 快速记一条` }
-          });
-          gapRow.createEl("span", {
-            text: `┄ ${gapStartStr} ~ ${gapEndStr} (空闲) ┄`,
-            cls: "timenote-compressed-gap-text"
-          });
-          gapRow.onclick = () => {
-            new QuickAddModal(this.app, this.plugin, dateStr, () => {
-              this.renderView();
-            }, gapStartStr.slice(0, 5)).open();
-          };
-        }
-
-        // Render Event as a Line Row (展示为线，线周围标识具体时间点，一行一个，不要并列，精确到秒)
-        const isBlinko = entry.source === "blinko";
-        const lineRow = col.createEl("div", {
-          cls: `timenote-time-line-row ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
-        });
-
-        // 1. Line & Time Badge Wrapper
-        const lineWrapper = lineRow.createEl("div", { cls: "timenote-line-wrapper" });
-        lineWrapper.createEl("span", { text: entry.timeStr, cls: "timenote-line-time" });
-        lineWrapper.createEl("span", { cls: "timenote-line-dot" });
-        lineWrapper.createEl("div", { cls: "timenote-line-bar" });
-
-        // 2. Line Content
-        const lineContent = lineRow.createEl("div", { cls: "timenote-line-content" });
-
-        if (entry.isTask) {
-          const cb = lineContent.createEl("input", {
-            cls: "timenote-card-checkbox",
-            attr: { type: "checkbox" }
-          });
-          cb.checked = entry.isCompleted;
-          cb.onclick = async (ev) => {
-            ev.stopPropagation();
-            this.hideHoverTooltip();
-            await this.plugin.dailyNoteService.toggleTask(entry);
-            this.renderView();
-          };
-        }
-
-        lineContent.createEl("span", { text: entry.text, cls: "timenote-line-text" });
-
-        if (entry.tags && entry.tags.length > 0) {
-          entry.tags.slice(0, 2).forEach(t => {
-            const colors = getTagColor(t);
-            lineContent.createEl("span", {
-              text: `#${t}`,
-              cls: "timenote-tag-chip",
-              style: `background-color: ${colors.bg}; color: ${colors.text}; border: 1px solid ${colors.border}; flex-shrink: 0;`
-            });
-          });
-        }
-
-        if (entry.subItems && entry.subItems.length > 0) {
-          const subBadge = lineContent.createEl("span", {
-            text: `▾${entry.subItems.length}`,
-            cls: "timenote-tag-chip",
-            style: "cursor: pointer; flex-shrink: 0; background-color: var(--background-modifier-border);"
-          });
-          subBadge.onclick = (ev) => {
-            ev.stopPropagation();
-            this.hideHoverTooltip();
-            new SubItemsModal(this.app, entry).open();
-          };
-        }
-
-        // Hover Preview (鼠标移动上去可以预览具体内容)
-        lineRow.onmouseenter = (ev) => {
-          this.showHoverTooltip(entry, lineRow, ev);
-        };
-        lineRow.onmouseleave = () => {
-          this.hideHoverTooltip();
-        };
-
-        // Click to jump to line in daily note
-        lineRow.onclick = () => {
-          this.hideHoverTooltip();
-          this.jumpToFileLine(entry);
-        };
-
-        // 时间点不占时长：算空闲段时不能再把它当 30 分钟块（DEC-018）
-        lastEndSec = isPointEntry(entry)
-          ? entryStartSec
-          : (entry.endSeconds || (entryStartSec + 1800));
-      });
-
-      // Gap after last entry to end of day
-      if (dayEndSec - lastEndSec >= MIN_GAP_SECONDS) {
-        const gapStartStr = formatSecondsToTime(lastEndSec);
-        const gapRow = col.createEl("div", {
-          cls: "timenote-compressed-gap",
-          attr: { title: `点击在 ${gapStartStr} 快速记一条` }
-        });
-        gapRow.createEl("span", {
-          text: `┄ ${gapStartStr} ~ 24:00 (空闲) ┄`,
-          cls: "timenote-compressed-gap-text"
-        });
-        gapRow.onclick = () => {
-          new QuickAddModal(this.app, this.plugin, dateStr, () => {
-            this.renderView();
-          }, gapStartStr.slice(0, 5)).open();
-        };
-      }
-    });
-
-    // Sync scrollbar width to header
-    this.syncHeaderGutter(wrapper, header, scrollArea);
-  }
-
-  /**
-   * 表头在固定容器、时间网格在滚动容器：垂直滚动条会吃掉网格的可见宽度，
-   * 不把同等宽度补给表头，日期列就会和下面的时间列逐列错位。
-   * 弹性轴会二次重渲染、内容高度变化会让滚动条出现/消失，所以用 ResizeObserver
-   * 持续同步，而不是只在首帧量一次。
-   */
-  syncHeaderGutter(wrapper, header, scrollArea) {
-    const sync = () => {
-      if (!wrapper.isConnected) return false;
-      const gutter = Math.max(0, scrollArea.offsetWidth - scrollArea.clientWidth);
-      header.style.paddingRight = `${gutter}px`;
-      return true;
-    };
-    requestAnimationFrame(() => {
-      if (!sync()) return;
-      const ro = new ResizeObserver(() => {
-        if (!sync()) ro.disconnect();
-      });
-      ro.observe(scrollArea);
-      ro.observe(wrapper);
-      // 每次重渲染只保留最新的 observer，避免旧视图泄漏
-      if (this.headerGutterObserver && this.headerGutterObserver !== ro) {
-        this.headerGutterObserver.disconnect();
-      }
-      this.headerGutterObserver = ro;
-    });
-  }
-
-  // ==========================================================================
-  // Time Block Grid Renderer（共享渲染层，日 / 3天 / 周 复用）
-  // ==========================================================================
-  renderBlockGrid(container, days) {
-    const wrapper = container.createEl("div", { cls: "timenote-timegrid-wrapper" });
-    const header = wrapper.createEl("div", { cls: "timenote-timegrid-header" });
-    const headerDays = header.createEl("div", { cls: "timenote-header-days" });
-    // 刻度列的表头不是一块留白：上格对齐日期行，下格就是 ALL DAY 行的行标签。
-    // 用两层 flex 跟随全天区实际高度，标签永远与 ALL DAY 行垂直居中，且不占额外布局高度。
-    const rulerSpacer = headerDays.createEl("div", { cls: "timenote-block-ruler-spacer" });
-    rulerSpacer.createEl("div", { cls: "timenote-ruler-corner" });
-    rulerSpacer.createEl("div", { cls: "timenote-allday-ruler-label", text: "ALL DAY" });
-
-    // 全天区高度：设置项持久化，拖拽分隔条可实时调整（DEC-011）
-    const allDayHeight = Math.max(32, Math.min(320, Number(this.plugin.settings.allDayHeight ?? 36)));
-
-    days.forEach(d => {
-      const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
-      const dayCol = headerDays.createEl("div", {
-        cls: `timenote-header-day-col ${isToday ? "is-today" : ""}`
-      });
-      const titleRow = dayCol.createEl("div", { cls: "timenote-day-title-row" });
-      titleRow.createEl("span", { text: d.format("ddd"), cls: "timenote-day-name" });
-      titleRow.createEl("span", { text: d.format("D"), cls: "timenote-day-num" });
-      // 日期标题直接打开当天的日记（DEC-017）；下钻到日视图仍可用顶部「日」标签
-      titleRow.setAttribute("title", `打开 ${dateStr} 日记`);
-      titleRow.onclick = () => this.openDailyNoteForDate(dateStr);
-      const allDayContainer = dayCol.createEl("div", { cls: "timenote-day-allday-container" });
-      allDayContainer.style.height = `${allDayHeight}px`;
-      allDayContainer.style.minHeight = `${allDayHeight}px`;
-      allDayContainer.style.maxHeight = `${allDayHeight}px`;
-      const allDay = this.filterEntries(this.entriesMap.get(dateStr) || []).filter(e => !e.hasTime);
-      allDay.forEach(entry => {
-        const chip = allDayContainer.createEl("div", {
-          cls: `timenote-all-day-chip ${entry.isTask ? "is-task" : "is-memo"} ${entry.isCompleted ? "completed" : ""}`
-        });
-        chip.createEl("span", { text: entry.text, cls: "timenote-all-day-chip-text" });
-        chip.onclick = () => this.jumpToFileLine(entry);
-      });
-    });
-
-    const startHour = Number(this.plugin.settings.startHour ?? 0);
-    const endHour = Number(this.plugin.settings.endHour ?? 24);
-    const slotHeight = Number(this.plugin.settings.slotHeight ?? 52);
-    const dayStartSec = startHour * 3600;
-    const dayEndSec = endHour * 3600;
-    const nowAtRender = window.moment();
-    const hasToday = days.some(d => d.isSame(nowAtRender, "day"));
-
-    // 时间轴：行高由内容决定（DEC-012），所有「秒 ↔ 像素」换算一律经 scale
-    const elastic = this.plugin.settings.elasticTimeline !== false;
-
-    // 块的「内容高度」需要列宽（中文折行后要几行），先按可见宽度估一次
-    const viewWidth = Math.max(320, wrapper.clientWidth || 880);
-    const colWidth = Math.max(150, (viewWidth - BLOCK_RULER_W) / Math.max(1, days.length));
-    // 视口高度 = 整个面板减去固定表头，用于「内容不足一屏时把行距放大」
-    const measuredViewport = wrapper.clientHeight ? wrapper.clientHeight - header.offsetHeight : 0;
-    const viewportHeight = measuredViewport > 120 ? measuredViewport - BLOCK_BOTTOM_GUTTER - 2 : 0;
-
-    const clustersByDay = new Map();
-    const tintsByDay = new Map();
-    const pointLinesByDay = new Map();
-    const scaleEntries = [];
-    const rowCount = Math.max(1, endHour - startHour);
-    const pointNeeds = new Array(rowCount).fill(0);
-    days.forEach(d => {
-      const ds = d.format("YYYY-MM-DD");
-      const dayTimed = this.filterEntries(this.entriesMap.get(ds) || []).filter(e => e.hasTime);
-
-      // 按天独立配色（DEC-016）：稳定排序保证重渲染不跳色；新块插进序列后
-      // 会自动拿到当天尚未使用的颜色，不会和当天其它时间块撞色。
-      const ordered = dayTimed.slice().sort((a, b) =>
-        (a.startSeconds || 0) - (b.startSeconds || 0) ||
-        (a.lineNum || 0) - (b.lineNum || 0) ||
-        String(a.text || "").localeCompare(String(b.text || ""))
-      );
-      const tintCss = assignDayTints(ordered.map(e => ({ key: tintEntryKey(e, ds), tint: e.tint })));
-      const dayTints = new Map();
-      ordered.forEach((e, i) => dayTints.set(tintEntryKey(e, ds), tintCss[i]));
-      tintsByDay.set(ds, dayTints);
-
-      // 时间点（只有开始时刻）画成线，不参与块的分簇与行高内容估算（DEC-018）：
-      // 每条只占一行标签的高度，按小时汇总后交给弹性轴把该行撑开。
-      const points = layoutPointLines(dayTimed, dayStartSec, dayEndSec);
-      pointLinesByDay.set(ds, points);
-      const perDayPointNeeds = new Array(rowCount).fill(0);
-      points.forEach(p => {
-        const idx = Math.floor((p.sec - dayStartSec) / 3600);
-        if (idx >= 0 && idx < rowCount) perDayPointNeeds[idx] += POINT_ROW_H;
-      });
-      perDayPointNeeds.forEach((v, i) => {
-        if (v > pointNeeds[i]) pointNeeds[i] = v;
-      });
-
-      const timed = dayTimed
-        .filter(e => !isPointEntry(e))
-        .filter(e => (e.startSeconds || 0) < dayEndSec && (e.endSeconds || 0) > dayStartSec);
-      const clusters = layoutTimeBlockClusters(timed, dayStartSec, dayEndSec);
-      clustersByDay.set(ds, clusters);
-      if (!elastic) return;
-      clusters.forEach(cluster => {
-        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
-        cluster.items.forEach(it => {
-          scaleEntries.push({ s: it.s, en: it.en, needH: estimateBlockNeed(it.entry, laneWidth) });
-        });
-      });
-    });
-
-    const scale = buildTimeScale({
-      startHour, endHour, slotHeight, top: BLOCK_TOP_GUTTER,
-      entries: scaleEntries, pointNeeds, elastic, viewportHeight
-    });
-    this.currentTimeScale = scale;
-    const totalHeight = scale.totalHeight;
-
-    // 首次渲染时面板可能还没完成布局（clientHeight = 0），此时测不到视口就不做等比放大。
-    // 下一帧补一次重渲染，避免整条轴挤在面板上半截；最多补两次，防止死循环。
-    if (viewportHeight > 0) {
-      this.viewportRetry = 0;
-    } else if ((this.viewportRetry || 0) < 2) {
-      this.viewportRetry = (this.viewportRetry || 0) + 1;
-      requestAnimationFrame(() => {
-        if (wrapper.isConnected) this.renderView();
-      });
-    }
-
-    // 全天区与时间网格之间的可拖拽分隔条：绝对定位压在表头底边上，不占布局高度，
-    // 否则会在全天区和第一个整点之间多出一条空行（用户反馈的「奇怪的空行」）
-    const resizer = header.createEl("div", {
-      cls: "timenote-header-resizer",
-      attr: { title: "拖动调节全天区高度" }
-    });
-    this.attachAllDayResizer(resizer, header);
-
-    const scrollArea = wrapper.createEl("div", { cls: "timenote-scroll-area timenote-block-scroll" });
-    scrollArea.onscroll = () => this.hideHoverTooltip();
-    const colsContainer = scrollArea.createEl("div", {
-      cls: `timenote-columns-container timenote-block-columns ${elastic ? "is-elastic" : ""}`
-    });
-    colsContainer.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
-
-    const ruler = colsContainer.createEl("div", { cls: "timenote-block-ruler" });
-    for (let h = startHour; h <= endHour; h++) {
-      const label = ruler.createEl("div", {
-        cls: "timenote-block-ruler-label",
-        text: h === 24 ? "24:00" : `${String(h).padStart(2, "0")}:00`
-      });
-      label.style.top = `${scale.yOf(h * 3600)}px`;
-      // 第一条刻度顶到轴顶，标签下移贴住轴线，避免 translateY(-50%) 被滚动容器裁掉半截
-      if (h === startHour) label.addClass("is-first");
-      // 当前小时用主色标记，和时间线同色；不再是淡化的一行小字
-      if (hasToday && h === nowAtRender.hour()) label.addClass("is-now");
-      // 被压扁的空档行：标签略缩小，避免一行行糊在一起（但不降字重、不淡到看不清）
-      const rowH = scale.heights[Math.min(scale.rowCount - 1, h - startHour)];
-      if (scale.elastic && rowH < slotHeight * 0.5) label.addClass("is-dense");
-    }
-
-    days.forEach(d => {
-      const dateStr = d.format("YYYY-MM-DD");
-      const isToday = d.isSame(window.moment(), "day");
-      const col = colsContainer.createEl("div", {
-        cls: `timenote-column timenote-block-column ${isToday ? "is-today" : ""}`
-      });
-      // 跨天拖动靠列上的日期标识找落点（DEC-022）
-      col.dataset.dateStr = dateStr;
-      col.style.height = `${totalHeight + BLOCK_TOP_GUTTER + BLOCK_BOTTOM_GUTTER}px`;
-
-      for (let h = startHour; h <= endHour; h++) {
-        const line = col.createEl("div", { cls: "timenote-block-hour-line" });
-        line.style.top = `${scale.yOf(h * 3600)}px`;
-      }
-
-      // 空白槽：按住拖动选择时间范围创建（TaskNotes 手感）；单击仍按默认时长预填
-      const slotLayer = col.createEl("div", { cls: "timenote-block-slot-layer" });
-      slotLayer.style.top = `${BLOCK_TOP_GUTTER}px`;
-      slotLayer.style.height = `${totalHeight}px`;
-      slotLayer.style.bottom = "auto";
-      this.attachSlotDrag(col, slotLayer, dateStr, scale);
-
-      const clusters = clustersByDay.get(dateStr) || [];
-
-      clusters.forEach(cluster => {
-        const laneWidth = colWidth / Math.max(1, cluster.laneCount);
-        cluster.items.forEach(it => {
-          const e = it.entry;
-          const top = scale.yOf(it.s);
-          // 块高 = 它在轴上的时间跨度：上沿对齐开始时间、下沿对齐结束时间，
-          // 与整点刻度严格一致。「内容多就高」由行高承担（见 buildTimeScale），
-          // 不允许再把块从跨度里截短 —— 截短后下沿就不代表结束时间了。
-          const spanH = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(it.en) - top);
-          const height = spanH;
-          const widthPct = 100 / cluster.laneCount;
-          const block = col.createEl("div", {
-            cls: `timenote-event-block ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""} ${e.isRange ? "is-range" : ""}`
-          });
-          block.style.top = `${top}px`;
-          block.style.height = `${height}px`;
-          block.style.left = `${it.lane * widthPct}%`;
-          block.style.width = `calc(${widthPct}% - 6px)`;
-          // 同一天的块各用一种颜色；#color/xxx 显式指定时优先保留
-          block.style.setProperty(
-            "--tn-tint",
-            tintsByDay.get(dateStr)?.get(tintEntryKey(e, dateStr)) || "var(--color-accent)"
-          );
-          // 块高恒等于时间跨度，块矮时按可用高度收起次要信息，别让文字挤成一团
-          if (height < 34) block.addClass("is-dense");
-          if (height < 24) block.addClass("is-tiny");
-
-          const title = block.createEl("div", { cls: "timenote-event-block-title" });
-          if (e.isTask) {
-            const cb = title.createEl("input", { cls: "timenote-card-checkbox", attr: { type: "checkbox" } });
-            cb.checked = e.isCompleted;
-            cb.onclick = async (ev) => {
-              ev.stopPropagation();
-              this.hideHoverTooltip();
-              await this.plugin.dailyNoteService.toggleTask(e);
-              this.renderView();
-            };
-          }
-          title.createEl("span", { text: e.text });
-
-          // 块内只写标题 + 起止时刻，时长移到右下角，避免和时间轴刻度重复
-          const tagSuffix = e.tags && e.tags.length > 0 ? ` · #${e.tags.slice(0, 2).join(" #")}` : "";
-          const meta = block.createEl("div", {
-            cls: "timenote-event-block-meta",
-            text: `${formatSecondsToTime(it.s)} – ${formatSecondsToTime(it.en)}${tagSuffix}`
-          });
-          const duration = block.createEl("div", {
-            cls: "timenote-event-block-duration",
-            text: formatDuration(it.en - it.s)
-          });
-          if (e.subItems && e.subItems.length > 0) {
-            const badge = block.createEl("div", { cls: "timenote-event-block-sub", text: `▾${e.subItems.length} 子项` });
-            badge.onclick = (ev) => {
-              ev.stopPropagation();
-              this.hideHoverTooltip();
-              new SubItemsModal(this.app, e).open();
-            };
-          }
-
-          // 上下边缘拖动改起止、中部拖动整体平移（无可见把手，任意块高都生效）
-          this.attachBlockDrag(block, e, meta, duration, scale);
-
-          block.onmouseenter = (ev) => this.showHoverTooltip(e, block, ev);
-          block.onmouseleave = () => this.hideHoverTooltip();
-          block.onclick = (ev) => {
-            ev.stopPropagation();
-            this.hideHoverTooltip();
-            // 拖拽结束后浏览器仍会补一次 click，这里吃掉，避免误跳原笔记
-            if (block.dataset.dragMoved === "1") return;
-            this.jumpToFileLine(e);
-          };
-        });
-      });
-
-      // 时间点线：top 严格等于 yOf(startSeconds)，信息列在线下；同一簇逐行错开（DEC-018）。
-      // 这里绝不创建时间块 DOM、也不创建复选框 —— 时间点不是任务块。
-      (pointLinesByDay.get(dateStr) || []).forEach(p => {
-        const e = p.entry;
-        const line = col.createEl("div", {
-          cls: `timenote-point-line ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${e.source === "blinko" ? "is-blinko" : ""}`
-        });
-        line.style.top = `${scale.yOf(p.sec)}px`;
-        line.style.setProperty(
-          "--tn-tint",
-          tintsByDay.get(dateStr)?.get(tintEntryKey(e, dateStr)) || "var(--color-accent)"
-        );
-        // 细线不好抓，给一条透明的 10px 命中带；标签本身也能冒泡触发拖动
-        line.createEl("div", { cls: "timenote-point-line-hit" });
-        line.createEl("div", { cls: "timenote-point-line-bar" });
-        line.createEl("span", { cls: "timenote-point-line-dot" });
-
-        const label = line.createEl("div", { cls: "timenote-point-line-label" });
-        label.style.setProperty(
-          "--tn-label-offset",
-          `${POINT_LABEL_GAP + p.rowInCluster * POINT_ROW_H}px`
-        );
-        // 时间点可以精确到秒，展示沿用解析出来的原始时间字符串
-        const timeBadge = label.createEl("span", {
-          cls: "timenote-point-line-time",
-          text: e.timeStr || formatSecondsToTime(p.sec)
-        });
-        label.createEl("span", { cls: "timenote-point-line-text", text: e.text });
-        if (e.tags && e.tags.length > 0) {
-          label.createEl("span", {
-            cls: "timenote-point-line-tags",
-            text: `#${e.tags.slice(0, 2).join(" #")}`
-          });
-        }
-
-        this.attachPointDrag(line, e, timeBadge, scale);
-        line.onmouseenter = (ev) => this.showHoverTooltip(e, line, ev);
-        line.onmouseleave = () => this.hideHoverTooltip();
-        line.onclick = (ev) => {
-          ev.stopPropagation();
-          this.hideHoverTooltip();
-          if (line.dataset.dragMoved === "1") return;
-          this.jumpToFileLine(e);
-        };
-      });
-    });
-
-    // 当前时间指示线：只在「今天」出现在所显示日期中时创建，位置由 tickNowLine 维护
-    if (hasToday) {
-      this.nowLineEl = colsContainer.createEl("div", { cls: "timenote-now-line" });
-      this.nowLabelEl = this.nowLineEl.createEl("span", {
-        cls: "timenote-now-label",
-        text: nowAtRender.format("HH:mm")
-      });
-      this.tickNowLine();
-      this.startNowClock();
-    }
-
-    // 表头与滚动区宽度对齐：补上垂直滚动条占掉的宽度，避免日期列与时间列错位
-    this.syncHeaderGutter(wrapper, header, scrollArea);
-  }
-
-  // ==========================================================================
-  // Drag Interactions（拖拽创建 / 调节范围 / 全天区高度）
-  // ==========================================================================
-  attachSlotDrag(col, slotLayer, dateStr, scale) {
-    const dayStartSec = scale.dayStartSec;
-    const dayEndSec = scale.dayEndSec;
-    // 指针 y -> 秒：弹性轴下必须走 scale 反函数，否则压缩区会被算成错误时刻
-    const secAt = (clientY) => {
-      const rect = col.getBoundingClientRect();
-      return scale.secOf(clientY - rect.top);
-    };
-
-    slotLayer.onpointerdown = (ev: PointerEvent) => {
-      if (ev.button !== 0) return;
-      ev.preventDefault();
-      // 时间点模式（工具栏切换，或按住 Alt 临时切换）：只定一个时刻，不画范围预览（DEC-022）
-      const asPoint = ev.altKey || this.getAddType() === "point";
-      const anchorSec = snapSeconds(secAt(ev.clientY),
-        asPoint ? POINT_CREATE_SNAP_MINUTES : DRAG_SNAP_MINUTES);
-      const startY = ev.clientY;
-      let moved = false;
-      let ghost: HTMLElement | null = null;
-      let pointSec = Math.max(dayStartSec, Math.min(dayEndSec, anchorSec));
-
-      const onMove = (e: PointerEvent) => {
-        if (!moved && Math.abs(e.clientY - startY) < 5) return;
-        moved = true;
-        if (asPoint) {
-          pointSec = Math.max(dayStartSec, Math.min(dayEndSec,
-            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)));
-          if (!ghost) ghost = col.createEl("div", { cls: "timenote-point-ghost" });
-          ghost.style.top = `${scale.yOf(pointSec)}px`;
-          ghost.textContent = formatSecondsToTime(pointSec);
-          return;
-        }
-        const cur = snapSeconds(secAt(e.clientY));
-        let s = Math.min(anchorSec, cur);
-        let en = Math.max(anchorSec, cur);
-        s = Math.max(dayStartSec, Math.min(s, dayEndSec - MIN_BLOCK_SECONDS));
-        en = Math.min(dayEndSec, Math.max(en, s + MIN_BLOCK_SECONDS));
-        if (!ghost) ghost = col.createEl("div", { cls: "timenote-block-ghost" });
-        ghost.style.top = `${scale.yOf(s)}px`;
-        ghost.style.height = `${Math.max(16, scale.yOf(en) - scale.yOf(s))}px`;
-        ghost.dataset.start = String(s);
-        ghost.dataset.end = String(en);
-        ghost.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} · ${formatDuration(en - s)}`;
-      };
-
-      const onUp = (e: PointerEvent) => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        if (asPoint) {
-          if (ghost) ghost.remove();
-          // 单击与拖动都只落一个时刻：不生成结束时间，弹窗里结束框也会被禁用
-          const sec = moved ? pointSec : Math.max(dayStartSec, Math.min(dayEndSec,
-            snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)));
-          this.openQuickAdd(dateStr, sec, sec, "point");
-          return;
-        }
-        if (moved && ghost) {
-          const s = Number(ghost.dataset.start);
-          const en = Number(ghost.dataset.end);
-          ghost.remove();
-          this.openQuickAdd(dateStr, s, en, "block");
-          return;
-        }
-        if (ghost) ghost.remove();
-        // 未拖动 = 单击：沿用原有「按位置吸附 30 分钟 + 默认时长」预填
-        const rawSec = secAt(e.clientY);
-        const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
-        const endSec = Math.min(dayEndSec, snapped + (Number(this.plugin.settings.defaultDuration) || 60) * 60);
-        this.openQuickAdd(dateStr, snapped, endSec, "block");
-      };
-
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp, { once: true });
-    };
-  }
-
-  openQuickAdd(dateStr, startSec, endSec, type = "block") {
-    const isPoint = normalizeAddType(type) === "point";
-    new QuickAddModal(
-      this.app, this.plugin, dateStr, () => this.renderView(),
-      formatSecondsToTime(startSec),
-      isPoint ? "" : formatSecondsToTime(endSec),
-      isPoint ? "point" : "block"
-    ).open();
-  }
-
-  attachBlockDrag(block, entry, meta, duration, scale) {
-    // 没有可见把手：块的上下边缘本身就是命中区，光标随指针位置变化。
-    // 命中区由模块级 blockEdgeHit() 统一给出，任何块高都能改起止（DEC-014）。
-
-    // 跨出可见时间轴范围的记录不参与拖拽，避免把隐藏部分裁掉
-    if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
-
-    // 跨天拖动（DEC-022）：每列带 dataset.dateStr，指针横向进入别的列即换日期。
-    // 边缘模式（start / end）只改起止、不允许跨天，免得「调时长」误变成「搬记录」。
-    const col = block.parentElement as HTMLElement | null;
-    const columns = col && col.parentElement
-      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
-      : [];
-    const homeDate = entry.dateStr;
-    const canMoveDay = !entry.source || entry.source === "daily";
-
-    // 位移 -> 时间增量：弹性轴的斜率逐行不同，用「原位置 + dy」查反函数比
-    // 直接 dy/slotHeight 更准；上边缘用起点基准、下边缘用终点基准，手感才不会跳
-    const origStart = Number(entry.startSeconds) || 0;
-    const origEnd = Number(entry.endSeconds) || origStart + 1800;
-    const baseStartY = scale.yOf(origStart);
-    const baseEndY = scale.yOf(origEnd);
-
-    // 唯一的可发现性提示：靠近上下沿时光标变 ns-resize，其余是 grab。
-    // 不画任何条状把手，也不因为块矮就取消边缘调节。
-    block.onpointermove = (ev: PointerEvent) => {
-      if (block.hasClass("is-dragging")) return;
-      const r = block.getBoundingClientRect();
-      const edge = blockEdgeHit(r.height);
-      const off = ev.clientY - r.top;
-      block.style.cursor = (off <= edge || r.height - off <= edge) ? "ns-resize" : "grab";
-    };
-    block.onpointerleave = () => {
-      if (!block.hasClass("is-dragging")) block.style.cursor = "";
-    };
-
-    block.onpointerdown = (ev: PointerEvent) => {
-      if (ev.button !== 0) return;
-      const target = ev.target as HTMLElement;
-      if (target && (target.tagName === "INPUT" || (target.closest && target.closest(".timenote-event-block-sub")))) return;
-
-      const rect = block.getBoundingClientRect();
-      const offsetY = ev.clientY - rect.top;
-      const edge = blockEdgeHit(rect.height);
-      // 块高恒等于时间跨度，下沿就是结束时刻；任何高度都能抓上下沿改范围
-      let mode = "move";
-      if (offsetY <= edge) mode = "start";
-      else if (rect.height - offsetY <= edge) mode = "end";
-
-      const startX = ev.clientX;
-      const startY = ev.clientY;
-      let moved = false;
-      let curStart = origStart;
-      let curEnd = origEnd;
-      let dragDx = 0;
-      let targetDate = null;
-
-      const tagSuffix = entry.tags && entry.tags.length > 0 ? ` · #${entry.tags.slice(0, 2).join(" #")}` : "";
-      const paint = () => {
-        const top = scale.yOf(curStart);
-        const spanPx = Math.max(MIN_RENDER_BLOCK_PX, scale.yOf(curEnd) - top);
-        block.style.top = `${top}px`;
-        block.style.height = `${spanPx}px`;
-        block.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
-        meta.textContent = `${formatSecondsToTime(curStart)} – ${formatSecondsToTime(curEnd)}${tagSuffix}${targetDate ? ` → ${targetDate}` : ""}`;
-        duration.textContent = formatDuration(curEnd - curStart);
-      };
-
-      const onMove = (e: PointerEvent) => {
-        const dy = e.clientY - startY;
-        dragDx = e.clientX - startX;
-        // 横向阈值单独放宽到 12px：纯横向拖动才能启动，又不至于轻微抖动就跨天
-        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
-        if (!moved) {
-          moved = true;
-          block.addClass("is-dragging");
-          block.style.cursor = "grabbing";
-          this.hideHoverTooltip();
-        }
-        // 只有中部平移模式认横向落点；边缘改起止时横向位移一律忽略
-        targetDate = (mode === "move" && canMoveDay && Math.abs(dragDx) >= 12)
-          ? this.findDropDate(e.clientX, homeDate, columns)
-          : null;
-        this.markDropDate(columns, targetDate);
-        const deltaStart = snapSeconds(scale.secOf(baseStartY + dy) - origStart);
-        const deltaEnd = snapSeconds(scale.secOf(baseEndY + dy) - origEnd);
-        // 一律夹在可见时间轴内，避免把块拖出 startHour–endHour 后整块消失
-        if (mode === "move") {
-          const dur = origEnd - origStart;
-          curStart = Math.max(scale.dayStartSec, Math.min(scale.dayEndSec - dur, origStart + deltaStart));
-          curEnd = curStart + dur;
-        } else if (mode === "start") {
-          curStart = Math.max(scale.dayStartSec, Math.min(origEnd - MIN_BLOCK_SECONDS, origStart + deltaStart));
-          curEnd = origEnd;
-        } else {
-          curEnd = Math.min(scale.dayEndSec, Math.max(origStart + MIN_BLOCK_SECONDS, origEnd + deltaEnd));
-          curStart = origStart;
-        }
-        paint();
-      };
-
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        block.removeClass("is-dragging");
-        block.style.cursor = "";
-        this.markDropDate(columns, null);
-        if (!moved) return;
-        block.dataset.dragMoved = "1";
-        window.setTimeout(() => { delete block.dataset.dragMoved; }, 80);
-        const moveTo = targetDate;
-        dragDx = 0;
-        targetDate = null;
-        block.style.transform = "";
-        if (moveTo) {
-          // 换日期时哪怕时刻没变也要提交：先写目标日记、再删原日记那一行
-          void this.commitEntryMove(entry, moveTo, curStart, curEnd);
-          return;
-        }
-        if (curStart === origStart && curEnd === origEnd) {
-          paint();
-          return;
-        }
-        void this.commitEntryRange(entry, curStart, curEnd);
-      };
-
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp, { once: true });
-    };
-  }
-
-  async commitEntryRange(entry, startSec, endSec) {
-    const ok = await this.plugin.dailyNoteService.updateEntryTime(entry, startSec, endSec);
-    if (!ok) {
-      new Notice("时间范围未写入：找不到目标行，已恢复原状");
-      this.renderView();
-      return;
-    }
-    new Notice(`已更新：${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
-    this.renderView();
-  }
-
-  // 跨天拖动回写（DEC-022）：与只改时刻的两个 commit 分开，失败一律整视图重渲染复原
-  async commitEntryMove(entry, targetDate, startSec, endSec) {
-    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, endSec);
-    if (!ok) {
-      new Notice("跨天移动未写入：目标行已变化或来源只读，已恢复原状");
-      this.renderView();
-      return;
-    }
-    new Notice(`已移动到 ${targetDate}：${formatSecondsToTime(startSec)} - ${formatSecondsToTime(endSec)}`);
-    this.renderView();
-  }
-
-  async commitEntryPointMove(entry, targetDate, startSec) {
-    const ok = await this.plugin.dailyNoteService.moveEntryToDate(entry, targetDate, startSec, startSec);
-    if (!ok) {
-      new Notice("跨天移动未写入：目标行已变化或来源只读，已恢复原状");
-      this.renderView();
-      return;
-    }
-    new Notice(`已移动到 ${targetDate}：${formatSecondsToTime(startSec)}`);
-    this.renderView();
-  }
-
-  // 时间点线：整条上下拖动只改时刻（DEC-018）。没有边缘命中区、没有拉伸模式，
-  // 光标全程 ns-resize，用户不会拿到「把点拖成块」的暗示。
-  attachPointDrag(line, entry, timeBadge, scale) {
-    // Blinko 等外部来源没有可回写的行首时间前缀：允许查看 / 点击，但不允许拖
-    if (entry.source && entry.source !== "daily") {
-      line.addClass("is-readonly");
-      return;
-    }
-    const origStart = Number(entry.startSeconds) || 0;
-    if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
-
-    // 点线也支持横向拖到别的日期列（DEC-022）：与时间块共用 findDropDate / 落点高亮
-    const col = line.parentElement as HTMLElement | null;
-    const columns = col && col.parentElement
-      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
-      : [];
-    const homeDate = entry.dateStr;
-
-    const baseY = scale.yOf(origStart);
-    let curStart = origStart;
-    line.onpointerdown = (ev: PointerEvent) => {
-      if (ev.button !== 0) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      const startX = ev.clientX;
-      const startY = ev.clientY;
-      let moved = false;
-      let dragDx = 0;
-      let targetDate = null;
-
-      const onMove = (e: PointerEvent) => {
-        const dy = e.clientY - startY;
-        dragDx = e.clientX - startX;
-        if (!moved && Math.abs(dy) < 4 && Math.abs(dragDx) < 12) return;
-        if (!moved) {
-          moved = true;
-          line.addClass("is-dragging");
-          this.hideHoverTooltip();
-        }
-        targetDate = Math.abs(dragDx) >= 12
-          ? this.findDropDate(e.clientX, homeDate, columns)
-          : null;
-        this.markDropDate(columns, targetDate);
-        // 弹性轴行高不等距，位移 → 时刻必须走 scale 反函数（AGENTS 红线 9）
-        const raw = scale.secOf(baseY + dy);
-        curStart = Math.max(scale.dayStartSec,
-          Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES)));
-        line.style.top = `${scale.yOf(curStart)}px`;
-        line.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
-        timeBadge.textContent = formatSecondsToTime(curStart) +
-          (targetDate ? ` → ${targetDate.slice(5)}` : "");
-      };
-
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        line.removeClass("is-dragging");
-        line.style.transform = "";
-        this.markDropDate(columns, null);
-        if (!moved) return;
-        line.dataset.dragMoved = "1";
-        window.setTimeout(() => { delete line.dataset.dragMoved; }, 80);
-        const moveTo = targetDate;
-        if (moveTo) {
-          void this.commitEntryPointMove(entry, moveTo, curStart);
-          return;
-        }
-        if (curStart === origStart) return;
-        void this.commitEntryPoint(entry, curStart);
-      };
-
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp, { once: true });
-    };
-  }
-
-  async commitEntryPoint(entry, startSec) {
-    const ok = await this.plugin.dailyNoteService.updateEntryPointTime(entry, startSec);
-    if (!ok) {
-      new Notice("时间点未写入：找不到目标行，已恢复原状");
-      this.renderView();
-      return;
-    }
-    new Notice(`已更新时间点：${formatSecondsToTime(startSec)}`);
-    this.renderView();
-  }
-
-  attachAllDayResizer(resizer, header) {
-    resizer.onpointerdown = (ev: PointerEvent) => {
-      if (ev.button !== 0) return;
-      ev.preventDefault();
-      const startY = ev.clientY;
-      const startH = Math.max(32, Math.min(320, Number(this.plugin.settings.allDayHeight ?? 36)));
-      const containers = Array.from(header.querySelectorAll(".timenote-day-allday-container")) as HTMLElement[];
-      let next = startH;
-
-      const apply = (h) => {
-        containers.forEach(el => {
-          el.style.height = `${h}px`;
-          el.style.minHeight = `${h}px`;
-          el.style.maxHeight = `${h}px`;
-        });
-      };
-
-      const onMove = (e: PointerEvent) => {
-        next = Math.max(32, Math.min(320, Math.round(startH + (e.clientY - startY))));
-        apply(next);
-      };
-
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        resizer.removeClass("is-active");
-        if (next !== startH) {
-          this.plugin.settings.allDayHeight = next;
-          void this.plugin.saveSettings();
-        }
-      };
-
-      resizer.addClass("is-active");
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp, { once: true });
-    };
-  }
-
-  // ==========================================================================
-  // Now Line Clock（当前时间指示线，30s 刷新）
-  // ==========================================================================
-  startNowClock() {
-    this.stopNowClock();
-    this.nowLineTimer = window.setInterval(() => this.tickNowLine(), 30000);
-  }
-
-  stopNowClock() {
-    if (this.nowLineTimer) {
-      window.clearInterval(this.nowLineTimer);
-      this.nowLineTimer = null;
-    }
-  }
-
-  tickNowLine() {
-    const el = this.nowLineEl;
-    if (!el || !el.isConnected) return;
-    const now = window.moment();
-    const scale = this.currentTimeScale;
-    // 没有 scale 就没有可换算的轴（AGENTS 红线 9）：宁可隐藏，也不回退到手写等距公式
-    if (!scale) { el.style.display = "none"; return; }
-    const nowSec = now.hours() * 3600 + now.minutes() * 60 + now.seconds();
-    if (nowSec < scale.dayStartSec || nowSec > scale.dayEndSec) {
-      el.style.display = "none";
-      return;
-    }
-    el.style.display = "";
-    el.style.top = `${scale.yOf(nowSec)}px`;
-    if (this.nowLabelEl) this.nowLabelEl.textContent = now.format("HH:mm");
-  }
-
-  // ==========================================================================
-  // Timeline / Stream View Renderer
-  // ==========================================================================
-
-  renderTimelineView(container) {
-    const timeline = container.createEl("div", { cls: "timenote-timeline-view" });
-    const dateStr = this.currentDate.format("YYYY-MM-DD");
-    const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
-
-    const group = timeline.createEl("div", { cls: "timenote-timeline-group" });
-    const header = group.createEl("div", { cls: "timenote-timeline-date" });
-    header.createEl("span", { text: `${this.currentDate.format("YYYY-MM-DD dddd")} (共 ${entries.length} 条记录)` });
-
-    const openDailyLink = header.createEl("a", { text: "打开日记 ↗" });
-    openDailyLink.setAttribute("title", `打开 ${dateStr} 日记`);
-    openDailyLink.onclick = () => this.openDailyNoteForDate(dateStr);
-
-    if (entries.length === 0) {
-      group.createEl("div", { text: "今日暂无记录或时间标记", cls: "text-muted" });
-      return;
-    }
-
-    entries.sort((a, b) => {
-      if (!a.hasTime && b.hasTime) return -1;
-      if (a.hasTime && !b.hasTime) return 1;
-      return (a.startSeconds || 0) - (b.startSeconds || 0);
-    });
-
-    entries.forEach(entry => {
-      const isBlinko = entry.source === "blinko";
-      const item = group.createEl("div", { cls: "timenote-timeline-item" });
-
-      const spanSec = entry.hasTime
-        ? (entry.endSeconds || (entry.startSeconds || 0) + 1800) - (entry.startSeconds || 0)
-        : 0;
-      // 时间点没有时长：不再补一句虚构的「30m」（DEC-018）
-      item.createEl("div", {
-        text: !entry.hasTime ? "全天"
-          : isPointEntry(entry) ? entry.timeStr
-          : `${entry.timeStr} · ${formatDuration(spanSec)}`,
-        cls: "timenote-timeline-badge"
-      });
-
-      item.createEl("div", {
-        cls: `timenote-timeline-dot ${entry.isTask ? "is-task" : ""} ${entry.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
-      });
-
-      const card = item.createEl("div", { cls: "timenote-timeline-content" });
-      if (entry.isTask) {
-        const cb = card.createEl("input", {
-          cls: "timenote-card-checkbox",
-          attr: { type: "checkbox" }
-        });
-        cb.checked = entry.isCompleted;
-        cb.onclick = async (ev) => {
-          ev.stopPropagation();
-          this.hideHoverTooltip();
-          await this.plugin.dailyNoteService.toggleTask(entry);
-          this.renderView();
-        };
-      }
-
-      card.createEl("span", {
-        text: entry.text,
-        cls: entry.isCompleted ? "completed text-muted" : ""
-      });
-
-      if (entry.tags && entry.tags.length > 0) {
-        const tagsWrap = card.createEl("div", { cls: "timenote-card-tags" });
-        entry.tags.forEach(t => {
-          const colors = getTagColor(t);
-          tagsWrap.createEl("span", {
-            text: `#${t}`,
-            cls: "timenote-tag-chip",
-            style: `background-color: ${colors.bg}; color: ${colors.text}; border: 1px solid ${colors.border};`
-          });
-        });
-      }
-
-      if (entry.subItems && entry.subItems.length > 0) {
-        const subList = card.createEl("ul", {
-          style: "margin: 6px 0 0 16px; padding: 0; font-size: 0.78rem; color: var(--text-muted); line-height: 1.4;"
-        });
-        entry.subItems.forEach(sub => {
-          subList.createEl("li", { text: sub });
-        });
-      }
-
-      card.onmouseenter = (ev) => {
-        this.showHoverTooltip(entry, card, ev);
-      };
-      card.onmouseleave = () => {
-        this.hideHoverTooltip();
-      };
-
-      card.onclick = () => {
-        this.hideHoverTooltip();
-        this.jumpToFileLine(entry);
-      };
-    });
-  }
-
-  // ==========================================================================
-  // Month Grid View Renderer
-  // ==========================================================================
-
-  renderMonthView(container) {
-    const monthContainer = container.createEl("div", { cls: "timenote-month-container" });
-
-    // Weekday headers
-    const weekdays = monthContainer.createEl("div", { cls: "timenote-month-weekdays" });
-    const weekLabels = this.plugin.settings.firstDayOfWeek === 1
-      ? ["一", "二", "三", "四", "五", "六", "日"]
-      : ["日", "一", "二", "三", "四", "五", "六"];
-    weekLabels.forEach(l => weekdays.createEl("div", { text: `周${l}` }));
-
-    // Grid cells
-    const grid = monthContainer.createEl("div", { cls: "timenote-month-grid" });
-    const startOfMonth = this.currentDate.clone().startOf("month");
-    const endOfMonth = this.currentDate.clone().endOf("month");
-    const startGrid = startOfMonth.clone().startOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
-    const endGrid = endOfMonth.clone().endOf(this.plugin.settings.firstDayOfWeek === 1 ? "isoWeek" : "week");
-
-    const curr = startGrid.clone();
-    while (curr.isSameOrBefore(endGrid, "day")) {
-      const dateStr = curr.format("YYYY-MM-DD");
-      const isOtherMonth = curr.month() !== this.currentDate.month();
-      const isToday = curr.isSame(window.moment(), "day");
-      const entries = this.filterEntries(this.entriesMap.get(dateStr) || []);
-
-      const cell = grid.createEl("div", {
-        cls: `timenote-month-cell ${isOtherMonth ? "is-other-month" : ""} ${isToday ? "is-today" : ""}`
-      });
-
-      const cellHeader = cell.createEl("div", { cls: "timenote-month-cell-header" });
-      cellHeader.createEl("span", { text: curr.format("D") });
-
-      if (entries.length > 0) {
-        const taskCount = entries.filter(e => e.isTask).length;
-        const memoCount = entries.length - taskCount;
-        cellHeader.createEl("span", {
-          text: `${entries.length}`,
-          cls: "timenote-month-badge",
-          attr: { title: `${dateStr}: 共 ${entries.length} 条记录 (${taskCount} 待办, ${memoCount} 闪念)` }
-        });
-      }
-
-      const itemsWrap = cell.createEl("div", { cls: "timenote-month-items" });
-
-      // Intelligent Item Selection:
-      // When viewing "全部", do NOT let repetitive habit tasks crowd out unique flash memos!
-      let displayItems = [];
-      if (this.currentFilterType === "all") {
-        const memosAndTimed = entries.filter(e => !e.isTask || e.hasTime);
-        const regularTasks = entries.filter(e => e.isTask && !e.hasTime);
-
-        if (memosAndTimed.length > 0 && regularTasks.length > 0) {
-          // Prioritize 2 memos/timed and 1 task
-          displayItems = [...memosAndTimed.slice(0, 2), ...regularTasks.slice(0, 1)];
-        } else if (memosAndTimed.length > 0) {
-          displayItems = memosAndTimed.slice(0, 3);
-        } else {
-          displayItems = regularTasks.slice(0, 3);
-        }
-      } else {
-        displayItems = entries.slice(0, 3);
-      }
-
-      displayItems.forEach(e => {
-        const isBlinko = e.source === "blinko";
-        const itemPill = itemsWrap.createEl("div", {
-          cls: `timenote-month-item-pill ${e.isTask ? "is-task" : "is-memo"} ${e.isCompleted ? "is-completed" : ""} ${isBlinko ? "is-blinko" : ""}`
-        });
-
-        if (e.hasTime) {
-          itemPill.createEl("span", { text: e.timeStr.slice(0, 5), cls: "timenote-month-pill-time" });
-        } else if (e.isTask) {
-          itemPill.createEl("span", { text: e.isCompleted ? "☑" : "☐", cls: "timenote-month-pill-time" });
-        } else {
-          itemPill.createEl("span", { text: "💡", style: "font-size: 0.65rem;" });
-        }
-
-        itemPill.createEl("span", { text: e.text, cls: "timenote-month-pill-text" });
-
-        // Hover Preview on Pill
-        itemPill.onmouseenter = (ev) => {
-          ev.stopPropagation();
-          this.showHoverTooltip(e, itemPill, ev);
-        };
-        itemPill.onmouseleave = (ev) => {
-          ev.stopPropagation();
-          this.hideHoverTooltip();
-        };
-
-        itemPill.onclick = (ev) => {
-          ev.stopPropagation();
-          this.hideHoverTooltip();
-          this.jumpToFileLine(e);
-        };
-      });
-
-      // Show "+N" badge if more items exist
-      if (entries.length > displayItems.length) {
-        const moreCount = entries.length - displayItems.length;
-        itemsWrap.createEl("div", {
-          text: `+${moreCount} 项`,
-          cls: "timenote-month-more-badge",
-          attr: { title: `还有 ${moreCount} 项记录，点击下钻至该日查看全部` }
-        });
-      }
-
-      const clickDate = curr.clone();
-      cell.onclick = () => {
-        this.hideHoverTooltip();
-        this.currentDate = clickDate;
-        this.currentViewMode = "day";
-        this.renderView();
-      };
-
-      curr.add(1, "day");
-    }
-  }
-
-  // ==========================================================================
-  // Quarter View Renderer (3个月全景)
-  // ==========================================================================
-
-  renderQuarterView(container) {
-    const quarterContainer = container.createEl("div", { cls: "timenote-quarter-container" });
-    const currentQ = this.currentDate.quarter();
-    const year = this.currentDate.year();
-
-    // Stats
-    let totalEntries = 0;
-    let totalTasks = 0;
-    let completedTasks = 0;
-    let totalMemos = 0;
-    let activeDays = 0;
-
-    for (const [_, entries] of this.entriesMap.entries()) {
-      const filtered = this.filterEntries(entries);
-      if (filtered.length > 0) {
-        activeDays++;
-        totalEntries += filtered.length;
-        filtered.forEach(e => {
-          if (e.isTask) {
-            totalTasks++;
-            if (e.isCompleted) completedTasks++;
-          } else {
-            totalMemos++;
-          }
-        });
-      }
-    }
-
-    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 100;
-
-    // 1. Quarter Banner
-    const banner = quarterContainer.createEl("div", { cls: "timenote-quarter-banner" });
-    const bannerLeft = banner.createEl("div");
-    bannerLeft.createEl("h3", { text: `🎯 ${year}年 第${currentQ}季度全景回顾`, style: "margin: 0 0 4px 0;" });
-    bannerLeft.createEl("div", {
-      text: `覆盖 ${year}年${(currentQ - 1) * 3 + 1}月 至 ${year}年${currentQ * 3}月 · 记录活跃天数: ${activeDays} 天`,
-      cls: "text-muted",
-      style: "font-size: 0.8rem;"
-    });
-
-    const bannerRight = banner.createEl("div", { cls: "timenote-stats-badge", style: "gap: 8px; font-size: 0.82rem;" });
-    bannerRight.createEl("span", { text: `📝 条目: ` }).createEl("strong", { text: `${totalEntries}` });
-    bannerRight.createEl("span", { text: ` · ✅ 待办: ` }).createEl("strong", { text: `${completedTasks}/${totalTasks} (${completionRate}%)` });
-    bannerRight.createEl("span", { text: ` · 💡 闪念: ` }).createEl("strong", { text: `${totalMemos}` });
-
-    // 2. Quarter Grid (3 Month Cards)
-    const grid = quarterContainer.createEl("div", { cls: "timenote-quarter-grid" });
-    const startMonthIndex = (currentQ - 1) * 3;
-
-    for (let offset = 0; offset < 3; offset++) {
-      const monthMoment = window.moment().year(year).month(startMonthIndex + offset).startOf("month");
-      const monthNum = monthMoment.month() + 1;
-      const card = grid.createEl("div", { cls: "timenote-quarter-month-card" });
-
-      // Count for this month
-      let monthCount = 0;
-      const daysInMonth = monthMoment.daysInMonth();
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dStr = monthMoment.clone().date(d).format("YYYY-MM-DD");
-        monthCount += (this.filterEntries(this.entriesMap.get(dStr) || [])).length;
-      }
-
-      const cardHeader = card.createEl("div", { cls: "timenote-quarter-month-title", style: "cursor: pointer;" });
-      cardHeader.createEl("span", { text: `${monthNum}月 (${monthMoment.format("MMMM")})` });
-      cardHeader.createEl("span", { text: `${monthCount} 条记录 ↗`, cls: "timenote-month-badge" });
-      cardHeader.onclick = () => {
-        this.currentDate = monthMoment.clone();
-        this.currentViewMode = "month";
-        this.renderView();
-      };
-
-      // Mini Weekday Headers
-      const weekdaysRow = card.createEl("div", { cls: "timenote-mini-month-grid", style: "font-weight: 600; color: var(--text-muted); margin-bottom: 4px;" });
-      const weekLabels = this.plugin.settings.firstDayOfWeek === 1 ? ["一", "二", "三", "四", "五", "六", "日"] : ["日", "一", "二", "三", "四", "五", "六"];
-      weekLabels.forEach(w => weekdaysRow.createEl("div", { text: w }));
-
-      // Mini Month Day Grid
-      const miniGrid = card.createEl("div", { cls: "timenote-mini-month-grid" });
-      const firstDay = monthMoment.clone().startOf("month");
-      let dayOfWeek = firstDay.day();
-      if (this.plugin.settings.firstDayOfWeek === 1) {
-        dayOfWeek = (dayOfWeek + 6) % 7;
-      }
-
-      // Empty cells before month start
-      for (let pad = 0; pad < dayOfWeek; pad++) {
-        miniGrid.createEl("div", { cls: "timenote-mini-cell", style: "pointer-events: none;" });
-      }
-
-      // Days 1..daysInMonth
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dMom = monthMoment.clone().date(day);
-        const dStr = dMom.format("YYYY-MM-DD");
-        const dEntries = this.filterEntries(this.entriesMap.get(dStr) || []);
-        const isToday = dMom.isSame(window.moment(), "day");
-        const hasEvents = dEntries.length > 0;
-
-        const cell = miniGrid.createEl("div", {
-          cls: `timenote-mini-cell ${hasEvents ? "has-events" : ""} ${isToday ? "is-today" : ""}`,
-          text: `${day}`
-        });
-
-        if (hasEvents) {
-          cell.createEl("div", { cls: "timenote-mini-cell-dot" });
-          const taskCount = dEntries.filter(e => e.isTask).length;
-          const memoCount = dEntries.length - taskCount;
-          cell.setAttribute("title", `${dStr}: 共 ${dEntries.length} 条记录 (${taskCount} 待办, ${memoCount} 闪念)`);
-        } else {
-          cell.setAttribute("title", dStr);
-        }
-
-        cell.onclick = () => {
-          this.currentDate = dMom;
-          this.currentViewMode = "day";
-          this.renderView();
-        };
-      }
-    }
-  }
-
-  // ==========================================================================
-  // Year View Renderer (12个月热力全景)
-  // ==========================================================================
-
-  renderYearView(container) {
-    const yearContainer = container.createEl("div", { cls: "timenote-year-container" });
-    const year = this.currentDate.year();
-
-    // Stats
-    let totalEntries = 0;
-    let totalTasks = 0;
-    let completedTasks = 0;
-    let totalMemos = 0;
-    let activeDays = 0;
-
-    for (const [_, entries] of this.entriesMap.entries()) {
-      const filtered = this.filterEntries(entries);
-      if (filtered.length > 0) {
-        activeDays++;
-        totalEntries += filtered.length;
-        filtered.forEach(e => {
-          if (e.isTask) {
-            totalTasks++;
-            if (e.isCompleted) completedTasks++;
-          } else {
-            totalMemos++;
-          }
-        });
-      }
-    }
-
-    // 1. Year Banner
-    const banner = yearContainer.createEl("div", { cls: "timenote-year-banner" });
-    const bannerLeft = banner.createEl("div");
-    bannerLeft.createEl("h3", { text: `📅 ${year}年度 时间足迹全景`, style: "margin: 0 0 4px 0;" });
-    bannerLeft.createEl("div", {
-      text: `全年记录活跃天数: ${activeDays} / 365 天 · 活跃度: ${Math.round((activeDays / 365) * 100)}%`,
-      cls: "text-muted",
-      style: "font-size: 0.8rem;"
-    });
-
-    const bannerRight = banner.createEl("div", { cls: "timenote-stats-badge", style: "gap: 8px; font-size: 0.82rem;" });
-    bannerRight.createEl("span", { text: `📝 累计条目: ` }).createEl("strong", { text: `${totalEntries}` });
-    bannerRight.createEl("span", { text: ` · ✅ 待办完成: ` }).createEl("strong", { text: `${completedTasks}/${totalTasks}` });
-    bannerRight.createEl("span", { text: ` · 💡 灵感闪念: ` }).createEl("strong", { text: `${totalMemos}` });
-
-    // Heatmap Legend row
-    const legendRow = yearContainer.createEl("div", {
-      style: "display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 0.72rem; color: var(--text-muted); margin-top: -6px;"
-    });
-    legendRow.createEl("span", { text: "记录活跃度：" });
-    legendRow.createEl("span", { text: "少" });
-    for (let heat = 0; heat <= 4; heat++) {
-      legendRow.createEl("span", {
-        cls: `timenote-heat-${heat}`,
-        style: "width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--background-modifier-border); display: inline-block;"
-      });
-    }
-    legendRow.createEl("span", { text: "多" });
-
-    // 2. 12-Month Heatmap Grid
-    const grid = yearContainer.createEl("div", { cls: "timenote-year-grid" });
-
-    for (let m = 0; m < 12; m++) {
-      const monthMoment = window.moment().year(year).month(m).startOf("month");
-      const monthNum = m + 1;
-      const card = grid.createEl("div", { cls: "timenote-year-month-card" });
-
-      // Count entries for this month
-      let monthCount = 0;
-      const daysInMonth = monthMoment.daysInMonth();
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dStr = monthMoment.clone().date(d).format("YYYY-MM-DD");
-        monthCount += (this.filterEntries(this.entriesMap.get(dStr) || [])).length;
-      }
-
-      const cardHeader = card.createEl("div", { cls: "timenote-year-month-header" });
-      cardHeader.createEl("span", { text: `${monthNum}月` });
-      if (monthCount > 0) {
-        cardHeader.createEl("span", { text: `${monthCount}`, cls: "timenote-month-badge" });
-      }
-      cardHeader.onclick = () => {
-        this.currentDate = monthMoment.clone();
-        this.currentViewMode = "month";
-        this.renderView();
-      };
-
-      // Weekday abbreviations
-      const weekdaysRow = card.createEl("div", { cls: "timenote-mini-month-grid", style: "font-size: 0.65rem; color: var(--text-muted); margin-bottom: 2px;" });
-      const weekLabels = this.plugin.settings.firstDayOfWeek === 1 ? ["一", "二", "三", "四", "五", "六", "日"] : ["日", "一", "二", "三", "四", "五", "六"];
-      weekLabels.forEach(w => weekdaysRow.createEl("div", { text: w }));
-
-      // Days grid
-      const miniGrid = card.createEl("div", { cls: "timenote-mini-month-grid" });
-      const firstDay = monthMoment.clone().startOf("month");
-      let dayOfWeek = firstDay.day();
-      if (this.plugin.settings.firstDayOfWeek === 1) {
-        dayOfWeek = (dayOfWeek + 6) % 7;
-      }
-
-      // Pad before 1st
-      for (let pad = 0; pad < dayOfWeek; pad++) {
-        miniGrid.createEl("div", { cls: "timenote-mini-cell", style: "pointer-events: none;" });
-      }
-
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dMom = monthMoment.clone().date(day);
-        const dStr = dMom.format("YYYY-MM-DD");
-        const dEntries = this.filterEntries(this.entriesMap.get(dStr) || []);
-        const isToday = dMom.isSame(window.moment(), "day");
-        const count = dEntries.length;
-
-        // Heat class
-        let heatClass = "timenote-heat-0";
-        if (count >= 10) heatClass = "timenote-heat-4";
-        else if (count >= 6) heatClass = "timenote-heat-3";
-        else if (count >= 3) heatClass = "timenote-heat-2";
-        else if (count >= 1) heatClass = "timenote-heat-1";
-
-        const cell = miniGrid.createEl("div", {
-          cls: `timenote-mini-cell ${heatClass} ${isToday ? "is-today" : ""}`,
-          text: `${day}`
-        });
-
-        if (count > 0) {
-          cell.setAttribute("title", `${dStr}: ${count}条记录`);
-        } else {
-          cell.setAttribute("title", dStr);
-        }
-
-        cell.onclick = () => {
-          this.currentDate = dMom;
-          this.currentViewMode = "day";
-          this.renderView();
-        };
-      }
-    }
-  }
-
-  // Jump to specific line in daily note file
-  async jumpToFileLine(entry) {
-    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
-    if (!(file instanceof TFile)) return;
-
-    const leaf = this.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { eState: { line: Math.max(0, entry.lineNum - 1) } });
-  }
-
-  // 打开某一天的日记：存在则直接打开，不存在时按 QuickAdd 的目录规则创建后再打开（DEC-017）。
-  // 日 / 3 天 / 周视图的日期标题、时间线视图的「打开日记 ↗」共用这一入口。
-  async openDailyNoteForDate(dateStr: string) {
-    const svc = this.plugin.dailyNoteService;
-    // 索引有 5 秒缓存，点击前强制重建，避免刚在别处创建的日记查不到
-    svc.dailyNoteIndex.clear();
-    let file: TFile | null = svc.findDailyNoteFile(dateStr);
-    if (!file) {
-      const m = window.moment(dateStr);
-      const folder = `${this.plugin.settings.periodicNotesFolder}/${m.format("YYYY")}/Daily/${m.format("MM")}`;
-      let curr = "";
-      for (const part of folder.split("/")) {
-        curr = curr ? `${curr}/${part}` : part;
-        if (!await this.app.vault.adapter.exists(curr)) {
-          await this.app.vault.createFolder(curr);
-        }
-      }
-      const notePath = normalizePath(`${folder}/${dateStr}.md`);
-      const heading = parseQuickAddSection(this.plugin.settings.quickAddSection).heading;
-      file = await this.app.vault.create(notePath, `# ${dateStr}\n\n${heading}\n`);
-      svc.dailyNoteIndex.set(dateStr, file);
-      new Notice(`已创建并打开 ${dateStr} 日记`);
-    }
-    const leaf = this.app.workspace.getLeaf(false);
-    await leaf.openFile(file!);
-  }
+  /** 供设置页 / QuickAdd 保存回调触发重渲染 */
+  renderView() { return this.renderer ? this.renderer.renderView() : undefined; }
 }
+
 
 // ============================================================================
 // Quick Add Modal
@@ -3155,7 +469,7 @@ class QuickAddModal extends Modal {
     // 记录类型（DEC-022）：显式传入优先，否则跟随设置里的默认类型。
     // prefillEndTime 用 undefined 区分「没传（按类型补默认时长）」与「传了空串（时间点，无结束时间）」。
     this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
-    this.timeStr = prefillTime || window.moment().format("HH:mm:ss");
+    this.timeStr = prefillTime || moment().format("HH:mm:ss");
     this.endTimeStr = prefillEndTime !== undefined
       ? prefillEndTime
       : (this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60));
@@ -3362,6 +676,117 @@ class TimenoteSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
+    // ---------- 聚合远程来源（DEC-023） ----------
+    // 与上面那条的区别：上面读的是 vault 里的 Blinko **导出 md 文件**（本地、可写），
+    // 这里走的是 memos / Blinko 的 HTTP API（远程、只读）。两条通道可以同时开。
+    containerEl.createEl("h3", { text: "聚合远程来源" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "从 memos / Blinko 的 HTTP API 拉取记录，一并画在日历上。聚合进来的记录是只读的：不能拖拽改时间、不能跨天移动、不能勾选任务（与本地日记区分开）。"
+    });
+
+    new Setting(containerEl)
+      .setName("启用 Memos")
+      .setDesc("从 memos 实例拉取记录。需要实例地址与访问令牌（memos → 设置 → 访问令牌）。")
+      .addToggle(toggle => toggle
+        .setValue(!!this.plugin.settings.memosEnabled)
+        .onChange(async (val) => {
+          this.plugin.settings.memosEnabled = val;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Memos 地址")
+      .setDesc("形如 https://memos.example.com，末尾不要带 /api/v1。")
+      .addText(text => text
+        .setPlaceholder("https://memos.example.com")
+        .setValue(this.plugin.settings.memosBaseUrl || "")
+        .onChange(async (val) => {
+          this.plugin.settings.memosBaseUrl = val.trim();
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Memos 访问令牌")
+      .setDesc("以 Bearer 方式发送。令牌存在插件目录的 data.json 里，注意该文件是明文的。")
+      .addText(text => {
+        text.inputEl.type = "password";
+        text.setPlaceholder("memos 访问令牌")
+          .setValue(this.plugin.settings.memosToken || "")
+          .onChange(async (val) => {
+            this.plugin.settings.memosToken = val.trim();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton(btn => btn
+        .setButtonText("测试连接")
+        .onClick(async () => {
+          btn.setButtonText("测试中…").setDisabled(true);
+          const s = this.plugin.settings;
+          try {
+            const src = new MemosSource({ baseUrl: s.memosBaseUrl, token: s.memosToken });
+            if (!src.configured) throw new Error("地址或令牌为空");
+            const today = moment().format("YYYY-MM-DD");
+            const list = await src.listEntries(today, today);
+            new Notice(`Memos 连接成功：今天有 ${list.length} 条 memo`);
+          } catch (err) {
+            new Notice(`Memos 连接失败：${err instanceof Error ? err.message : String(err)}`);
+          } finally {
+            btn.setButtonText("测试连接").setDisabled(false);
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName("启用 Blinko API")
+      .setDesc("从 Blinko 实例实时拉取笔记。与上面的「聚合 Blinko 闪念（本地导出文件）」互不影响，可以只开一个。")
+      .addToggle(toggle => toggle
+        .setValue(!!this.plugin.settings.blinkoApiEnabled)
+        .onChange(async (val) => {
+          this.plugin.settings.blinkoApiEnabled = val;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Blinko 地址")
+      .setDesc("形如 https://blinko.example.com。")
+      .addText(text => text
+        .setPlaceholder("https://blinko.example.com")
+        .setValue(this.plugin.settings.blinkoBaseUrl || "")
+        .onChange(async (val) => {
+          this.plugin.settings.blinkoBaseUrl = val.trim();
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Blinko API Key")
+      .setDesc("以 Bearer 方式发送。在 Blinko 的「设置 → 访问令牌」里生成。")
+      .addText(text => {
+        text.inputEl.type = "password";
+        text.setPlaceholder("Blinko API Key")
+          .setValue(this.plugin.settings.blinkoApiKey || "")
+          .onChange(async (val) => {
+            this.plugin.settings.blinkoApiKey = val.trim();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton(btn => btn
+        .setButtonText("测试连接")
+        .onClick(async () => {
+          btn.setButtonText("测试中…").setDisabled(true);
+          const s = this.plugin.settings;
+          try {
+            const src = new BlinkoSource({ baseUrl: s.blinkoBaseUrl, apiKey: s.blinkoApiKey });
+            if (!src.configured) throw new Error("地址或 API Key 为空");
+            const today = moment().format("YYYY-MM-DD");
+            const list = await src.listEntries(today, today);
+            new Notice(`Blinko 连接成功：今天有 ${list.length} 条笔记`);
+          } catch (err) {
+            new Notice(`Blinko 连接失败：${err instanceof Error ? err.message : String(err)}`);
+          } finally {
+            btn.setButtonText("测试连接").setDisabled(false);
+          }
+        }));
+
     new Setting(containerEl)
       .setName("默认视图模式")
       .setDesc("打开日历时默认展示的视图。")
@@ -3545,6 +970,15 @@ export default class TimenotePlugin extends Plugin {
   // TODO(types): 渐进替换为显式字段声明
   [key: string]: any;
   async onload() {
+    // ---- 宿主装配（DEC-024 / DEC-025）----
+    // 三宿主共用的装配入口，必须在任何视图创建之前执行。
+    // installDomHelpers() 幂等且默认不覆盖已有实现：Obsidian 自己就提供了
+    // .createEl() 等扩展，所以在这里它是 no-op，Obsidian 侧行为逐字不变；
+    // Blinko / 思源宿主没有这些扩展，会自动补上标准 DOM 实现。
+    // 日期实现也由宿主注入：Obsidian 用它自己的 window.moment，另外两个宿主
+    // 不传 momentFactory、由 bootstrap 回落到零依赖的 nativeMoment。
+    prepareHostEnvironment({ momentFactory: window.moment });
+
     await this.loadSettings();
 
     this.dailyNoteService = new DailyNoteService(this.app, this.settings);
@@ -3573,7 +1007,7 @@ export default class TimenotePlugin extends Plugin {
       id: "quick-add-time-note",
       name: "快速记一条带时间笔记 (Quick Add)",
       callback: () => {
-        new QuickAddModal(this.app, this, window.moment().format("YYYY-MM-DD"), () => {
+        new QuickAddModal(this.app, this, moment().format("YYYY-MM-DD"), () => {
           const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE);
           leaves.forEach(leaf => (leaf.view as TimenoteView).renderView());
         }).open();
@@ -3594,6 +1028,8 @@ export default class TimenotePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    // 远程来源的地址 / 令牌可能刚被改过，缓存必须作废，否则要等 TTL 才生效
+    if (this.dailyNoteService) this.dailyNoteService.clearRemoteCache();
     // Refresh view
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_TIMENOTE);
     leaves.forEach(leaf => (leaf.view as TimenoteView).renderView());

@@ -4,10 +4,15 @@
 // 只做源码静态检查，不依赖浏览器；真机等效 DOM 的数值探针见 preview-real-dom.mjs。
 import fs from "node:fs";
 import path from "node:path";
-import { PROJECT_ROOT } from "./lib/elastic.mjs";
+import { PROJECT_ROOT, loadPluginSources } from "./lib/elastic.mjs";
 
 const css = fs.readFileSync(path.join(PROJECT_ROOT, "styles.css"), "utf8");
-const ts = fs.readFileSync(path.join(PROJECT_ROOT, "main.ts"), "utf8");
+const ts = loadPluginSources();
+// core/ 是平台无关核心的实现所在（DEC-023）：assignDayTints / BLOCK_RULER_W 等
+// 常量与函数已搬进这里，静态断言要同时看宿主源码与 core 源码。
+const coreTs = fs.readFileSync(path.join(PROJECT_ROOT, "core", "tints.ts"), "utf8")
+  + fs.readFileSync(path.join(PROJECT_ROOT, "core", "time.ts"), "utf8")
+  + fs.readFileSync(path.join(PROJECT_ROOT, "core", "scale.ts"), "utf8");
 // 去掉块注释，避免文件头的说明文字被误判成失效写法
 const cssCode = css.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -50,13 +55,13 @@ ok("时间块颜色由 --tn-tint 变量驱动（含兜底值）",
 ok("任务块不再固定橙色（颜色统一走按天分配）",
   !/\.timenote-event-block\.is-task\s*\{/.test(cssCode));
 ok("渲染时为每个块写入当天颜色",
-  /setProperty\(\s*"--tn-tint"/.test(ts) && /assignDayTints\(/.test(ts));
+  /setProperty\(\s*"--tn-tint"/.test(ts) && /assignDayTints\(/.test(coreTs));
 ok("今日列表头 / 网格底色浓度一致",
   (cssCode.match(/var\(--color-accent, #7c5cff\) 5%, transparent\)/g) || []).length === 2);
 
 console.log("--- 对齐：刻度列宽度与竖线 ---");
 const cssW = (cssCode.match(/--tn-ruler-w:\s*(\d+)px/) || [])[1];
-const tsW = (ts.match(/BLOCK_RULER_W\s*=\s*(\d+)/) || [])[1];
+const tsW = (coreTs.match(/BLOCK_RULER_W\s*=\s*(\d+)/) || [])[1];
 ok("CSS --tn-ruler-w 与 TS BLOCK_RULER_W 数值一致", !!cssW && cssW === tsW);
 ok("刻度列宽度足够放下 ALL DAY 标签（>= 64px）", Number(cssW) >= 64);
 ok("表头 spacer 禁止被内容撑宽（min-width:0 + overflow:hidden）",
