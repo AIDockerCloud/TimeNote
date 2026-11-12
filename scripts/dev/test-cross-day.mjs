@@ -394,6 +394,11 @@ ok("保存时点模式强制不带结束时间",
   /this\.addType === "point" \? "" : this\.endTimeStr\.trim\(\)/.test(src));
 ok("点模式拒绝把范围写进开始时间",
   /this\.addType === "point" && hasExplicitRange/.test(src));
+// 2026-11-12：周视图下 currentDate 会被对齐到周起始日（视图第一天），
+// 拿它当「+ 记一条」的默认日期会把新建记录记到第一天而不是今天。
+ok("工具栏「+ 记一条」默认今天，不用 currentDate",
+  /openQuickAdd\(moment\(\)\.format\("YYYY-MM-DD"\)/.test(src) &&
+  !/openQuickAdd\(this\.currentDate\.format/.test(src));
 ok("设置页默认类型改成单击切换按钮，工具栏仍是单击切换",
   /setName\("新建记录默认类型"\)[\s\S]{0,600}\.addButton\(/.test(src) &&
   /新增：时间点/.test(src) &&

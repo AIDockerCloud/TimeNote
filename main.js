@@ -831,8 +831,14 @@ var DailySource = class {
     this.readonly = false;
     /** dateStr -> 文件元数据。名字沿用原实现，方便调用方迁移 */
     this.index = /* @__PURE__ */ new Map();
-    /** filePath -> { mtime, entries }，按 mtime 判失效 */
+    /**
+     * filePath -> { mtime, entries, gen }。按 mtime + 写代数判失效：
+     * 只靠 mtime 挡不住「写盘前发起、写盘后才回填」的并发读取 —— index 里的
+     * mtime 在 5 秒 TTL 内不会变，旧读取回填的旧内容会被当成命中，跨天拖动后
+     * 视图就弹回搬移前的数据（2026-11-12 实测）。每次写盘递增 gen 即可作废它。
+     */
     this.fileCache = /* @__PURE__ */ new Map();
+    this.cacheGeneration = 0;
     this.indexBuiltTime = 0;
     var _a;
     this.store = config.store;
@@ -851,6 +857,14 @@ var DailySource = class {
   clearIndex() {
     this.index.clear();
     this.indexBuiltTime = 0;
+  }
+  /**
+   * 写盘后作废旧缓存。递增 gen 是为了让「写盘前发起的异步读取」即使晚到、
+   * 把旧内容回填进 fileCache，也会因 gen 不匹配而在下次读取时被丢弃。
+   */
+  invalidateFile(path) {
+    this.cacheGeneration++;
+    this.fileCache.delete(path);
   }
   /**
    * 建立「日期 → 文件」索引。
@@ -944,7 +958,9 @@ ${newLine}
   /** 解析单篇日记（只取顶层条目，缩进行挂成子项） */
   async parseDailyFile(file, dateStr) {
     const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.mtime) return cached.entries;
+    if (cached && cached.mtime === file.mtime && cached.gen === this.cacheGeneration) {
+      return cached.entries;
+    }
     const content = await this.store.read(file.path);
     const lines = content.split("\n");
     const entries = [];
@@ -980,7 +996,7 @@ ${newLine}
         currentParent = null;
       }
     }
-    this.fileCache.set(file.path, { mtime: file.mtime, entries });
+    this.fileCache.set(file.path, { mtime: file.mtime, entries, gen: this.cacheGeneration });
     return entries;
   }
   /**
@@ -1019,7 +1035,7 @@ ${newLine}
     }
     lines[targetIdx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
   /** 拖拽调节时间范围后回写：只改目标行的行首时间前缀，其余内容原样保留 */
@@ -1046,7 +1062,7 @@ ${newLine}
     if (newLine === line) return false;
     lines[idx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
   // 拖动时间点线后回写：只替换行首的单时间前缀，绝不生成结束时间 / 范围（DEC-018）。
@@ -1070,7 +1086,7 @@ ${newLine}
     if (newLine === line) return false;
     lines[idx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
   // 跨天拖动回写（DEC-022）：把目标行连同缩进子项从原日记搬到另一天的日记。
@@ -1096,7 +1112,7 @@ ${newLine}
     const remaining = lines.slice();
     remaining.splice(idx, moving.length);
     await this.store.write(path, remaining.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
   /** 契约入口：新建一条（供未来宿主表单直接调用） */
@@ -1148,7 +1164,7 @@ ${newLine}
       }
       await this.store.write(file.path, fileText);
     }
-    this.fileCache.delete(file.path);
+    this.invalidateFile(file.path);
   }
 };
 
@@ -1946,7 +1962,7 @@ var TimenoteRenderer = class {
       startMoment = this.currentDate.clone().startOf("day");
       endMoment = this.currentDate.clone().add(6, "days").endOf("day");
     }
-    this.entriesMap = await this.host.getEntriesForRange(startMoment, endMoment);
+    return await this.host.getEntriesForRange(startMoment, endMoment);
   }
   async renderView() {
     this.hideHoverTooltip();
@@ -1955,8 +1971,9 @@ var TimenoteRenderer = class {
     const container = this.root;
     container.empty();
     container.addClass("timenote-container");
-    await this.refreshData();
+    const entriesMap = await this.refreshData();
     if (gen !== this.renderGeneration) return;
+    this.entriesMap = entriesMap;
     this.renderHeader(container);
     this.renderSubHeader(container);
     if (this.currentViewMode === "day") {
@@ -2069,7 +2086,7 @@ var TimenoteRenderer = class {
     };
     const addBtn = actions.createEl("button", { text: "+ \u8BB0\u4E00\u6761", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
-      this.host.openQuickAdd(this.currentDate.format("YYYY-MM-DD"), () => {
+      this.host.openQuickAdd(moment().format("YYYY-MM-DD"), () => {
         this.renderView();
       });
     };

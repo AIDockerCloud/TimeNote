@@ -189,7 +189,11 @@ export class TimenoteRenderer {
       endMoment = this.currentDate.clone().add(6, "days").endOf("day");
     }
 
-    this.entriesMap = await this.host.getEntriesForRange(startMoment, endMoment);
+    // 把结果返回给调用方，不要在这里写 this.entriesMap：
+    // 并发的 renderView 会各自 await refreshData()，旧调用若晚于新调用完成，
+    // 就会用「写文件前」的旧数据覆盖共享状态，导致跨天拖动 / 新建后视图弹回旧内容。
+    // 由 renderView 在 generation 检查通过后再落地（见下）。
+    return await this.host.getEntriesForRange(startMoment, endMoment);
   }
 
   async renderView() {
@@ -205,8 +209,11 @@ export class TimenoteRenderer {
     container.empty();
     container.addClass("timenote-container");
 
-    await this.refreshData();
+    // 旧调用即使被下面的 generation 检查丢弃，也不能让它把旧数据写进共享状态。
+    // 先收进局部变量，检查通过后再赋给 this.entriesMap。
+    const entriesMap = await this.refreshData();
     if (gen !== this.renderGeneration) return;
+    this.entriesMap = entriesMap;
 
     // 1. Primary Header Bar
     this.renderHeader(container);
@@ -354,7 +361,10 @@ export class TimenoteRenderer {
     // Quick Add Button
     const addBtn = actions.createEl("button", { text: "+ 记一条", cls: "timenote-btn-primary" });
     addBtn.onclick = () => {
-      this.host.openQuickAdd(this.currentDate.format("YYYY-MM-DD"), () => {
+      // 默认记「今天」，不要用 currentDate：周视图下 currentDate 会被对齐到周起始日
+      // （即视图第一天），拿它当默认日期会把新建记录记到周一去（2026-11-12 实测）。
+      // 空白槽点击仍按所点列日期，那是「点哪天记哪天」的既有设计。
+      this.host.openQuickAdd(moment().format("YYYY-MM-DD"), () => {
         this.renderView();
       });
     };

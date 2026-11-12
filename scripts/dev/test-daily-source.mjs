@@ -340,6 +340,40 @@ console.log("--- 分层边界 ---");
   }
 }
 
+// ---------- 写代数：挡住「写盘前发起、写盘后才回填」的并发读取 ----------
+// 2026-11-12：只靠 mtime 判失效不够 —— index 里的 mtime 在 5 秒 TTL 内不变，
+// 旧读取把搬移前的数据回填进 fileCache 后会被当成命中，跨天拖动后视图弹回旧内容。
+console.log("--- 缓存写代数 ---");
+{
+  const store = new MemoryFileStore({
+    [DAY_PATH]: `# ${DAY}\n\n## 灵感闪念\n- 09:00 原有记录\n`
+  });
+  const daily = new DailySource({ store, settings: SETTINGS });
+  await daily.listEntries(DAY, DAY);
+  const stale = daily.fileCache.get(DAY_PATH);
+  ok("解析缓存带写代数 gen", !!stale && typeof stale.gen === "number");
+  await daily.addEntry(DAY, "10:00", "新记录", false);
+  ok("写盘后该文件的缓存已作废", !daily.fileCache.has(DAY_PATH));
+  // 模拟旧读取晚到：用旧 gen 把搬移前的数据回填
+  daily.fileCache.set(DAY_PATH, stale);
+  const entries = await daily.listEntries(DAY, DAY);
+  ok("旧 gen 缓存不被命中，读到写盘后的新内容",
+    entries.some(e => String(e.text).includes("新记录")),
+    entries.map(e => e.text).join("|"));
+  ok("旧 gen 缓存已被新结果替换", daily.fileCache.get(DAY_PATH)?.gen !== stale.gen);
+}
+{
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const { PROJECT_ROOT } = await import("./lib/elastic.mjs");
+  const code = fsMod.readFileSync(pathMod.join(PROJECT_ROOT, "sources", "daily.ts"), "utf8");
+  ok("所有写路径统一走 invalidateFile（不再直接 delete）",
+    /private invalidateFile\(path: string\)[\s\S]*?cacheGeneration\+\+/.test(code) &&
+    (code.match(/this\.invalidateFile\(/g) || []).length >= 5);
+  ok("解析缓存校验同时看 mtime 与 gen",
+    /cached\.mtime === file\.mtime && cached\.gen === this\.cacheGeneration/.test(code));
+}
+
 // ---------- 汇总 ----------
 console.log(`\n===== ${pass} passed, ${fails.length} failed =====`);
 if (fails.length) {

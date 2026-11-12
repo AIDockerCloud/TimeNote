@@ -139,6 +139,33 @@ console.log("--- 对照组（证明测试确实抓得到这个 bug） ---");
     view.contentEl.children.length === 6, `实际 ${view.contentEl.children.length} 个节点`);
 }
 
+// ---------- 2.5) 共享数据竞态（2026-11-12：跨天拖动后视图弹回搬移前的数据） ----------
+// generation 防线原先只挡住「重复 append DOM」，没挡住 refreshData 写 this.entriesMap：
+// 旧调用若晚于新调用完成，会用写盘前读到的旧数据覆盖共享状态，最后一次渲染
+// 于是画出搬移前的内容。修法：refreshData 返回结果，代号检查通过后才落地。
+console.log("--- 共享 entriesMap 只由落地调用写入 ---");
+{
+  const OLD = new Map([["old", []]]);
+  const NEW = new Map([["new", []]]);
+  const dOld = deferred();
+  const dNew = deferred();
+  const queue = [dOld.p, dNew.p];
+  let n = 0;
+  const view = makeView(async () => {
+    const i = n++;
+    await queue[i];
+    return i === 0 ? OLD : NEW;
+  });
+  const a = renderView.call(view); // gen 1：模拟写盘前发起的旧读取
+  const b = renderView.call(view); // gen 2：写盘后发起的新读取
+  dNew.resolve();
+  await b;                         // 新调用先完成并落地
+  dOld.resolve();
+  await a;                         // 旧调用后完成，结果必须被丢弃
+  ok("旧调用的 refreshData 结果不覆盖 this.entriesMap", view.entriesMap === NEW);
+  ok("并发仍只渲染一套 DOM", layout(view) === ONE_SET, layout(view));
+}
+
 // ---------- 3) 静态断言：根因链路仍在，但已被代号兜住 ----------
 console.log("--- 源码 / 产物 ---");
 const body = src.slice(mStart, mEnd);
@@ -150,6 +177,11 @@ ok("empty() 仍在 await 之前", body.indexOf("container.empty()") < body.index
 // DEC-025：文件监听从 ItemView.registerEvent 移到 HostAdapter.onExternalChange
 ok("vault.modify 监听保留（不靠删事件规避）", /vault\.on\("modify"/.test(src));
 ok("QuickAdd 保存后 onSaved 仍触发渲染", /if \(this\.onSaved\) this\.onSaved\(\)/.test(src));
+ok("refreshData 返回结果，不再直接写共享 entriesMap",
+  /return await this\.host\.getEntriesForRange\(startMoment, endMoment\);/.test(src) &&
+  !/this\.entriesMap = await this\.host\.getEntriesForRange/.test(src));
+ok("代号检查通过后才把数据落到 this.entriesMap",
+  body.indexOf("this.entriesMap = entriesMap") > body.indexOf("if (gen !== this.renderGeneration) return;"));
 ok("产物含代号检查", bundle.includes("this.renderGeneration") && bundle.includes("gen !== this.renderGeneration"));
 ok("产物不再用 children[1]", !bundle.includes("containerEl.children[1]"));
 

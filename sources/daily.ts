@@ -79,8 +79,14 @@ export class DailySource implements NoteSource {
 
   /** dateStr -> 文件元数据。名字沿用原实现，方便调用方迁移 */
   readonly index = new Map<string, NoteFile>();
-  /** filePath -> { mtime, entries }，按 mtime 判失效 */
-  readonly fileCache = new Map<string, { mtime: number; entries: NoteEntry[] }>();
+  /**
+   * filePath -> { mtime, entries, gen }。按 mtime + 写代数判失效：
+   * 只靠 mtime 挡不住「写盘前发起、写盘后才回填」的并发读取 —— index 里的
+   * mtime 在 5 秒 TTL 内不会变，旧读取回填的旧内容会被当成命中，跨天拖动后
+   * 视图就弹回搬移前的数据（2026-11-12 实测）。每次写盘递增 gen 即可作废它。
+   */
+  readonly fileCache = new Map<string, { mtime: number; entries: NoteEntry[]; gen: number }>();
+  private cacheGeneration = 0;
   private indexBuiltTime = 0;
 
   constructor(config: DailySourceConfig) {
@@ -102,6 +108,15 @@ export class DailySource implements NoteSource {
   clearIndex(): void {
     this.index.clear();
     this.indexBuiltTime = 0;
+  }
+
+  /**
+   * 写盘后作废旧缓存。递增 gen 是为了让「写盘前发起的异步读取」即使晚到、
+   * 把旧内容回填进 fileCache，也会因 gen 不匹配而在下次读取时被丢弃。
+   */
+  private invalidateFile(path: string): void {
+    this.cacheGeneration++;
+    this.fileCache.delete(path);
   }
 
   /**
@@ -203,7 +218,9 @@ export class DailySource implements NoteSource {
   /** 解析单篇日记（只取顶层条目，缩进行挂成子项） */
   async parseDailyFile(file: NoteFile, dateStr: string): Promise<NoteEntry[]> {
     const cached = this.fileCache.get(file.path);
-    if (cached && cached.mtime === file.mtime) return cached.entries;
+    if (cached && cached.mtime === file.mtime && cached.gen === this.cacheGeneration) {
+      return cached.entries;
+    }
 
     const content = await this.store.read(file.path);
     const lines = content.split("\n");
@@ -255,7 +272,7 @@ export class DailySource implements NoteSource {
       }
     }
 
-    this.fileCache.set(file.path, { mtime: file.mtime, entries });
+    this.fileCache.set(file.path, { mtime: file.mtime, entries, gen: this.cacheGeneration });
     return entries;
   }
 
@@ -299,7 +316,7 @@ export class DailySource implements NoteSource {
     }
     lines[targetIdx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
 
@@ -333,7 +350,7 @@ export class DailySource implements NoteSource {
 
     lines[idx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
 
@@ -362,7 +379,7 @@ export class DailySource implements NoteSource {
 
     lines[idx] = newLine;
     await this.store.write(path, lines.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
 
@@ -403,7 +420,7 @@ export class DailySource implements NoteSource {
     const remaining = lines.slice();
     remaining.splice(idx, moving.length);
     await this.store.write(path, remaining.join("\n"));
-    this.fileCache.delete(path);
+    this.invalidateFile(path);
     return true;
   }
 
@@ -473,6 +490,6 @@ export class DailySource implements NoteSource {
       }
       await this.store.write(file.path, fileText);
     }
-    this.fileCache.delete(file.path);
+    this.invalidateFile(file.path);
   }
 }
