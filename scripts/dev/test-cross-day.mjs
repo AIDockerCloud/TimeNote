@@ -299,11 +299,24 @@ const baseEntry = (rawLine, extra = {}) => ({
 console.log("--- 跨天落点（列几何）---");
 function makeCol(dateStr, left, right) {
   const classes = new Set();
+  const children = [];
   return {
     dataset: { dateStr },
     getBoundingClientRect: () => ({ left, right }),
     classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c) },
-    classes
+    classes,
+    children,
+    // DEC-031：markDropDate 会在目标列顶创建 / 移除日期标签，假列要能接住
+    querySelector: (sel) => children.find(c => c.className === sel.slice(1)) || null,
+    createEl: (_tag, opts) => {
+      const el = {
+        className: opts?.cls || "",
+        textContent: "",
+        remove() { const i = children.indexOf(el); if (i >= 0) children.splice(i, 1); }
+      };
+      children.push(el);
+      return el;
+    }
   };
 }
 {
@@ -316,8 +329,12 @@ function makeCol(dateStr, left, right) {
   markDropDate(cols, "2026-11-11");
   ok("只高亮目标列", cols[1].classes.has("is-drop-target") &&
     !cols[0].classes.has("is-drop-target") && !cols[2].classes.has("is-drop-target"));
+  ok("目标列顶显示「松手 → 完整日期」标签",
+    cols[1].children.some(c => c.textContent === "松手 → 2026-11-11") &&
+    cols[0].children.length === 0 && cols[2].children.length === 0);
   markDropDate(cols, null);
   ok("松手后清掉所有高亮", cols.every(c => !c.classes.has("is-drop-target")));
+  ok("松手后清掉所有落点标签", cols.every(c => c.children.length === 0));
 }
 
 // ---------- 6) addEntry(rawLines) 与「新增时间点落盘不是块」 ----------
@@ -358,7 +375,7 @@ console.log("--- 原样插入 + 新增时间点的数据形态 ---");
 console.log("--- 接线 / 产物 / 样式 ---");
 ok("默认设置是时间点（DEC-029）", /defaultAddType:\s*"point"/.test(src));
 ok("每列带日期标识", /col\.dataset\.dateStr = dateStr;/.test(src));
-ok("块拖动接了跨天落点", /const columns = col && col\.parentElement/.test(src) &&
+ok("块拖动接了跨天落点", /const getColumns = \(\)/.test(src) &&
   /commitEntryMove\(entry, moveTo, curStart, curEnd\)/.test(src));
 ok("点线拖动也接了跨天落点", /commitEntryPointMove\(entry, moveTo, curStart\)/.test(src));
 ok("跨天只在中部平移模式生效（边缘改起止不跨天）",
@@ -415,8 +432,21 @@ ok("交互预览与真机一致（默认时间点 + 单击切换按钮）",
 ok("CSS 有落点高亮与点预览线，且颜色走双声明",
   /\.timenote-block-column\.is-drop-target/.test(css) &&
   /\.timenote-point-ghost/.test(css) &&
-  /box-shadow: inset 0 0 0 2px rgba\(/.test(css) &&
-  /box-shadow: inset 0 0 0 2px color-mix\(/.test(css));
+  /box-shadow: inset 0 0 0 3px rgba\(/.test(css) &&
+  /box-shadow: inset 0 0 0 3px color-mix\(/.test(css) &&
+  /background-color: color-mix\(/.test(css));
+// DEC-031：列数组必须在 pointerdown 时才查。渲染时（days.forEach 逐列）做快照
+// 只会拿到「到当前列为止」的几列，第一天的记录横拖永远找不到落点。
+ok("拖动时才查列数组（渲染时快照会漏掉后面的列）",
+  (src.match(/const getColumns = \(\)/g) || []).length === 2 &&
+  (src.match(/const columns = getColumns\(\);/g) || []).length === 2 &&
+  !src.includes("const columns = col && col.parentElement"));
+ok("落点高亮带列顶日期标签",
+  src.includes("timenote-drop-target-label") && src.includes("松手 → ") &&
+  css.includes(".timenote-drop-target-label"));
+ok("落点日期显示完整 YYYY-MM-DD，横拖无落点时给 ?",
+  src.includes("` → ${targetDate}`") && src.includes("→ ?") &&
+  !src.includes("targetDate.slice(5)"));
 ok("产物 main.js 已包含新逻辑（需先 build）",
   ["defaultAddType", "moveEntryToDate", "timenote-point-ghost", "is-drop-target", "normalizeAddType"]
     .every(k => built.includes(k)),

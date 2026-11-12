@@ -563,11 +563,20 @@ export class TimenoteRenderer {
     return null;
   }
 
-  // 拖动中的落点提示：高亮目标列，其余列清掉
+  // 拖动中的落点提示：高亮目标列，并在列顶标出「松手 → YYYY-MM-DD」，其余列清掉。
+  // 用户 2026-11-12 要求「释放前就看得见究竟落到哪天」，只靠 2px 描边不够直观。
   markDropDate(columns, targetDate) {
     columns.forEach(c => {
-      if (c.dataset.dateStr === targetDate) c.classList.add("is-drop-target");
+      const isTarget = !!targetDate && c.dataset.dateStr === targetDate;
+      if (isTarget) c.classList.add("is-drop-target");
       else c.classList.remove("is-drop-target");
+      const existing = c.querySelector(".timenote-drop-target-label");
+      if (isTarget) {
+        const label = existing || c.createEl("div", { cls: "timenote-drop-target-label" });
+        label.textContent = `松手 → ${targetDate}`;
+      } else if (existing) {
+        existing.remove();
+      }
     });
   }
 
@@ -1266,10 +1275,13 @@ export class TimenoteRenderer {
 
     // 跨天拖动（DEC-022）：每列带 dataset.dateStr，指针横向进入别的列即换日期。
     // 边缘模式（start / end）只改起止、不允许跨天，免得「调时长」误变成「搬记录」。
-    const col = block.parentElement as HTMLElement | null;
-    const columns = col && col.parentElement
-      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
-      : [];
+    // ⚠️ 与点线同理：列数组必须等 pointerdown 时再查，渲染时快照会漏掉后面的列。
+    const getColumns = (): HTMLElement[] => {
+      const col = block.parentElement as HTMLElement | null;
+      return col && col.parentElement
+        ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
+        : [];
+    };
     const homeDate = entry.dateStr;
     const canMoveDay = !entry.readonly && (!entry.source || entry.source === "daily");
 
@@ -1297,6 +1309,7 @@ export class TimenoteRenderer {
       if (ev.button !== 0) return;
       const target = ev.target as HTMLElement;
       if (target && (target.tagName === "INPUT" || (target.closest && target.closest(".timenote-event-block-sub")))) return;
+      const columns = getColumns(); // 此刻整张表已渲染完，7 列都在
 
       const rect = block.getBoundingClientRect();
       const offsetY = ev.clientY - rect.top;
@@ -1321,7 +1334,9 @@ export class TimenoteRenderer {
         block.style.top = `${top}px`;
         block.style.height = `${spanPx}px`;
         block.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
-        meta.textContent = `${formatSecondsToTime(curStart)} – ${formatSecondsToTime(curEnd)}${tagSuffix}${targetDate ? ` → ${targetDate}` : ""}`;
+        const dropText = targetDate ? ` → ${targetDate}`
+          : (mode === "move" && canMoveDay && Math.abs(dragDx) >= 12 ? " → ?" : "");
+        meta.textContent = `${formatSecondsToTime(curStart)} – ${formatSecondsToTime(curEnd)}${tagSuffix}${dropText}`;
         duration.textContent = formatDuration(curEnd - curStart);
       };
 
@@ -1434,11 +1449,17 @@ export class TimenoteRenderer {
     if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
 
     // 点线也支持横向拖到别的日期列（DEC-022）：与时间块共用 findDropDate / 落点高亮
-    const col = line.parentElement as HTMLElement | null;
-    const columns = col && col.parentElement
-      ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
-      : [];
     const homeDate = entry.dateStr;
+    // ⚠️ columns 必须等 pointerdown 时再查：本方法是在 days.forEach 逐列渲染时
+    // 调用的，那一刻后面的日期列还没创建；渲染时做 Array.from 快照只会拿到
+    // 「到当前列为止」的几列 —— 第一天的记录甚至只有 1 列，横拖到别的天
+    // findDropDate 恒返回 null，记录就留在第一天（2026-11-12 实测的「吸附」）。
+    const getColumns = (): HTMLElement[] => {
+      const col = line.parentElement as HTMLElement | null;
+      return col && col.parentElement
+        ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) as HTMLElement[]
+        : [];
+    };
 
     const baseY = scale.yOf(origStart);
     let curStart = origStart;
@@ -1446,6 +1467,7 @@ export class TimenoteRenderer {
       if (ev.button !== 0) return;
       ev.preventDefault();
       ev.stopPropagation();
+      const columns = getColumns(); // 此刻整张表已渲染完，7 列都在
       const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
@@ -1471,8 +1493,10 @@ export class TimenoteRenderer {
           Math.min(scale.dayEndSec, snapSeconds(raw, POINT_SNAP_MINUTES)));
         line.style.top = `${scale.yOf(curStart)}px`;
         line.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
+        // 显示完整落点日期；横向拖了却没识别出落点时给个「?」，便于排障
         timeBadge.textContent = formatSecondsToTime(curStart) +
-          (targetDate ? ` → ${targetDate.slice(5)}` : "");
+          (targetDate ? ` → ${targetDate}`
+            : (Math.abs(dragDx) >= 12 ? " → ?" : ""));
       };
 
       const onUp = () => {

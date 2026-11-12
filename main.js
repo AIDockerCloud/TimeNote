@@ -2257,11 +2257,20 @@ var TimenoteRenderer = class {
     }
     return null;
   }
-  // 拖动中的落点提示：高亮目标列，其余列清掉
+  // 拖动中的落点提示：高亮目标列，并在列顶标出「松手 → YYYY-MM-DD」，其余列清掉。
+  // 用户 2026-11-12 要求「释放前就看得见究竟落到哪天」，只靠 2px 描边不够直观。
   markDropDate(columns, targetDate) {
     columns.forEach((c) => {
-      if (c.dataset.dateStr === targetDate) c.classList.add("is-drop-target");
+      const isTarget = !!targetDate && c.dataset.dateStr === targetDate;
+      if (isTarget) c.classList.add("is-drop-target");
       else c.classList.remove("is-drop-target");
+      const existing = c.querySelector(".timenote-drop-target-label");
+      if (isTarget) {
+        const label = existing || c.createEl("div", { cls: "timenote-drop-target-label" });
+        label.textContent = `\u677E\u624B \u2192 ${targetDate}`;
+      } else if (existing) {
+        existing.remove();
+      }
     });
   }
   renderCompactGrid(container, days) {
@@ -2829,8 +2838,10 @@ var TimenoteRenderer = class {
       block.addClass("is-readonly");
       return;
     }
-    const col = block.parentElement;
-    const columns = col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
+    const getColumns = () => {
+      const col = block.parentElement;
+      return col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
+    };
     const homeDate = entry.dateStr;
     const canMoveDay = !entry.readonly && (!entry.source || entry.source === "daily");
     const origStart = Number(entry.startSeconds) || 0;
@@ -2851,6 +2862,7 @@ var TimenoteRenderer = class {
       if (ev.button !== 0) return;
       const target = ev.target;
       if (target && (target.tagName === "INPUT" || target.closest && target.closest(".timenote-event-block-sub"))) return;
+      const columns = getColumns();
       const rect = block.getBoundingClientRect();
       const offsetY = ev.clientY - rect.top;
       const edge = blockEdgeHit(rect.height);
@@ -2871,7 +2883,8 @@ var TimenoteRenderer = class {
         block.style.top = `${top}px`;
         block.style.height = `${spanPx}px`;
         block.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
-        meta.textContent = `${formatSecondsToTime(curStart)} \u2013 ${formatSecondsToTime(curEnd)}${tagSuffix}${targetDate ? ` \u2192 ${targetDate}` : ""}`;
+        const dropText = targetDate ? ` \u2192 ${targetDate}` : mode === "move" && canMoveDay && Math.abs(dragDx) >= 12 ? " \u2192 ?" : "";
+        meta.textContent = `${formatSecondsToTime(curStart)} \u2013 ${formatSecondsToTime(curEnd)}${tagSuffix}${dropText}`;
         duration.textContent = formatDuration(curEnd - curStart);
       };
       const onMove = (e) => {
@@ -2970,15 +2983,18 @@ var TimenoteRenderer = class {
     }
     const origStart = Number(entry.startSeconds) || 0;
     if (origStart < scale.dayStartSec || origStart > scale.dayEndSec) return;
-    const col = line.parentElement;
-    const columns = col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
     const homeDate = entry.dateStr;
+    const getColumns = () => {
+      const col = line.parentElement;
+      return col && col.parentElement ? Array.from(col.parentElement.querySelectorAll(".timenote-block-column")) : [];
+    };
     const baseY = scale.yOf(origStart);
     let curStart = origStart;
     line.onpointerdown = (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
       ev.stopPropagation();
+      const columns = getColumns();
       const startX = ev.clientX;
       const startY = ev.clientY;
       let moved = false;
@@ -3002,7 +3018,7 @@ var TimenoteRenderer = class {
         );
         line.style.top = `${scale.yOf(curStart)}px`;
         line.style.transform = dragDx ? `translateX(${dragDx}px)` : "";
-        timeBadge.textContent = formatSecondsToTime(curStart) + (targetDate ? ` \u2192 ${targetDate.slice(5)}` : "");
+        timeBadge.textContent = formatSecondsToTime(curStart) + (targetDate ? ` \u2192 ${targetDate}` : Math.abs(dragDx) >= 12 ? " \u2192 ?" : "");
       };
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
