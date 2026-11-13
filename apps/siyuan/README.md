@@ -6,6 +6,12 @@ parser, write-back rules and remote aggregation as the Obsidian build.
 > ⚠️ **First release**: implemented against the SiYuan kernel source and covered by
 > offline simulation tests, but **not yet verified on a real SiYuan instance**.
 > Please run the checklist in `README.zh-CN.md` after installing.
+>
+> 🔧 **SiYuan 3.8 fix (2026-11-14, DEC-035)**: the original `v1.1.3-beta.1`
+> `package.zip` showed only the toolbar buttons with no calendar view — the shared
+> dependency-free moment shim lacked `isoWeekday()` and the error was silently
+> swallowed. **Download `releases/download/v1.1.3/package.zip` (stable) instead**;
+> the beta asset is stale. Any further failure now renders a red error card in the tab.
 
 ## Install
 
@@ -17,9 +23,10 @@ parser, write-back rules and remote aggregation as the Obsidian build.
 
 > **Release status (since v1.1.3-beta.1)**: `.github/workflows/release.yml`
 > builds and attaches **`package.zip`** to every `v*` tag release automatically
-> (no conflict with Blinko's `release.zip`). Stable builds are available at
-> `releases/download/v<version>/package.zip`; **pre-release tags carry a suffix**,
-> e.g. `releases/download/v1.1.3-beta.1/package.zip` for this build.
+> (no conflict with Blinko's `release.zip`). **Current stable release: `v1.1.3`** →
+> `releases/download/v1.1.3/package.zip`; later stable builds follow
+> `releases/download/v<version>/package.zip`. **Pre-release tags carry a suffix**,
+> e.g. `releases/download/v1.1.3-beta.1/package.zip` (stale, do not use).
 
 Marketplace installation is not supported in this release: SiYuan requires the
 plugin name to match its own repository, while TimeNote keeps all three hosts in

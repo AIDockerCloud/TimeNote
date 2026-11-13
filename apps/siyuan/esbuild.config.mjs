@@ -46,8 +46,34 @@ pluginJson.version = version;
 const pluginJsonText = JSON.stringify(pluginJson, null, 2) + "\n";
 writeFileSync(resolve(outDir, "plugin.json"), pluginJsonText);
 
-// ③ 样式：三端共用同一份 styles.css，不改动 Obsidian 产物
-const css = readFileSync(resolve(root, "styles.css"));
+// ③ 样式：三端共用同一份 styles.css，末尾只给思源追加宿主适配段。
+//    styles.css 沿用 Obsidian 的 CSS 变量名，思源主题用的是 --b3-*；
+//    不映射的话 var() 无定义会让整条声明被丢弃，背景 / 边框 / 文字色全失效。
+//    另外部分版本的自定义页签没有确定高度，height:100% 会塌成 0，
+//    overflow:hidden 就把整张日历裁没了 —— 给容器一个最小高度兜底。
+const HOST_CSS = `
+
+/* ===== TimeNote for 思源：宿主变量 / 容器高度适配 ===== */
+:root {
+  --background-primary: var(--b3-theme-background, #ffffff);
+  --background-secondary: var(--b3-theme-surface, #f5f6f7);
+  --background-secondary-alt: var(--b3-theme-surface-light, var(--b3-theme-surface, transparent));
+  --background-modifier-border: var(--b3-border-color, #dfe1e5);
+  --background-modifier-hover: var(--b3-theme-primary-light, rgba(127,127,127,.12));
+  --text-normal: var(--b3-theme-on-background, #202124);
+  --text-muted: var(--b3-theme-on-surface, #5f6368);
+  --text-on-accent: var(--b3-theme-on-primary, #ffffff);
+  --color-accent: var(--b3-theme-primary, #3575f0);
+  --interactive-accent: var(--b3-theme-primary, #3575f0);
+  --color-green: #1f9d55;
+  --color-orange: #e8912d;
+  --color-purple: #8a63d2;
+  --font-interface: var(--b3-font-family, system-ui, sans-serif);
+  --font-monospace: var(--b3-font-family-code, monospace);
+}
+.timenote-container { min-height: 360px; }
+`;
+const css = Buffer.from(readFileSync(resolve(root, "styles.css"), "utf8") + HOST_CSS, "utf8");
 writeFileSync(resolve(outDir, "index.css"), css);
 
 // ④ 多语言、说明、集市图片

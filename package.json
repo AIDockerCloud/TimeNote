@@ -33,7 +33,7 @@
     "test:ui": "node scripts/dev/test-ui.mjs",
     "test:bundle": "node scripts/dev/test-bundle-load.mjs",
     "preview:cross": "node scripts/dev/preview-cross-day.mjs",
-    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross && npm run test:sources && npm run test:ui && npm run test:bundle && npm run test:hosts && npm run test:daily && npm run test:blinko-local && npm run test:template && npm run test:platforms && npm run test:quick-add",
+    "test": "npm run test:timeline && npm run test:drag && npm run test:visual && npm run test:tints && npm run test:open && npm run test:points && npm run test:section && npm run test:render && npm run test:cross && npm run test:sources && npm run test:ui && npm run test:bundle && npm run test:hosts && npm run test:daily && npm run test:blinko-local && npm run test:template && npm run test:platforms && npm run test:quick-add && npm run test:lifecycle",
     "test:hosts": "node scripts/dev/test-hosts.mjs",
     "build:apps": "node apps/esbuild.config.mjs",
     "build:plugins": "node apps/siyuan/esbuild.config.mjs && node apps/blinko/esbuild.config.mjs",
@@ -41,7 +41,8 @@
     "test:blinko-local": "node scripts/dev/test-blinko-local.mjs",
     "test:template": "node scripts/dev/test-daily-template.mjs",
     "test:platforms": "node scripts/dev/test-host-platforms.mjs",
-    "test:quick-add": "node scripts/dev/test-quick-add-body.mjs"
+    "test:quick-add": "node scripts/dev/test-quick-add-body.mjs",
+    "test:lifecycle": "node scripts/dev/test-plugin-lifecycle.mjs"
   },
   "keywords": [
     "obsidian",

@@ -171,13 +171,33 @@ export default class TimeNoteBlinkoPlugin {
         root.style.cssText = "height:100%;min-height:520px;overflow:auto;";
         // content() 返回的节点还没插入文档，等宿主挂载完再建渲染引擎
         setTimeout(() => {
-          const renderer = mountTimeNote(root, plugin.adapter as HostAdapter);
-          plugin.rendererRef = renderer;
-          void renderer.onOpen();
+          try {
+            const renderer = mountTimeNote(root, plugin.adapter as HostAdapter);
+            plugin.rendererRef = renderer;
+            // 不要把异常吞成 unhandledRejection（旧写法 `void onOpen()`）：
+            // 那会让对话框只剩半个工具栏，用户完全看不到出了什么事。
+            renderer.onOpen().catch((err: unknown) => plugin.reportRenderError(root, err));
+          } catch (err) {
+            plugin.reportRenderError(root, err);
+          }
         }, 0);
         return root;
       }
     });
+  }
+
+  /** 渲染异常直接显示在对话框里，避免「只有按钮、没有视图」的静默失败 */
+  private reportRenderError(root: HTMLElement, err: unknown): void {
+    const message = err instanceof Error ? (err.stack || err.message) : String(err);
+    console.error("[TimeNote/Blinko] 日历渲染失败", err);
+    const box = document.createElement("div");
+    box.className = "timenote-host-error";
+    box.style.cssText =
+      "margin:12px;padding:12px 14px;border:1px solid #d9534f;border-radius:6px;" +
+      "background:rgba(217,83,79,.08);color:#d9534f;font:12px/1.6 monospace;" +
+      "white-space:pre-wrap;word-break:break-all;user-select:text;";
+    box.textContent = "TimeNote 渲染失败，请把下面这段发给开发者：\n" + message;
+    root.appendChild(box);
   }
 
   destroy(): void {

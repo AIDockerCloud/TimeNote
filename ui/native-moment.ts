@@ -210,6 +210,23 @@ class NativeMomentImpl implements MomentLike {
   daysInMonth(): number { return daysInMonth(this.d); }
   quarter(): number { return Math.floor(this.d.getMonth() / 3) + 1; }
   isoWeek(): number { return isoWeekNumber(this.d); }
+
+  /**
+   * ISO 星期：周一=1 … 周日=7。
+   * ⚠️ 这一方法**必须存在**：ui/view.ts 的周视图标题用它判断「整周」，
+   * 缺失会让 renderHeader 抛 TypeError，renderView 在画完导航按钮后中断 ——
+   * 表现就是「界面只有按钮、没有内容和视图」（2026-11-14 思源 3.8 真机反馈）。
+   * Obsidian 用真 moment 从没暴露，两个新宿主用 nativeMoment 才踩到。
+   */
+  isoWeekday(): number;
+  isoWeekday(value: number): MomentLike;
+  isoWeekday(value?: number): number | MomentLike {
+    const current = ((this.d.getDay() + 6) % 7) + 1; // 周日 0 → 7，周一 1 → 1
+    if (value === undefined) return current;
+    const target = ((Number(value) - 1) % 7 + 7) % 7; // 0=周一 … 6=周日
+    this.d.setDate(this.d.getDate() - (current - 1) + target);
+    return this; // moment 的可变语义
+  }
   hours(): number { return this.d.getHours(); }
   minutes(): number { return this.d.getMinutes(); }
   seconds(): number { return this.d.getSeconds(); }

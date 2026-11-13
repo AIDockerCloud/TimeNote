@@ -52,7 +52,7 @@
 
 | 宿主 | 入口 / 产物 | 本地记录存哪 | 状态 |
 | :--- | :--- | :--- | :--- |
-| **Obsidian** | 仓库根三件套 / `timenote-<version>.zip` | vault 里的 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md` | ✅ 已发布（v1.1.2） |
+| **Obsidian** | 仓库根三件套 / `timenote-<version>.zip` | vault 里的 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md` | ✅ 已发布（v1.1.3） |
 | **思源笔记** | `apps/siyuan/` → `dist/siyuan/package.zip` | 思源原生每日笔记文档的**块**（内核 `/api/*`） | ⚠️ 已实现，**尚未真机验证** |
 | **Blinko** | `apps/blinko/` → `dist/blinko/release.zip` | Blinko 原生 **note**（`window.Blinko.api` tRPC） | ⚠️ 已实现，**尚未真机验证** |
 
@@ -60,9 +60,9 @@
 
 **构建**：`npm run build:plugins`（独立于 `npm run build`，Obsidian `main.js` 逐字节不变）。`dist/` 已 gitignore，两个 zip 只在本机生成、不入库。
 
-**安装与验收**：见 [思源版 README](apps/siyuan/README.zh-CN.md) / [Blinko 版 README](apps/blinko/README_zh.md)，两份都写清了「数据存在哪里」「已知边界」「验收清单」。首版**未在真机验证** —— 本机没有思源 / Blinko 实例，实现依据是官方源码 + 离线模拟测试（含加载期冒烟），装完请按清单逐项试一遍。
+**安装与验收**：见 [思源版 README](apps/siyuan/README.zh-CN.md) / [Blinko 版 README](apps/blinko/README_zh.md)，两份都写清了「数据存在哪里」「已知边界」「验收清单」。首版**未在真机验证** —— 本机没有思源 / Blinko 实例，实现依据是官方源码 + 离线模拟测试（含加载期冒烟），装完请按清单逐项试一遍。**2026-11-14 已修思源 3.8「界面只有按钮、没有内容和视图」**：根因是 `nativeMoment` 缺 `isoWeekday()` 导致 `renderHeader` 抛错、异常又被 `void onOpen()` 吞掉（DEC-035）；修复已随 **`v1.1.3` 正式版**发布，请从 `releases/download/v1.1.3/package.zip`（思源）/ `release.zip`（Blinko）重新下载后再验，Blinko 同一处也一并修好；`v1.1.3-beta.1` 预发布是旧包，不要再用。
 
-**发布链路**：从 `v1.1.3-beta.1` 起，`.github/workflows/release.yml` 在每次 `v*` tag 发版时同时跑 `npm run build:plugins`，Release 共挂 6 个资产：`manifest.json` / `main.js` / `styles.css` / `timenote-<version>.zip`（Obsidian）+ `package.zip`（思源）+ `release.zip`（Blinko）。Blinko 安装器要求资产名固定为 `release.zip`；思源首版不走集市（集市要求插件名 == 仓库名），需下载 `package.zip` 手动解压。**预发布 tag 带后缀**（如 `v1.1.3-beta.1`），资产路径是 `releases/download/v1.1.3-beta.1/release.zip`；安装器一般只读 Latest，预发布阶段请手动下载。打包失败会让整个 Release 变红 —— 宁可不发，不发缺件的包。
+**发布链路**：从 `v1.1.3-beta.1` 起，`.github/workflows/release.yml` 在每次 `v*` tag 发版时同时跑 `npm run build:plugins`，Release 共挂 6 个资产：`manifest.json` / `main.js` / `styles.css` / `timenote-<version>.zip`（Obsidian）+ `package.zip`（思源）+ `release.zip`（Blinko）。Blinko 安装器要求资产名固定为 `release.zip`；思源首版不走集市（集市要求插件名 == 仓库名），需下载 `package.zip` 手动解压。**当前正式版是 `v1.1.3`**（`releases/download/v1.1.3/`，含 DEC-035 修复，Blinko 市场安装器现在能直接读到）；预发布 tag 带后缀（如 `v1.1.3-beta.1`），资产路径是 `releases/download/v1.1.3-beta.1/release.zip`，安装器一般只读 Latest，预发布阶段请手动下载。打包失败会让整个 Release 变红 —— 宁可不发，不发缺件的包。
 
 ---
 
@@ -199,7 +199,7 @@ npm run check      # 类型检查 + PCMP 合规校验
 npm run pack       # 打包三件套 → dist/timenote-<version>.zip（不构建，先 build）
 npm run dist       # build + pack 一步到位
 npm run build:plugins  # 思源 / Blinko 两个插件包 → dist/siyuan/、dist/blinko/
-npm test           # 18 套 951 项断言（含 test:platforms 171 项、test:quick-add 24 项）
+npm test           # 19 套 987 项断言（含 test:platforms 171 项、test:quick-add 24 项、test:lifecycle 36 项）
 ```
 
 `npm run build:plugins` 不并进 `npm run build`，避免每次主构建都重打两个 zip；

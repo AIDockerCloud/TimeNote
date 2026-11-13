@@ -13,10 +13,11 @@ Blinko downloads `release.zip` from
 `https://github.com/AIDockerCloud/TimeNote/releases/download/v<version>/release.zip`.
 Since `v1.1.3-beta.1`, `.github/workflows/release.yml` builds and attaches
 `dist/blinko/release.zip` (named exactly `release.zip`) to every `v*` tag release
-automatically. Stable builds install from Settings → Plugins → Marketplace;
-**pre-release tags carry a suffix** (e.g. `v1.1.3-beta.1`) and installers usually
-read Latest only, so download
-`releases/download/v1.1.3-beta.1/release.zip` and unzip it manually for testing.
+automatically. **Current stable release: `v1.1.3`** (includes the DEC-035 fix for
+the "buttons but no view" failure) — install from Settings → Plugins → Marketplace,
+or download `releases/download/v1.1.3/release.zip`.
+**Pre-release tags carry a suffix** (e.g. `v1.1.3-beta.1`) and installers usually
+read Latest only; that beta asset is stale and must not be used.
 `plugin.json.version` is the base version (e.g. `1.1.3`), filled from `manifest.json`.
 
 ## Data model

@@ -16,9 +16,10 @@ https://github.com/AIDockerCloud/TimeNote/releases/download/v<version>/release.z
 
 从 `v1.1.3-beta.1` 起，`.github/workflows/release.yml` 会随每个 `v*` tag 自动构建，
 并把 `dist/blinko/release.zip` 作为名为 **`release.zip`** 的资产挂到 Release 上，
-无需手工上传。正式版在 Blinko「设置 → 插件 → 市场」里安装；**预发布 tag 带后缀**
-（如 `v1.1.3-beta.1`），安装器一般只读 Latest，预发布阶段请手动下载
-`releases/download/v1.1.3-beta.1/release.zip` 解压安装。
+无需手工上传。**当前正式版是 `v1.1.3`**（含 DEC-035「只有按钮没有视图」修复），
+可直接在 Blinko「设置 → 插件 → 市场」里安装，或下载
+`releases/download/v1.1.3/release.zip`；**预发布 tag 带后缀**（如
+`v1.1.3-beta.1`），安装器一般只读 Latest，`v1.1.3-beta.1` 是不含修复的旧包，请勿再用。
 `plugin.json` 的 `version` 是主版本段（如 `1.1.3`），由打包脚本读 `manifest.json` 覆盖。
 
 手动安装（开发调试）：把 `release.zip` 解压到

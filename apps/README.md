@@ -47,7 +47,7 @@ const renderer = mountTimeNote(rootEl, host);
 - **`HostNoteService`（`sources/host-service.ts`）** 装配 `DailySource` + `AggregateSource` + memos / 远程 Blinko 只读聚合 + 60 秒缓存；**刻意不从 `sources/index.ts` 导出**，否则会把顶层常量打进 Obsidian 的 `main.js`。
 - **两个入口都不改渲染层**：`prepareHostEnvironment()` 注入 `nativeMoment` + DOM 垫片，`mountTimeNote(root, host)` 挂 `TimenoteRenderer`；弹窗 / 设置页用 `apps/shared/` 的纯 DOM 实现，不继承 Obsidian `Modal` / `PluginSettingTab`。
 - **产物**：`npm run build:plugins` → `dist/siyuan/package.zip` 与 `dist/blinko/release.zip`（`dist/` 已 gitignore）。Blinko 安装器要求 Release 资产名固定 `release.zip`；思源首版不走集市（集市要求插件名 == 仓库名），需手动解压安装。详见 [思源 README](siyuan/README.zh-CN.md) / [Blinko README](blinko/README_zh.md)。
-- **如实标注**：两个插件均**未在真机验证**（本机无实例）。从 `v1.1.3-beta.1` 起 `.github/workflows/release.yml` 会自动把两个 zip 挂到 Release（DEC-034）；但安装器通常只读 Latest，预发布阶段需手动下载资产，装完请按各自 README 的「验收清单」逐项试。
+- **如实标注**：两个插件均**未在真机验证**（本机无实例）。从 `v1.1.3-beta.1` 起 `.github/workflows/release.yml` 会自动把两个 zip 挂到 Release（DEC-034）；**当前正式版 `v1.1.3` 已发布**（DEC-035 修复在内），Blinko 市场安装器现在能直接读到，思源仍需下载 `package.zip` 手动解压；旧的 `v1.1.3-beta.1` 预发布资产不含修复，请勿再用。装完请按各自 README 的「验收清单」逐项试。
 - **Obsidian 零回归**：`npm run build` 后 `git diff --stat -- main.js` 必须为空。
 
 ## 新增宿主要做的事

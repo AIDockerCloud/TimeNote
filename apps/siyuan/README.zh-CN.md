@@ -5,6 +5,13 @@
 
 > ⚠️ **首版状态**：按思源内核源码实现并跑通离线模拟测试，**尚未在真机思源验证**。
 > 安装后请先按文末「验收清单」逐项试一遍，有问题把控制台日志发回来。
+>
+> 🔧 **3.8 兼容性（2026-11-14 修复，DEC-035）**：`v1.1.3-beta.1` 的原始
+> `package.zip` 在思源 3.8 下会「只有工具栏按钮、没有日历视图」—— 根因是共享的
+> 零依赖日期实现缺 `isoWeekday()`，周视图标题渲染时抛错，异常又被入口静默吞掉。
+> **请从 `releases/download/v1.1.3/package.zip`（正式版）下载覆盖后重启思源**；
+> `v1.1.3-beta.1` 预发布是旧包，不含此修复。
+> 新版本若仍出错，页签里会直接显示红色错误卡片，把卡片文字发回来即可。
 
 ## 安装
 
@@ -17,9 +24,10 @@
 
 > **发布状态（从 v1.1.3-beta.1 起）**：`.github/workflows/release.yml` 会随每个
 > `v*` tag 自动构建并把 **`package.zip`** 挂到 Release（与 Blinko 的 `release.zip`
-> 不冲突）。正式版可从 `releases/download/v<version>/package.zip` 下载；
-> **预发布 tag 带后缀**，例如本次是
-> `releases/download/v1.1.3-beta.1/package.zip`。下载后按上面第 2 步解压即可。
+> 不冲突）。**当前正式版 `v1.1.3`**：`releases/download/v1.1.3/package.zip`；
+> 后续正式版按 `releases/download/v<version>/package.zip` 取。
+> **预发布 tag 带后缀**，例如 `v1.1.3-beta.1` →
+> `releases/download/v1.1.3-beta.1/package.zip`（旧包，勿用）。下载后按上面第 2 步解压即可。
 
 集市安装：思源集市要求「插件名与仓库名一致」，本插件寄居在
 `AIDockerCloud/TimeNote` 单仓里，因此**首版不走集市**，用上面的手动安装方式。

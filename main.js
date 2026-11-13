@@ -1823,6 +1823,13 @@ var NativeMomentImpl = class _NativeMomentImpl {
   isoWeek() {
     return isoWeekNumber(this.d);
   }
+  isoWeekday(value) {
+    const current = (this.d.getDay() + 6) % 7 + 1;
+    if (value === void 0) return current;
+    const target = ((Number(value) - 1) % 7 + 7) % 7;
+    this.d.setDate(this.d.getDate() - (current - 1) + target);
+    return this;
+  }
   hours() {
     return this.d.getHours();
   }

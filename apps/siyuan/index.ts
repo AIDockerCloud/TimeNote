@@ -94,20 +94,49 @@ export default class TimeNoteSiyuanPlugin extends PluginBase {
       });
   }
 
+  /**
+   * 渲染异常必须**看得见**。
+   * 旧写法 `void renderer.onOpen()` 会把异常吞成 unhandledRejection：控制台
+   * 里只有一行小红字，页面上却只剩「画了一半的工具栏」，用户完全无从判断。
+   * 现在把错误直接写进页签，方便一眼定位（真机反馈时只要截图即可）。
+   */
+  private reportRenderError(el: HTMLElement | null, err: unknown): void {
+    const message = err instanceof Error ? (err.stack || err.message) : String(err);
+    console.error("[TimeNote/思源] 日历渲染失败", err);
+    if (!el || typeof document === "undefined") return;
+    const box = document.createElement("div");
+    box.className = "timenote-host-error";
+    box.style.cssText =
+      "margin:12px;padding:12px 14px;border:1px solid #d9534f;border-radius:6px;" +
+      "background:rgba(217,83,79,.08);color:#d9534f;font:12px/1.6 monospace;" +
+      "white-space:pre-wrap;word-break:break-all;user-select:text;";
+    box.textContent = "TimeNote 渲染失败，请把下面这段发给开发者：\n" + message;
+    el.appendChild(box);
+  }
+
   private registerUi(): void {
     const plugin = this;
 
     this.addTab({
       type: TAB_TYPE,
       init() {
-        const el: HTMLElement = this.element;
+        // 3.8 的自定义页签模型仍提供 element；老版本 / 变体可能叫 panelElement。
+        const el: HTMLElement | null = this.element || this.panelElement || null;
+        if (!el) {
+          console.error("[TimeNote/思源] 自定义页签没有可用的 element，无法挂载日历");
+          return;
+        }
         el.style.display = "block";
         el.style.height = "100%";
         el.style.overflow = "auto";
         el.style.padding = "0";
-        const renderer = mountTimeNote(el, plugin.adapter as HostAdapter);
-        plugin.rendererRef = renderer;
-        void renderer.onOpen();
+        try {
+          const renderer = mountTimeNote(el, plugin.adapter as HostAdapter);
+          plugin.rendererRef = renderer;
+          renderer.onOpen().catch((err: unknown) => plugin.reportRenderError(el, err));
+        } catch (err) {
+          plugin.reportRenderError(el, err);
+        }
       },
       beforeDestroy() {
         if (plugin.rendererRef) void plugin.rendererRef.onClose();
@@ -148,7 +177,10 @@ export default class TimeNoteSiyuanPlugin extends PluginBase {
   }
 
   openCalendar(): void {
-    if (typeof sdk.openTab === "function") {
+    try {
+      if (typeof sdk.openTab !== "function") {
+        throw new Error("当前思源 SDK 没有导出 openTab()，无法打开自定义页签");
+      }
       sdk.openTab({
         app: this.app,
         custom: {
@@ -157,6 +189,13 @@ export default class TimeNoteSiyuanPlugin extends PluginBase {
           icon: "iconCalendar"
         }
       });
+    } catch (err) {
+      // 点按钮「没反应」是最难排查的一类问题，这里必须出声。
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[TimeNote/思源] 打开日历页签失败", err);
+      if (typeof sdk.showMessage === "function") {
+        sdk.showMessage("TimeNote 打开失败：" + message, 6000, "error");
+      }
     }
   }
 

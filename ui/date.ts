@@ -40,6 +40,9 @@ export interface MomentLike {
   daysInMonth(): number;
   quarter(): number;
   isoWeek(): number;
+  /** ISO 星期：1=周一 … 7=周日。moment 的 setter 也是可变的 */
+  isoWeekday(): number;
+  isoWeekday(value: number): MomentLike;
   hours(): number;
   minutes(): number;
   seconds(): number;
