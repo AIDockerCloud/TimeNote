@@ -17,10 +17,23 @@ https://github.com/AIDockerCloud/TimeNote/releases/download/v<version>/release.z
 从 `v1.1.3-beta.1` 起，`.github/workflows/release.yml` 会随每个 `v*` tag 自动构建，
 并把 `dist/blinko/release.zip` 作为名为 **`release.zip`** 的资产挂到 Release 上，
 无需手工上传。**当前正式版是 `v1.1.3`**（含 DEC-035「只有按钮没有视图」修复），
-可直接在 Blinko「设置 → 插件 → 市场」里安装，或下载
-`releases/download/v1.1.3/release.zip`；**预发布 tag 带后缀**（如
-`v1.1.3-beta.1`），安装器一般只读 Latest，`v1.1.3-beta.1` 是不含修复的旧包，请勿再用。
-`plugin.json` 的 `version` 是主版本段（如 `1.1.3`），由打包脚本读 `manifest.json` 覆盖。
+Latest 已指向它，**可直接远程安装**：
+
+1. 「设置 → 插件」，在 **Marketplace 页右上角**点 **「从 GitHub 安装」**
+   （`InstallFromGithub`，不是插件列表里搜 —— TimeNote 不在官方市场清单里）；
+2. 填仓库地址 `https://github.com/AIDockerCloud/TimeNote`（**只填到 repo，别带 tag / 路径**）。
+   前端会请求 `/releases/latest` 取版本号（现在是 `1.1.3`），后端再拼
+   `releases/download/v1.1.3/release.zip` 下载解压；
+3. 需要 **superAdmin** 权限；装完会自动刷新插件列表。
+
+两点实测细节：① 安装目录名取自**仓库名**（`.blinko/plugins/TimeNote/`），不是
+`plugin.json` 里的 `timenote-blinko` —— 后端按 DB 里的 `path` 加载，**不影响运行**；
+② 列表里显示的版本来自安装时写入的 DB metadata（即 `1.1.3`）。
+
+**预发布 tag 带后缀**（如 `v1.1.3-beta.1`），GitHub 的 `latest` 端点永远跳过
+pre-release，所以预发布版本**装不上**，只能手动下载；`v1.1.3-beta.1` 是不含修复的
+旧包，请勿再用。`plugin.json` 的 `version` 是主版本段（如 `1.1.3`），由打包脚本
+读 `manifest.json` 覆盖。
 
 手动安装（开发调试）：把 `release.zip` 解压到
 `<Blinko 容器>/.blinko/plugins/timenote-blinko/`，目录内直接是

@@ -21,6 +21,9 @@ import { buildSettingsPanel } from "../shared/settings";
 const SETTINGS_KEY = "timenote-settings";
 const TOOLBAR_NAME = "timenote-calendar";
 
+/** 打包时由 esbuild define 注入（取 manifest.json 的 version），避免手改漂移 */
+declare const __TIMENOTE_VERSION__: string;
+
 /** 与 Obsidian 默认值一致，另加 Blinko 专有项 */
 export const DEFAULT_BLINKO_SETTINGS: TimenoteSettings = {
   ...REFERENCE_SETTINGS,
@@ -34,7 +37,7 @@ export default class TimeNoteBlinkoPlugin {
   name = "timenote-blinko";
   author = "AIDockerCloud";
   url = "https://github.com/AIDockerCloud/TimeNote";
-  version = "1.1.2";
+  version = __TIMENOTE_VERSION__;
   minAppVersion = "0.0.0";
   withSettingPanel = true;
 

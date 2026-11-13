@@ -40,7 +40,9 @@ const result = await esbuild.build({
   target: "es2018",
   write: false,
   logLevel: "warning",
-  minify: false
+  minify: false,
+  // 版本跟随 manifest.json，避免入口里手写常量漂移（DEC-032 遗留）
+  define: { __TIMENOTE_VERSION__: JSON.stringify(version) }
 });
 const iife = result.outputFiles[0].text;
 const systemJs = `/* TimeNote for Blinko — SystemJS module (generated, do not edit) */\n` +
