@@ -1,0 +1,50 @@
+{
+  "name": "timenote-siyuan",
+  "author": "AIDockerCloud",
+  "url": "https://github.com/AIDockerCloud/TimeNote",
+  "version": "1.1.2",
+  "minAppVersion": "3.0.0",
+  "backends": [
+    "windows",
+    "linux",
+    "darwin",
+    "docker",
+    "all"
+  ],
+  "frontends": [
+    "desktop",
+    "desktop-window",
+    "browser-desktop"
+  ],
+  "displayName": {
+    "default": "TimeNote",
+    "zh_CN": "时间笔记",
+    "zh-CN": "时间笔记"
+  },
+  "description": {
+    "default": "Daily-note timeline and calendar views, with memos / Blinko aggregation",
+    "zh_CN": "基于每日笔记的时间轴与全周期日历，可聚合 memos / Blinko",
+    "zh-CN": "基于每日笔记的时间轴与全周期日历，可聚合 memos / Blinko"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README.zh-CN.md",
+    "zh-CN": "README.zh-CN.md"
+  },
+  "icon": "icon.png",
+  "preview": "preview.png",
+  "funding": {
+    "openCollective": "",
+    "patreon": "",
+    "github": "",
+    "custom": []
+  },
+  "keywords": [
+    "时间笔记",
+    "日记",
+    "日历",
+    "时间轴",
+    "TimeNote",
+    "daily note"
+  ]
+}

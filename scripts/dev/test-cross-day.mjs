@@ -399,8 +399,58 @@ ok("Alt 临时切到相反类型（默认时间点时不再是空操作）",
   /const asPoint = ev\.altKey \? this\.getAddType\(\) !== "point" : this\.getAddType\(\) === "point";/.test(src));
 ok("点模式画 .timenote-point-ghost 而不是范围 ghost", /cls: "timenote-point-ghost"/.test(src));
 ok("点模式打开快速记录时传 point 类型与空结束时间",
-  /this\.openQuickAdd\(dateStr, sec, sec, "point"\)/.test(src) &&
+  /this\.openQuickAdd\(dateStr, sec, sec, "point", \{ col, scale, ghost, isPoint: true \}\)/.test(src) &&
   /isPoint \? "" : formatSecondsToTime\(endSec\)/.test(src));
+// DEC-033：松手后 ghost 不再消失，交给弹窗钩子维持「待创建」渲染
+ok("松手不再删 ghost，交给 openQuickAdd 变成待创建预览",
+  !/ghost\.remove\(\);\s*\n\s*this\.openQuickAdd/.test(src) &&
+  /this\.openQuickAdd\(dateStr, s, en, "block", \{ col, scale, ghost, isPoint: false \}\)/.test(src) &&
+  /ghost: null, isPoint: false/.test(src));
+ok("待创建预览随表单实时重画，关闭弹窗才移除",
+  /createQuickAddPreviewHooks\(/.test(src) &&
+  /onPreview: paint/.test(src) &&
+  /onDismiss: \(\) => this\.clearQuickAddPreview\(\)/.test(src) &&
+  src.includes("timenote-quickadd-pending") &&
+  src.includes("timenote-block-column"));
+ok("预览钩子经 HostAdapter 的 openQuickAdd 透传",
+  /isPoint \? "point" : "block",\s*\n\s*hooks/.test(src) &&
+  /hooks\?: QuickAddHooks/.test(
+    fs.readFileSync(path.join(PROJECT_ROOT, "hosts", "types.ts"), "utf8")));
+ok("快速记录拆成标题必填 + 正文选填，正文走 addEntry 第 8 参数",
+  src.includes("请输入标题！") &&
+  /const titleInput = titleRow\.createEl\("input"/.test(src) &&
+  /const bodyArea = form\.createEl\("textarea"/.test(src) &&
+  /null,\s*\n\s*this\.body/.test(src) &&
+  src.includes("notifyPreview()"));
+ok("DailySource 把正文写成 Tab 缩进子项，并兼容旧的多行 content",
+  /normalizeQuickAddBodyLines\(body\)/.test(dailySrc) &&
+  /buildQuickAddLines\(/.test(dailySrc) &&
+  /body = ""/.test(dailySrc) &&
+  /const isSubItem = \/\^\(\?:\\t\+| \{2,\}\)\/\.test\(rawLine\)/.test(dailySrc));
+ok("解析时缩进优先于标题 / 围栏判断，正文里的 ## 不会切断父子关系",
+  dailySrc.indexOf("const isSubItem = /^(?:\\t+| {2,})/.test(rawLine)") <
+  dailySrc.indexOf('trimmed.startsWith("#")'));
+ok("CSS 有待创建预览的强化样式（含 pre-line 显示标题）",
+  /\.timenote-block-ghost\.is-pending/.test(css) &&
+  /\.timenote-point-ghost\.is-pending/.test(css) &&
+  /white-space: pre-line/.test(css));
+// DEC-033：思源 / Blinko 的共用弹窗必须同规则，否则三端行为会分叉
+const sharedDialogSrc = fs.readFileSync(
+  path.join(PROJECT_ROOT, "apps", "shared", "dialogs.ts"), "utf8");
+const sharedHostSrc = fs.readFileSync(
+  path.join(PROJECT_ROOT, "apps", "shared", "host-adapter.ts"), "utf8");
+ok("共用弹窗也拆标题 / 正文且标题必填",
+  sharedDialogSrc.includes("请输入标题！") &&
+  /const titleInput = doc\.createElement\("input"\)/.test(sharedDialogSrc) &&
+  /const bodyArea = doc\.createElement\("textarea"\)/.test(sharedDialogSrc) &&
+  /v\.endTimeStr, v\.body/.test(sharedDialogSrc));
+ok("共用弹窗接预览钩子，关闭幂等",
+  /hooks\?: QuickAddHooks/.test(sharedDialogSrc) &&
+  /if \(closed\) return;/.test(sharedDialogSrc) &&
+  /hooks\.onDismiss/.test(sharedDialogSrc) &&
+  sharedDialogSrc.includes("notifyPreview()"));
+ok("共用 adapter 把正文接到 addEntry 第 8 参数（rawLines 保持 null）",
+  /service\.addEntry\(d, t, c, task, tags, end, null, body\)/.test(sharedHostSrc));
 ok("QuickAddModal 的记录类型是单击切换按钮（不再下拉）",
   /const typeBtn = typeRow\.createEl\("button"/.test(src) &&
   /typeBtn\.onclick = \(\) => \{[\s\S]{0,160}this\.addType = this\.addType === "point" \? "block" : "point"/.test(src) &&

@@ -1621,6 +1621,27 @@
   z-index: 6;
 }
 
+/* DEC-033：快速记录弹窗打开期间保留的「待创建」块 / 点线。
+   复用拖拽留下的 ghost（松手不删），底色更实 + 一圈描边表示「还没写盘」；
+   white-space: pre-line 让标题显示在第二行。弹窗里改起止时间 / 标题会
+   实时改 top / height / 文字，取消、Esc 或保存成功由 onDismiss 统一移除。 */
+.timenote-block-ghost.is-pending,
+.timenote-point-ghost.is-pending {
+  white-space: pre-line;
+  background-color: rgba(124, 92, 255, 0.28);
+  background-color: color-mix(in srgb, var(--color-accent, #7c5cff) 28%, transparent);
+  box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.55);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent, #7c5cff) 55%, transparent);
+  z-index: 7;
+}
+.timenote-point-ghost.is-pending {
+  height: auto;
+  min-height: 18px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  line-height: 1.3;
+}
+
 /* 无可见把手：块的上下边缘本身就是拖拽命中区（按块高 1/3 取，2–9px），
    任何高度都能改起止；光标在 ns-resize / grab / grabbing 间由 attachBlockDrag 切换。
    这里不画任何条状装饰，块内文字也不会被盖住。 */

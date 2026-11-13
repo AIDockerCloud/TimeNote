@@ -91,8 +91,8 @@ export function createMemoryHostAdapter(opts: MemoryHostOptions = {}): HostAdapt
     notice(message: string) { state.notices.push(message); },
     setIcon(_el: HTMLElement, _icon: string) { /* 内存宿主没有图标体系 */ },
 
-    openQuickAdd(dateStr, onSaved, prefillTime, prefillEndTime, prefillType) {
-      state.quickAdds.push({ dateStr, onSaved, prefillTime, prefillEndTime, prefillType });
+    openQuickAdd(dateStr, onSaved, prefillTime, prefillEndTime, prefillType, hooks) {
+      state.quickAdds.push({ dateStr, onSaved, prefillTime, prefillEndTime, prefillType, hooks });
     },
     openSubItems(entry: NoteEntry) { state.subItems.push(entry); },
 

@@ -17,6 +17,8 @@ import {
   parseLine,
   parseQuickAddSection,
   sectionHeaderRegex,
+  normalizeQuickAddBodyLines,
+  buildQuickAddLines,
   formatSecondsToTime,
   rewriteEntryLineTime,
   collectSubItemLines,
@@ -235,7 +237,27 @@ export class DailySource implements NoteSource {
       const trimmed = rawLine.trim();
 
       // Skip codeblocks, frontmatter delimiters, obsidian comments
-      if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("```") || trimmed.startsWith("%%")) {
+      if (!trimmed) {
+        currentParent = null;
+        continue;
+      }
+
+      // DEC-033：缩进判断必须排在标题 / 围栏 / 注释之前。快速记录的正文每行
+      // 都加了 Tab，正文里就算写着 "## 小标题" / "```" / "%% 备注"，也应当
+      // 是标题记录的子项；放在后面会被当成章节标题或分隔符，顺带把
+      // currentParent 清掉，后面的子项就全丢了。
+      // Check if this line is an indented sub-item (starts with tab or 2+ spaces before list symbol)
+      const isSubItem = /^(?:\t+| {2,})/.test(rawLine);
+      if (isSubItem) {
+        // Child item: append to parent's subItems for context, do NOT create standalone entry
+        if (currentParent) {
+          const cleanSub = trimmed.replace(/^[-*+]\s*(?:\[[ xX\-\/]\]\s*)?/, "").trim();
+          if (cleanSub) currentParent.subItems.push(cleanSub);
+        }
+        continue;
+      }
+
+      if (trimmed.startsWith("---") || trimmed.startsWith("```") || trimmed.startsWith("%%")) {
         currentParent = null;
         continue;
       }
@@ -244,18 +266,6 @@ export class DailySource implements NoteSource {
       if (trimmed.startsWith("#")) {
         currentSection = trimmed.replace(/^#+\s*/, "").replace(/\s+#+\s*$/, "").trim();
         currentParent = null;
-        continue;
-      }
-
-      // Check if this line is an indented sub-item (starts with tab or 2+ spaces before list symbol)
-      const isSubItem = /^(?:\t+| {2,})/.test(rawLine);
-
-      if (isSubItem) {
-        // Child item: append to parent's subItems for context, do NOT create standalone entry
-        if (currentParent) {
-          const cleanSub = trimmed.replace(/^[-*+]\s*(?:\[[ xX\-\/]\]\s*)?/, "").trim();
-          if (cleanSub) currentParent.subItems.push(cleanSub);
-        }
         continue;
       }
 
@@ -454,7 +464,8 @@ export class DailySource implements NoteSource {
     isTask: boolean,
     tags: string[] = [],
     endTimeStr = "",
-    rawLines: string[] | null = null
+    rawLines: string[] | null = null,
+    body = ""
   ): Promise<void> {
     await this.buildIndexIfNeeded();
     let file = this.index.get(dateStr) || null;
@@ -463,7 +474,18 @@ export class DailySource implements NoteSource {
     const linePrefix = isTask ? "- [ ] " : "- ";
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : "";
-    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    // DEC-033：content 只允许一行标题。旧的调用方若仍传多行文本，把第一行
+    // 当标题、其余并进正文 —— 否则第二行会变成没有时间前缀的 ALL DAY 顶层行。
+    const contentLines = String(content == null ? "" : content).split(/\r?\n/);
+    const title = (contentLines.shift() || "").trim();
+    const bodyLines = [
+      ...normalizeQuickAddBodyLines(contentLines.join("\n")),
+      ...normalizeQuickAddBodyLines(body)
+    ];
+    const generatedLine = buildQuickAddLines(
+      `${linePrefix}${timePrefix}${title}${tagPart}`, bodyLines
+    );
+    // rawLines 是 DEC-022 跨天搬移的「原样插入」通道，一个字都不改。
     const newLine = (rawLines && rawLines.length) ? rawLines.join("\n") : generatedLine;
     // 层级与标题都来自设置，不再写死 "## "
     const section = parseQuickAddSection(this.quickAddSectionCfg);

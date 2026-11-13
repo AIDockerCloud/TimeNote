@@ -69,7 +69,10 @@ ok("{{date:YYYY/MM/DD}} 自定义格式", render("{{date:YYYY/MM/DD}}") === "202
 ok("{{date+1d:YYYY-MM-DD}} 次日", render("{{date+1d:YYYY-MM-DD}}") === "2026-11-13");
 ok("{{date-1d:YYYY-MM-DD}} 前一日", render("{{date-1d:YYYY-MM-DD}}") === "2026-11-11");
 ok("{{date+1w:YYYY-MM-DD}} 下周", render("{{date+1w:YYYY-MM-DD}}") === "2026-11-19");
-ok("{{time:FORMAT}} 用当前时刻", render("{{time:YYYY-MM-DD}}") === DAY);
+// {{time:*}} 取的是真实当前时刻，不能拿硬编码的 DAY 比 —— 跨天就会假红。
+// 用同一个日期实现算期望值，既跟日期无关，又仍然验证「按当前时刻格式化」。
+ok("{{time:FORMAT}} 用当前时刻",
+  render("{{time:YYYY-MM-DD}}") === ui.nativeMoment().format("YYYY-MM-DD"));
 ok("{{yesterday}} 按 format 展开", render("{{yesterday}}") === "2026-11-11");
 ok("{{tomorrow}} 按 format 展开", render("{{tomorrow}}") === "2026-11-13");
 ok("未知变量原样保留", render("{{foo}} 保留") === "{{foo}} 保留");

@@ -516,6 +516,13 @@ function sectionHeaderRegex(title) {
   const esc = String(title).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^\\s*#{1,6}\\s+${esc}\\s*$`);
 }
+function normalizeQuickAddBodyLines(body) {
+  return String(body == null ? "" : body).split(/\r?\n/).map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim().length > 0);
+}
+function buildQuickAddLines(headLine, bodyLines) {
+  const subs = (bodyLines || []).map((l) => `	${l}`);
+  return [headLine, ...subs].join("\n");
+}
 
 // sources/types.ts
 var READONLY_REJECT = {
@@ -970,12 +977,7 @@ ${newLine}
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i];
       const trimmed = rawLine.trim();
-      if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("```") || trimmed.startsWith("%%")) {
-        currentParent = null;
-        continue;
-      }
-      if (trimmed.startsWith("#")) {
-        currentSection = trimmed.replace(/^#+\s*/, "").replace(/\s+#+\s*$/, "").trim();
+      if (!trimmed) {
         currentParent = null;
         continue;
       }
@@ -985,6 +987,15 @@ ${newLine}
           const cleanSub = trimmed.replace(/^[-*+]\s*(?:\[[ xX\-\/]\]\s*)?/, "").trim();
           if (cleanSub) currentParent.subItems.push(cleanSub);
         }
+        continue;
+      }
+      if (trimmed.startsWith("---") || trimmed.startsWith("```") || trimmed.startsWith("%%")) {
+        currentParent = null;
+        continue;
+      }
+      if (trimmed.startsWith("#")) {
+        currentSection = trimmed.replace(/^#+\s*/, "").replace(/\s+#+\s*$/, "").trim();
+        currentParent = null;
         continue;
       }
       const inMemoSection = currentSection === memoTitle || currentSection.includes("\u7075\u611F") || currentSection.includes("\u95EA\u5FF5") || currentSection.includes("Inspirations") || currentSection.includes("Memos");
@@ -1130,14 +1141,23 @@ ${newLine}
    * rawLines（DEC-022）：跨天移动时直接搬原始行（含子项），不再拼装新行，
    * 这样复选框 / 缩进 / 标签 / 正文 / 块引用全部原样保留。
    */
-  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
+  async addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null, body = "") {
     await this.buildIndexIfNeeded();
     let file = this.index.get(dateStr) || null;
     const tagPart = tags.length > 0 ? " " + tags.map((t) => "#" + t).join(" ") : "";
     const linePrefix = isTask ? "- [ ] " : "- ";
     const rangeStr = endTimeStr ? `${timeStr}-${endTimeStr}` : timeStr;
     const timePrefix = rangeStr ? `${rangeStr} ` : "";
-    const generatedLine = `${linePrefix}${timePrefix}${content}${tagPart}`;
+    const contentLines = String(content == null ? "" : content).split(/\r?\n/);
+    const title = (contentLines.shift() || "").trim();
+    const bodyLines = [
+      ...normalizeQuickAddBodyLines(contentLines.join("\n")),
+      ...normalizeQuickAddBodyLines(body)
+    ];
+    const generatedLine = buildQuickAddLines(
+      `${linePrefix}${timePrefix}${title}${tagPart}`,
+      bodyLines
+    );
     const newLine = rawLines && rawLines.length ? rawLines.join("\n") : generatedLine;
     const section = parseQuickAddSection(this.quickAddSectionCfg);
     const headerRe = sectionHeaderRegex(section.title);
@@ -2797,40 +2817,98 @@ var TimenoteRenderer = class {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         if (asPoint) {
-          if (ghost) ghost.remove();
           const sec = moved ? pointSec : Math.max(dayStartSec, Math.min(
             dayEndSec,
             snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)
           ));
-          this.openQuickAdd(dateStr, sec, sec, "point");
+          this.openQuickAdd(dateStr, sec, sec, "point", { col, scale, ghost, isPoint: true });
           return;
         }
         if (moved && ghost) {
           const s = Number(ghost.dataset.start);
           const en = Number(ghost.dataset.end);
-          ghost.remove();
-          this.openQuickAdd(dateStr, s, en, "block");
+          this.openQuickAdd(dateStr, s, en, "block", { col, scale, ghost, isPoint: false });
           return;
         }
         if (ghost) ghost.remove();
         const rawSec = secAt(e.clientY);
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
         const endSec = Math.min(dayEndSec, snapped + (Number(this.host.settings.defaultDuration) || 60) * 60);
-        this.openQuickAdd(dateStr, snapped, endSec, "block");
+        this.openQuickAdd(dateStr, snapped, endSec, "block", { col, scale, ghost: null, isPoint: false });
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp, { once: true });
     };
   }
-  openQuickAdd(dateStr, startSec, endSec, type = "block") {
+  openQuickAdd(dateStr, startSec, endSec, type = "block", pending = null) {
     const isPoint = normalizeAddType(type) === "point";
+    const hooks = pending ? this.createQuickAddPreviewHooks(pending, startSec, endSec, dateStr, isPoint) : null;
     this.host.openQuickAdd(
       dateStr,
       () => this.renderView(),
       formatSecondsToTime(startSec),
       isPoint ? "" : formatSecondsToTime(endSec),
-      isPoint ? "point" : "block"
+      isPoint ? "point" : "block",
+      hooks
     );
+  }
+  /**
+   * DEC-033：弹窗打开期间维持一个「待创建」块 / 点线。
+   * 复用拖拽留下的 ghost（不闪烁），由 hooks.onPreview 随表单实时重画，
+   * onDismiss 统一撤掉。渲染层不认识任何宿主弹窗，只认 HostAdapter 的 hooks。
+   */
+  createQuickAddPreviewHooks(pending, startSec, endSec, dateStr, isPoint) {
+    const { col, scale } = pending;
+    this.clearQuickAddPreview();
+    const el = pending.ghost || col.createEl("div", { cls: isPoint ? "timenote-point-ghost" : "timenote-block-ghost" });
+    this.pendingQuickAddEl = el;
+    const defaultDuration = Number(this.host.settings.defaultDuration) || 60;
+    const paint = (state) => {
+      if (!el) return;
+      const wantedDate = state.dateStr || dateStr;
+      if (wantedDate !== dateStr) {
+        const cols = typeof this.root.querySelectorAll === "function" ? Array.from(this.root.querySelectorAll(".timenote-block-column")) : [];
+        const target = cols.find((c) => c.dataset.dateStr === wantedDate);
+        if (target) {
+          if (el.parentElement !== target) target.appendChild(el);
+          el.style.display = "";
+        } else {
+          el.style.display = "none";
+        }
+      } else {
+        el.style.display = "";
+      }
+      const rawStart = state.startSec === null || state.startSec === void 0 ? startSec : Number(state.startSec);
+      const s = Math.max(
+        scale.dayStartSec,
+        Math.min(scale.dayEndSec - MIN_BLOCK_SECONDS, rawStart)
+      );
+      if (state.isPoint) {
+        el.className = "timenote-point-ghost timenote-quickadd-pending is-pending";
+        el.style.top = `${scale.yOf(s)}px`;
+        el.style.removeProperty("height");
+        el.textContent = `${formatSecondsToTime(s)}${state.title ? " \xB7 " + state.title : ""}`;
+        return;
+      }
+      const rawEnd = state.endSec === null || state.endSec === void 0 ? s + defaultDuration * 60 : Number(state.endSec);
+      const en = Math.max(s + MIN_BLOCK_SECONDS, Math.min(scale.dayEndSec, rawEnd));
+      el.className = "timenote-block-ghost timenote-quickadd-pending is-pending";
+      el.style.top = `${scale.yOf(s)}px`;
+      el.style.height = `${Math.max(16, scale.yOf(en) - scale.yOf(s))}px`;
+      el.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} \xB7 ${formatDuration(en - s)}` + (state.title ? `
+${state.title}` : "");
+    };
+    paint({ dateStr, startSec, endSec: isPoint ? null : endSec, isPoint, title: "" });
+    return {
+      onPreview: paint,
+      onDismiss: () => this.clearQuickAddPreview()
+    };
+  }
+  clearQuickAddPreview() {
+    if (this.pendingQuickAddEl && this.pendingQuickAddEl.parentElement) {
+      this.pendingQuickAddEl.remove();
+    }
+    this.pendingQuickAddEl = null;
   }
   attachBlockDrag(block, entry, meta, duration, scale) {
     if (entry.startSeconds < scale.dayStartSec || entry.endSeconds > scale.dayEndSec) return;
@@ -3539,7 +3617,7 @@ function createObsidianHostAdapter(deps) {
     setIcon(el, icon) {
       (0, import_obsidian2.setIcon)(el, icon);
     },
-    openQuickAdd(dateStr, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "") {
+    openQuickAdd(dateStr, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "", hooks) {
       new deps.QuickAddModal(
         app,
         plugin,
@@ -3547,7 +3625,8 @@ function createObsidianHostAdapter(deps) {
         onSaved,
         prefillTime,
         prefillEndTime,
-        prefillType
+        prefillType,
+        hooks
       ).open();
     },
     openSubItems(entry) {
@@ -3711,8 +3790,8 @@ var DailyNoteService = class {
   moveEntryToDate(entry, targetDate, startSec, endSec) {
     return this.daily.moveEntryToDate(entry, targetDate, startSec, endSec);
   }
-  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
-    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines);
+  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null, body = "") {
+    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines, body);
   }
   // Scan entries for a date range [startMoment, endMoment]
   // 返回 Map<dateStr, NoteEntry[]>，**每一天都建桶**（哪怕是空数组）——
@@ -3877,17 +3956,32 @@ var TimenoteView = class extends import_obsidian3.ItemView {
   }
 };
 var QuickAddModal = class extends import_obsidian3.Modal {
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = void 0, prefillType = "", hooks = null) {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
+    this.hooks = hooks;
     this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
     this.timeStr = prefillTime || moment().format("HH:mm:ss");
     this.endTimeStr = prefillEndTime !== void 0 ? prefillEndTime : this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60);
     this.isTask = false;
-    this.content = "";
+    this.title = "";
+    this.body = "";
     this.tagsStr = "";
     this.onSaved = onSaved;
+  }
+  /** DEC-033：把当前表单状态推给渲染层，更新待创建块的位置 / 高度 / 文字 */
+  notifyPreview() {
+    if (!this.hooks || !this.hooks.onPreview) return;
+    const s = parseTimeToSeconds(String(this.timeStr || "").trim());
+    const e = this.addType === "point" ? null : parseTimeToSeconds(String(this.endTimeStr || "").trim());
+    this.hooks.onPreview({
+      dateStr: this.targetDate,
+      startSec: s,
+      endSec: e,
+      isPoint: this.addType === "point",
+      title: String(this.title || "").trim()
+    });
   }
   onOpen() {
     const { contentEl } = this;
@@ -3906,7 +4000,10 @@ var QuickAddModal = class extends import_obsidian3.Modal {
       cls: "timenote-modal-input",
       attr: { type: "date", value: this.targetDate }
     });
-    dateInput.onchange = (e) => this.targetDate = e.target.value;
+    dateInput.onchange = (e) => {
+      this.targetDate = e.target.value;
+      this.notifyPreview();
+    };
     const timeInput = row1.createEl("input", {
       cls: "timenote-modal-input",
       attr: { type: "text", placeholder: "\u65F6\u95F4 (\u5982 14:30 \u6216 14:00:31\uFF0C\u7559\u7A7A\u4E3A\u5168\u5929)", value: this.timeStr }
@@ -3928,10 +4025,12 @@ var QuickAddModal = class extends import_obsidian3.Modal {
     timeInput.oninput = (e) => {
       this.timeStr = e.target.value.trim();
       updateDurationHint();
+      this.notifyPreview();
     };
     endTimeInput.oninput = (e) => {
       this.endTimeStr = e.target.value.trim();
       updateDurationHint();
+      this.notifyPreview();
     };
     const syncType = () => {
       const isPoint = this.addType === "point";
@@ -3950,19 +4049,39 @@ var QuickAddModal = class extends import_obsidian3.Modal {
     typeBtn.onclick = () => {
       this.addType = this.addType === "point" ? "block" : "point";
       syncType();
+      this.notifyPreview();
     };
     syncType();
     const row2 = form.createEl("div", { cls: "timenote-modal-row" });
     const taskCheckbox = row2.createEl("input", { attr: { type: "checkbox", id: "tn-is-task" } });
     taskCheckbox.onchange = (e) => this.isTask = e.target.checked;
     row2.createEl("label", { text: "\u4F5C\u4E3A\u4EFB\u52A1\u5F85\u529E (- [ ])", attr: { for: "tn-is-task" } });
-    const textarea = form.createEl("textarea", {
-      cls: "timenote-modal-textarea",
-      attr: { placeholder: "\u8F93\u5165\u7075\u611F\u95EA\u5FF5\u3001\u968F\u624B\u8BB0\u6216\u4EFB\u52A1\u5185\u5BB9... (\u6309 Ctrl+Enter \u5FEB\u6377\u4FDD\u5B58)" }
+    const titleRow = form.createEl("div", { cls: "timenote-modal-row" });
+    titleRow.createEl("span", { text: "\u6807\u9898 *", cls: "timenote-modal-label" });
+    const titleInput = titleRow.createEl("input", {
+      cls: "timenote-modal-input",
+      attr: { type: "text", placeholder: "\u8FD9\u6761\u8BB0\u5F55\u53EB\u4EC0\u4E48\uFF1F\uFF08\u5FC5\u586B\uFF0C\u5355\u884C\uFF09" }
     });
-    textarea.focus();
-    textarea.oninput = (e) => this.content = e.target.value;
-    textarea.onkeydown = (e) => {
+    titleInput.focus();
+    titleInput.oninput = (e) => {
+      this.title = e.target.value;
+      this.notifyPreview();
+    };
+    titleInput.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveBtn.click();
+      }
+    };
+    const bodyArea = form.createEl("textarea", {
+      cls: "timenote-modal-textarea",
+      attr: { placeholder: "\u6B63\u6587\uFF08\u9009\u586B\uFF0C\u53EF\u591A\u884C\uFF1B\u6BCF\u884C\u4F1A\u4F5C\u4E3A\u5B50\u9879\u7F29\u8FDB\u5199\u8FDB\u65E5\u8BB0\uFF0CCtrl+Enter \u4FDD\u5B58\uFF09" }
+    });
+    bodyArea.oninput = (e) => {
+      this.body = e.target.value;
+      this.notifyPreview();
+    };
+    bodyArea.onkeydown = (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         saveBtn.click();
       }
@@ -3977,8 +4096,8 @@ var QuickAddModal = class extends import_obsidian3.Modal {
     cancelBtn.onclick = () => this.close();
     const saveBtn = btnRow.createEl("button", { text: "\u4FDD\u5B58\u5E76\u63D2\u5165\u65E5\u8BB0", cls: "mod-cta" });
     saveBtn.onclick = async () => {
-      if (!this.content.trim()) {
-        new import_obsidian3.Notice("\u8BF7\u8F93\u5165\u5185\u5BB9\uFF01");
+      if (!this.title.trim()) {
+        new import_obsidian3.Notice("\u8BF7\u8F93\u5165\u6807\u9898\uFF01");
         return;
       }
       const startStr = this.timeStr.trim();
@@ -4011,17 +4130,21 @@ var QuickAddModal = class extends import_obsidian3.Modal {
       await this.plugin.dailyNoteService.addEntry(
         this.targetDate,
         startStr,
-        this.content.trim(),
+        this.title.trim(),
         this.isTask,
         tags,
-        hasExplicitRange ? "" : endStr
+        hasExplicitRange ? "" : endStr,
+        null,
+        this.body
       );
       new import_obsidian3.Notice(`\u2705 \u5DF2\u8BB0\u5F55${this.addType === "point" ? "\u65F6\u95F4\u70B9" : "\u65F6\u95F4\u5757"}\u5230 ${this.targetDate} \u65E5\u8BB0\u4E2D\uFF01`);
       this.close();
       if (this.onSaved) this.onSaved();
     };
+    this.notifyPreview();
   }
   onClose() {
+    if (this.hooks && this.hooks.onDismiss) this.hooks.onDismiss();
     this.contentEl.empty();
   }
 };

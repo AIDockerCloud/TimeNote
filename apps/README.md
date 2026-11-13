@@ -25,21 +25,30 @@ const renderer = mountTimeNote(rootEl, host);
 | `bootstrap.ts` | 三宿主共用的装配函数（被 Obsidian 入口**实际调用**，不是空壳） |
 | `index.ts` | 统一出口 |
 | `esbuild.config.mjs` | 编出 `apps/index.mjs`（ESM，只给测试 import，已 gitignore） |
+| `shared/` | 思源 / Blinko 共用层（DEC-032）：纯 DOM 弹窗、设置面板、`createSharedHostAdapter()` 骨架、行级 diff |
+| `siyuan/` | 思源插件入口 + `plugin.json` + `i18n/` + 打包脚本 → `dist/siyuan/package.zip` |
+| `blinko/` | Blinko 插件入口 + `plugin.json` + 打包脚本 → `dist/blinko/release.zip` |
 
 ## 三宿主状态（如实标注）
 
 | 宿主 | 入口位置 | 状态 | 说明 |
 |---|---|---|---|
 | **Obsidian** | 仓库根 `main.ts` + `manifest.json` + `esbuild.config.mjs` | ✅ **可交付** | `TimenoteView extends ItemView` 薄壳 → `TimenoteRenderer`；`hosts/obsidian/adapter.ts` 实现全部宿主能力。三件套交付链路不变 |
-| **Blinko** | `apps/blinko/`（待建） | ⏳ 契约已就绪 | 需先核实 Blinko 插件的**视图挂载 API** 与打包格式（`plugin.json` / `release/index.js`），再写 `hosts/blinko/adapter.ts`（本地 Blinko 笔记读写） |
-| **思源** | `apps/siyuan/`（待建） | ⏳ 契约已就绪 | 需先核实思源 SystemJS 插件的视图容器与 `plugin.json`，再写 `hosts/siyuan/adapter.ts`（块树 ↔ 条目映射，走内核 HTTP API） |
+| **Blinko** | `apps/blinko/` + `hosts/blinko/` | ✅ **已实现（DEC-032）** | SystemJS `System.register` 单文件 + `plugin.json`；`addToolBarIcon` → `showDialog` 全屏日历；`renderSettingPanel` 设置页。本地记录直接读写原生 note（tRPC），远程来源只读。⚠️ **尚未真机验证** |
+| **思源** | `apps/siyuan/` + `hosts/siyuan/` | ✅ **已实现（DEC-032）** | CJS `index.js` + `plugin.json` + `i18n/`；`extends require("siyuan").Plugin`，顶栏图标 → 页签。本地记录写进原生每日笔记文档的块（内核 `/api/*`），远程来源只读。⚠️ **尚未真机验证** |
 | **memos** | ❌ 不做 | 已排除（DEC-023） | memos 没有前端插件体系，只作为 `sources/memos.ts` 数据源被聚合 |
 | **Web（可选）** | `apps/web/`（未建） | 🧪 可立即起步 | `hosts/memory/adapter.ts` + `bootstrap.ts` + `styles.css` 就能跑一个独立演示页，不需要任何后端 |
 
-> **本轮刻意没有创建 `apps/blinko/` 与 `apps/siyuan/` 的空目录。**
-> 两个平台的插件挂载方式尚未按官方文档 + 真机核实，先放一个跑不起来的
-> 「伪入口」只会重复 DEC-023 第二阶段「层建好了但功能没生效」的错误。
-> 契约、装配链路、共享渲染引擎现已全部就绪，核实完 API 后各写一层薄适配即可。
+### DEC-032 补齐了两个入口（2026-11-12）
+
+用户裁定「**宿主原生数据**」+「**暂时没有可用真机**」，本轮按官方源码核实后落地：
+
+- **数据不落插件私有文件**：思源把每日笔记文档 ↔ 虚拟 `YYYY-MM-DD.md`（块 ↔ 行）映射，读写全走内核 API；Blinko 把一天 notes ↔ 虚拟 md（note ↔ 行）映射，走 `window.Blinko.api` 的 tRPC。两者都复用 `sources/daily.ts` 的全部写方法，只动变化的那一个实体（行级 diff 保住块 id / note id）。
+- **`HostNoteService`（`sources/host-service.ts`）** 装配 `DailySource` + `AggregateSource` + memos / 远程 Blinko 只读聚合 + 60 秒缓存；**刻意不从 `sources/index.ts` 导出**，否则会把顶层常量打进 Obsidian 的 `main.js`。
+- **两个入口都不改渲染层**：`prepareHostEnvironment()` 注入 `nativeMoment` + DOM 垫片，`mountTimeNote(root, host)` 挂 `TimenoteRenderer`；弹窗 / 设置页用 `apps/shared/` 的纯 DOM 实现，不继承 Obsidian `Modal` / `PluginSettingTab`。
+- **产物**：`npm run build:plugins` → `dist/siyuan/package.zip` 与 `dist/blinko/release.zip`（`dist/` 已 gitignore）。Blinko 安装器要求 Release 资产名固定 `release.zip`；思源首版不走集市（集市要求插件名 == 仓库名），需手动解压安装。详见 [思源 README](siyuan/README.zh-CN.md) / [Blinko README](blinko/README_zh.md)。
+- **如实标注**：两个插件均**未在真机验证**（本机无实例）。从 `v1.1.3-beta.1` 起 `.github/workflows/release.yml` 会自动把两个 zip 挂到 Release（DEC-034）；但安装器通常只读 Latest，预发布阶段需手动下载资产，装完请按各自 README 的「验收清单」逐项试。
+- **Obsidian 零回归**：`npm run build` 后 `git diff --stat -- main.js` 必须为空。
 
 ## 新增宿主要做的事
 
@@ -56,9 +65,11 @@ const renderer = mountTimeNote(rootEl, host);
 ## 验收
 
 ```bash
-npm run build       # 含 build:core / sources / ui / hosts / apps
-npm run test:hosts  # 43 项：契约完整性、零宿主耦合、内存宿主、bootstrap 真跑
-npm test            # 509 项
+npm run build          # 含 build:core / sources / ui / hosts / apps
+npm run build:plugins  # 两个新宿主插件包 → dist/siyuan/package.zip + dist/blinko/release.zip
+npm run test:hosts     # 51 项：契约完整性、零宿主耦合、内存宿主、bootstrap 真跑
+npm run test:platforms # 164 项：新宿主服务 / 虚拟文件层 / diff / 加载期冒烟 / zip CRC
+npm test               # 951 项（18 套）
 ```
 
 `test:hosts` 里用一份**完全没有 Obsidian 依赖**的内存宿主实例化了

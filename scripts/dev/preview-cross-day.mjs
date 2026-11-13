@@ -105,10 +105,14 @@ const html = `<!doctype html>
             <input class="timenote-modal-input" id="endInput" value="10:15" aria-label="结束时间">
             <span class="timenote-duration-hint" id="durationHint">时长 1h</span>
           </div>
-          <textarea class="timenote-modal-textarea" placeholder="输入灵感闪念、随手记或任务内容..."></textarea>
+          <div class="timenote-modal-row">
+            <span class="timenote-modal-label">标题 *</span>
+            <input class="timenote-modal-input" style="flex:1" placeholder="这条记录叫什么？（必填，单行）">
+          </div>
+          <textarea class="timenote-modal-textarea" placeholder="正文（选填，可多行；每行会作为子项缩进写进日记）"></textarea>
         </div>
       </div>
-      <p class="hint" style="margin-top:10px">切到「时间点」时结束时间框会清空并禁用，保存只写 <code>- 09:15 到公司</code> —— 日历上是一条线，不是块。按住 <code>Alt</code> 点空白槽可临时切到另一种类型。</p>
+      <p class="hint" style="margin-top:10px">切到「时间点」时结束时间框会清空并禁用，保存只写 <code>- 09:15 到公司</code> —— 日历上是一条线，不是块。按住 <code>Alt</code> 点空白槽可临时切到另一种类型。标题必填且只占一行；正文按回车换行，落盘时每行加 Tab 成为标题的子项，不会再冒出一条无时间的 ALL DAY。拖拽松手后预览块会留在日历上，随弹窗里的时间范围 / 标题实时变化，取消或保存后才消失。</p>
     </div>
     <div class="card">
       <h2>② 空白槽的点预览</h2>

@@ -1,6 +1,8 @@
-# TimeNote for Obsidian
+# TimeNote
 
-专为**周期日记（Daily Notes）**设计的时间轴与全周期日历视图插件。
+专为**周期日记（Daily Notes）**设计的时间轴与全周期日历视图插件。同一个仓库维护三个宿主版本，共用一份渲染引擎、解析规则与远程聚合逻辑。
+
+> 本页主体是 **Obsidian 版**的使用说明；思源 / Blinko 版见下一节。
 
 ---
 
@@ -43,6 +45,24 @@
 | **季度视图** | `Quarter` | 当季 3 个月全景看板，展示季度累计条目、待办达成率、灵感统计与 3 月迷你日历。 |
 | **年度视图** | `Year` | 全年 12 个月时间足迹全景，采用 GitHub 风格 5 级活跃度热力色块与全年统计。 |
 | **时间线** | `Timeline` | 单日流水账瀑布流，带时间圆点轴线，支持子项层级预览与快速跳回原日记。 |
+
+---
+
+## 🧩 三个宿主版本（DEC-032）
+
+| 宿主 | 入口 / 产物 | 本地记录存哪 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **Obsidian** | 仓库根三件套 / `timenote-<version>.zip` | vault 里的 `SpiralNotes/YYYY/Daily/MM/YYYY-MM-DD.md` | ✅ 已发布（v1.1.2） |
+| **思源笔记** | `apps/siyuan/` → `dist/siyuan/package.zip` | 思源原生每日笔记文档的**块**（内核 `/api/*`） | ⚠️ 已实现，**尚未真机验证** |
+| **Blinko** | `apps/blinko/` → `dist/blinko/release.zip` | Blinko 原生 **note**（`window.Blinko.api` tRPC） | ⚠️ 已实现，**尚未真机验证** |
+
+三个版本共用 `ui/view.ts` 渲染引擎、`sources/daily.ts` 的解析与回写、`styles.css`，以及 memos / 远程 Blinko 的只读聚合（60 秒区间缓存、单源失败不打断日历）。新宿主把原生数据映射成**虚拟 markdown 文件**再接进 `DailySource`，所以拖拽改时间、横向跨天搬移、点击勾选待办的行为与 Obsidian 版一致；写回只动变化的那一个块 / note，保留实体 id。
+
+**构建**：`npm run build:plugins`（独立于 `npm run build`，Obsidian `main.js` 逐字节不变）。`dist/` 已 gitignore，两个 zip 只在本机生成、不入库。
+
+**安装与验收**：见 [思源版 README](apps/siyuan/README.zh-CN.md) / [Blinko 版 README](apps/blinko/README_zh.md)，两份都写清了「数据存在哪里」「已知边界」「验收清单」。首版**未在真机验证** —— 本机没有思源 / Blinko 实例，实现依据是官方源码 + 离线模拟测试（含加载期冒烟），装完请按清单逐项试一遍。
+
+**发布链路**：从 `v1.1.3-beta.1` 起，`.github/workflows/release.yml` 在每次 `v*` tag 发版时同时跑 `npm run build:plugins`，Release 共挂 6 个资产：`manifest.json` / `main.js` / `styles.css` / `timenote-<version>.zip`（Obsidian）+ `package.zip`（思源）+ `release.zip`（Blinko）。Blinko 安装器要求资产名固定为 `release.zip`；思源首版不走集市（集市要求插件名 == 仓库名），需下载 `package.zip` 手动解压。**预发布 tag 带后缀**（如 `v1.1.3-beta.1`），资产路径是 `releases/download/v1.1.3-beta.1/release.zip`；安装器一般只读 Latest，预发布阶段请手动下载。打包失败会让整个 Release 变红 —— 宁可不发，不发缺件的包。
 
 ---
 
@@ -111,6 +131,16 @@
 - **时间点**：在时间点模式下（默认），在空白槽单击或上下拖动只定一个时刻（虚线预览线显示 `HH:mm`，15 分钟吸附），松手打开快速记录，**结束时间输入框被禁用且留空**，保存后写入 `- 09:23 到公司` 这样的单时间行 —— 在日历上是精确时刻的一条线，不是块、不带复选框。**按住 Alt 点空白槽可临时切到另一种类型**（默认时间点时临时记时间块，默认时间块时临时记时间点），不必切换按钮。
 - 时间块模式下也可在「+ 记一条」中手填开始 / 结束时间，弹窗实时显示时长。结束必须晚于开始，一期不支持跨零点。
 
+**创建框：标题与正文（DEC-033）**：快速记录弹窗把内容拆成两个字段 —— **标题必填、单行**（写进带时间前缀的主行；标题框里按回车直接保存），**正文选填、可多行**（`Ctrl+Enter` 保存）。正文每行落盘时前面加一个 Tab，成为标题记录的缩进子项，日历里点子项徽章就能看到；空行会被忽略，正文里写 `## 小标题`、代码块或 `%%` 也不会被误当成新章节或 ALL DAY 任务。
+
+```markdown
+- 14:00-15:30 写周报 #工作
+	先列大纲
+	补充数据
+```
+
+**创建预览不再消失**：横拖选好范围松手后，日历上那块会变成「待创建」块**留在原处**（底色更实的虚线块），弹窗里改起止时间、切换时间点 / 时间块、输入标题时，它的位置、高度与文字实时跟着变；改了日期还会挪到对应日期列（当前视图看不到那天就先隐藏）。取消、`Esc`、点遮罩或保存成功才移除 —— 保存后由真实记录接替。工具栏「+ 记一条」和紧凑流空隙没有对应的拖拽区域，仍是无预览的旧行为。
+
 **展示**：块的上沿对齐开始时间、下沿对齐结束时间，**高度恒等于它在时间轴上的跨度**（与整点刻度严格一致）；只在真正重叠时才左右分列，不重叠的块占满整列；卡片显示起止时间与时长（时间线视图对块显示时长、对时间点只显示时刻）。
 
 **自适应时间轴（内容定高）**：默认开启。整点行不再固定等高，**行高由该小时的内容量决定** —— 没有记录的小时压到最扁（约为槽高的三分之一，最低 16px），有记录的小时按条目内容需要的高度撑开（标题最多折 6 行）。块的上沿对齐开始时间、下沿对齐结束时间，高度恒等于自身的时间跨度，所以**内容多的时段块更高，内容少的时段块更矮**，而不会出现「块只占时间段一小截」的错位。同一小时里先后发生的多条记录上下叠放、同时发生的左右并排，块永远不会挤在一起。整条轴的高度随内容伸缩：内容少的一天更紧凑，内容多的一天更长、可滚动；内容不足一屏时等比放大行距（最多 1.5 倍）。设置里关掉「自适应时间轴」即回到每小时严格等距的传统样式。
@@ -143,11 +173,16 @@ npm run build         # 产物 main.js 必须一起重建
 **发版靠 tag**：构建、打包、建 Release 全部由 GitHub Actions（`.github/workflows/release.yml`）完成。
 
 ```bash
-git tag -s v1.0.8 -m "v1.0.8"
-git push origin v1.0.8
+# 正式版（本地终端，签名 tag）
+git tag -s v1.1.3 -m "v1.1.3"
+git push origin v1.1.3
+
+# 预发布（带后缀 → GitHub 自动标 Pre-release、不抢 Latest）
+git tag -s v1.1.3-beta.1 -m "v1.1.3-beta.1"
+git push origin v1.1.3-beta.1
 ```
 
-tag 名去掉 `v` 必须与 `manifest.json` 的 `version` 完全一致，否则 workflow 直接失败（防版本漂移）。Release 产物 = `manifest.json` + `main.js` + `styles.css` + `timenote-<version>.zip`；zip 内不套目录，可直接解压进插件目录或交给 BRAT。
+tag 去掉 `v` 后的**主版本段**必须与 `manifest.json` 的 `version` 完全一致，否则 workflow 直接失败（防版本漂移）。**预发布用带后缀的 tag**（如 `v1.1.3-beta.1`，`manifest.json` 仍写 `1.1.3`），验证通过后再推正式的 `v1.1.3`。Release 产物 = `manifest.json` + `main.js` + `styles.css` + `timenote-<version>.zip` + `package.zip`（思源）+ `release.zip`（Blinko）；Obsidian zip 内不套目录，可直接解压进插件目录或交给 BRAT。
 
 ---
 
@@ -163,7 +198,12 @@ npm run typecheck  # 仅类型检查
 npm run check      # 类型检查 + PCMP 合规校验
 npm run pack       # 打包三件套 → dist/timenote-<version>.zip（不构建，先 build）
 npm run dist       # build + pack 一步到位
+npm run build:plugins  # 思源 / Blinko 两个插件包 → dist/siyuan/、dist/blinko/
+npm test           # 18 套 951 项断言（含 test:platforms 171 项、test:quick-add 24 项）
 ```
+
+`npm run build:plugins` 不并进 `npm run build`，避免每次主构建都重打两个 zip；
+构建后建议 `git diff --stat -- main.js` 确认 Obsidian 产物没被带改。
 
 构建链：TypeScript 7 + esbuild 0.28（CJS / browser，`obsidian` 保持 external，产物不压缩便于审阅）。改完代码先 `npm run build`，确保 `main.js` 与 `main.ts` 同步再提交。
 

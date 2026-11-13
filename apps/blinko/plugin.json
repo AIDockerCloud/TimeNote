@@ -1,0 +1,19 @@
+{
+  "name": "timenote-blinko",
+  "author": "AIDockerCloud",
+  "url": "https://github.com/AIDockerCloud/TimeNote",
+  "version": "1.1.2",
+  "minAppVersion": "0.0.0",
+  "displayName": {
+    "default": "TimeNote",
+    "zh": "时间笔记"
+  },
+  "description": {
+    "default": "Daily-note timeline and calendar views for Blinko, with memos / remote Blinko aggregation",
+    "zh": "Blinko 时间轴与全周期日历，可聚合 memos 与远程 Blinko"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh": "README_zh.md"
+  }
+}

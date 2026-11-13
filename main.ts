@@ -263,8 +263,8 @@ class DailyNoteService {
   moveEntryToDate(entry, targetDate, startSec, endSec) {
     return this.daily.moveEntryToDate(entry, targetDate, startSec, endSec);
   }
-  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null) {
-    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines);
+  addEntry(dateStr, timeStr, content, isTask, tags = [], endTimeStr = "", rawLines = null, body = "") {
+    return this.daily.addEntry(dateStr, timeStr, content, isTask, tags, endTimeStr, rawLines, body);
   }
 
   // Scan entries for a date range [startMoment, endMoment]
@@ -486,10 +486,13 @@ class TimenoteView extends ItemView {
 class QuickAddModal extends Modal {
   // TODO(types): 渐进替换为显式字段声明
   [key: string]: any;
-  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = undefined, prefillType = "") {
+  constructor(app, plugin, defaultDate, onSaved, prefillTime = "", prefillEndTime = undefined, prefillType = "", hooks: any = null) {
     super(app);
     this.plugin = plugin;
     this.targetDate = defaultDate;
+    // DEC-033：hooks 由渲染层传入，用来在弹窗打开期间维持「待创建」块的预览。
+    // 不传（工具栏 / 紧凑流入口）就退化成无预览，行为与旧版一致。
+    this.hooks = hooks;
     // 记录类型（DEC-022）：显式传入优先，否则跟随设置里的默认类型。
     // prefillEndTime 用 undefined 区分「没传（按类型补默认时长）」与「传了空串（时间点，无结束时间）」。
     this.addType = normalizeAddType(prefillType || plugin.settings.defaultAddType);
@@ -498,9 +501,27 @@ class QuickAddModal extends Modal {
       ? prefillEndTime
       : (this.addType === "point" ? "" : addMinutesToTime(this.timeStr, plugin.settings.defaultDuration || 60));
     this.isTask = false;
-    this.content = "";
+    // DEC-033：标题必填且只占一行；正文选填、可多行，落盘时每行加 Tab
+    // 变成标题记录的子项，不再让回车产生一条无时间前缀的 ALL DAY 行。
+    this.title = "";
+    this.body = "";
     this.tagsStr = "";
     this.onSaved = onSaved;
+  }
+
+  /** DEC-033：把当前表单状态推给渲染层，更新待创建块的位置 / 高度 / 文字 */
+  notifyPreview() {
+    if (!this.hooks || !this.hooks.onPreview) return;
+    const s = parseTimeToSeconds(String(this.timeStr || "").trim());
+    const e = this.addType === "point" ? null
+      : parseTimeToSeconds(String(this.endTimeStr || "").trim());
+    this.hooks.onPreview({
+      dateStr: this.targetDate,
+      startSec: s,
+      endSec: e,
+      isPoint: this.addType === "point",
+      title: String(this.title || "").trim()
+    });
   }
 
   onOpen() {
@@ -526,7 +547,10 @@ class QuickAddModal extends Modal {
       cls: "timenote-modal-input",
       attr: { type: "date", value: this.targetDate }
     });
-    dateInput.onchange = (e) => this.targetDate = (e.target as HTMLInputElement).value;
+    dateInput.onchange = (e) => {
+      this.targetDate = (e.target as HTMLInputElement).value;
+      this.notifyPreview();
+    };
 
     const timeInput = row1.createEl("input", {
       cls: "timenote-modal-input",
@@ -551,10 +575,12 @@ class QuickAddModal extends Modal {
     timeInput.oninput = (e) => {
       this.timeStr = (e.target as HTMLInputElement).value.trim();
       updateDurationHint();
+      this.notifyPreview();
     };
     endTimeInput.oninput = (e) => {
       this.endTimeStr = (e.target as HTMLInputElement).value.trim();
       updateDurationHint();
+      this.notifyPreview();
     };
     // 切类型时同步结束时间输入框：点模式清空并禁用，切回块模式补默认时长
     const syncType = () => {
@@ -574,6 +600,7 @@ class QuickAddModal extends Modal {
     typeBtn.onclick = () => {
       this.addType = this.addType === "point" ? "block" : "point";
       syncType();
+      this.notifyPreview();
     };
     syncType();
 
@@ -583,14 +610,33 @@ class QuickAddModal extends Modal {
     taskCheckbox.onchange = (e) => this.isTask = (e.target as HTMLInputElement).checked;
     row2.createEl("label", { text: "作为任务待办 (- [ ])", attr: { for: "tn-is-task" } });
 
-    // Content Textarea
-    const textarea = form.createEl("textarea", {
-      cls: "timenote-modal-textarea",
-      attr: { placeholder: "输入灵感闪念、随手记或任务内容... (按 Ctrl+Enter 快捷保存)" }
+    // DEC-033：标题 / 正文分开。标题是单行必填，写进带时间前缀的主行；
+    // 正文是多行选填，DailySource 会给每行加 Tab，成为主行的缩进子项。
+    const titleRow = form.createEl("div", { cls: "timenote-modal-row" });
+    titleRow.createEl("span", { text: "标题 *", cls: "timenote-modal-label" });
+    const titleInput = titleRow.createEl("input", {
+      cls: "timenote-modal-input",
+      attr: { type: "text", placeholder: "这条记录叫什么？（必填，单行）" }
     });
-    textarea.focus();
-    textarea.oninput = (e) => this.content = (e.target as HTMLInputElement).value;
-    textarea.onkeydown = (e) => {
+    titleInput.focus();
+    titleInput.oninput = (e) => {
+      this.title = (e.target as HTMLInputElement).value;
+      this.notifyPreview();
+    };
+    titleInput.onkeydown = (e) => {
+      // 标题框里按回车直接保存，避免用户以为能在这里换行
+      if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); }
+    };
+
+    const bodyArea = form.createEl("textarea", {
+      cls: "timenote-modal-textarea",
+      attr: { placeholder: "正文（选填，可多行；每行会作为子项缩进写进日记，Ctrl+Enter 保存）" }
+    });
+    bodyArea.oninput = (e) => {
+      this.body = (e.target as HTMLInputElement).value;
+      this.notifyPreview();
+    };
+    bodyArea.onkeydown = (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         saveBtn.click();
       }
@@ -610,8 +656,8 @@ class QuickAddModal extends Modal {
 
     const saveBtn = btnRow.createEl("button", { text: "保存并插入日记", cls: "mod-cta" });
     saveBtn.onclick = async () => {
-      if (!this.content.trim()) {
-        new Notice("请输入内容！");
+      if (!this.title.trim()) {
+        new Notice("请输入标题！");
         return;
       }
       const startStr = this.timeStr.trim();
@@ -642,21 +688,29 @@ class QuickAddModal extends Modal {
         }
       }
       const tags = this.tagsStr.split(/[,，\s]+/).filter(t => t.trim().length > 0);
+      // 第 7 参数 rawLines 留给 DEC-022 跨天搬移；第 8 参数才是 DEC-033 的正文。
       await this.plugin.dailyNoteService.addEntry(
         this.targetDate,
         startStr,
-        this.content.trim(),
+        this.title.trim(),
         this.isTask,
         tags,
-        hasExplicitRange ? "" : endStr
+        hasExplicitRange ? "" : endStr,
+        null,
+        this.body
       );
       new Notice(`✅ 已记录${this.addType === "point" ? "时间点" : "时间块"}到 ${this.targetDate} 日记中！`);
       this.close();
       if (this.onSaved) this.onSaved();
     };
+    // 打开时先画一次预览：让拖拽留下的 ghost 立即变成「待创建」块
+    this.notifyPreview();
   }
 
   onClose() {
+    // DEC-033：无论保存成功、取消、Esc 还是点遮罩，都撤掉待创建预览。
+    // 保存后 onSaved() 会重渲染出真实记录，预览先走不会残留。
+    if (this.hooks && this.hooks.onDismiss) this.hooks.onDismiss();
     this.contentEl.empty();
   }
 }

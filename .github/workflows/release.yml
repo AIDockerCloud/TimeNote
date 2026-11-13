@@ -6,6 +6,9 @@ name: Release
 #   预发布用带后缀的 tag（如 `v1.0.12-beta.1`，manifest 仍写 1.0.12），workflow 会
 #   自动把 Release 标成 Pre-release，不抢 Latest；验证通过后推正式的 `v1.0.12`。
 #   workflow_dispatch 只构建并上传 artifact（试跑用），不建 Release。
+#   DEC-032：每次 tag 发版同时构建思源 / Blinko 两个宿主插件包并挂到 Release
+#   （`package.zip` / `release.zip`，Blinko 安装器要求资产名固定为 release.zip）。
+#   打包失败会让整个 Release 变红 —— 这是刻意的：宁可不发，不发缺件的包。
 
 on:
   push:
@@ -54,12 +57,18 @@ jobs:
       - name: Pack plugin zip
         run: npm run pack
 
+      # DEC-032：两个新宿主插件包。产物名固定，Blinko 安装器按 release.zip 下载。
+      - name: Build host plugins
+        run: npm run build:plugins
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: timenote-${{ github.ref_name }}
           path: |
             dist/*.zip
+            dist/siyuan/package.zip
+            dist/blinko/release.zip
             manifest.json
             main.js
             styles.css
@@ -71,7 +80,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=(dist/*.zip manifest.json main.js styles.css)
+          assets=(dist/*.zip dist/siyuan/package.zip dist/blinko/release.zip \
+                  manifest.json main.js styles.css)
           # tag 带预发布后缀（如 v1.2.3-beta.1）→ 标 Pre-release，不抢 Latest
           pre=""
           case "$GITHUB_REF_NAME" in

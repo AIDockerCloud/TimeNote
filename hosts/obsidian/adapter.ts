@@ -9,7 +9,7 @@
 // （两个 Modal 定义在 main.ts 里，且它们的静态断言仍指向该文件）。
 import { Notice, TFile, setIcon } from "obsidian";
 import { sourceLabel } from "../../sources/meta";
-import type { HostAdapter, TimenoteSettings } from "../types";
+import type { HostAdapter, TimenoteSettings, QuickAddHooks } from "../types";
 import type { NoteEntry } from "../../sources/types";
 import type { MomentLike } from "../../ui/date";
 
@@ -43,9 +43,11 @@ export function createObsidianHostAdapter(deps: ObsidianHostDeps): HostAdapter {
       setIcon(el, icon);
     },
 
-    openQuickAdd(dateStr, onSaved, prefillTime = "", prefillEndTime = undefined, prefillType = "") {
+    openQuickAdd(dateStr, onSaved, prefillTime = "", prefillEndTime = undefined, prefillType = "", hooks?: QuickAddHooks) {
+      // DEC-033：hooks 只有「从日历空白槽拖拽 / 点击创建」这条路径会传，
+      // 工具栏「+ 记一条」等入口不传，弹窗自动退化为无预览。
       new deps.QuickAddModal(
-        app, plugin, dateStr, onSaved, prefillTime, prefillEndTime, prefillType
+        app, plugin, dateStr, onSaved, prefillTime, prefillEndTime, prefillType, hooks
       ).open();
     },
 

@@ -1219,19 +1219,20 @@ export class TimenoteRenderer {
       const onUp = (e: PointerEvent) => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        // DEC-033：松手不再 remove ghost。把它交给 openQuickAdd 变成「待创建」
+        // 预览，弹窗里改起止时间 / 类型 / 标题会实时重画，只有关闭弹窗
+        // （取消、Esc、点遮罩、保存成功）才撤掉。
         if (asPoint) {
-          if (ghost) ghost.remove();
           // 单击与拖动都只落一个时刻：不生成结束时间，弹窗里结束框也会被禁用
           const sec = moved ? pointSec : Math.max(dayStartSec, Math.min(dayEndSec,
             snapSeconds(secAt(e.clientY), POINT_CREATE_SNAP_MINUTES)));
-          this.openQuickAdd(dateStr, sec, sec, "point");
+          this.openQuickAdd(dateStr, sec, sec, "point", { col, scale, ghost, isPoint: true });
           return;
         }
         if (moved && ghost) {
           const s = Number(ghost.dataset.start);
           const en = Number(ghost.dataset.end);
-          ghost.remove();
-          this.openQuickAdd(dateStr, s, en, "block");
+          this.openQuickAdd(dateStr, s, en, "block", { col, scale, ghost, isPoint: false });
           return;
         }
         if (ghost) ghost.remove();
@@ -1239,7 +1240,7 @@ export class TimenoteRenderer {
         const rawSec = secAt(e.clientY);
         const snapped = Math.max(dayStartSec, Math.min(dayEndSec - MIN_BLOCK_SECONDS, Math.floor(rawSec / 1800) * 1800));
         const endSec = Math.min(dayEndSec, snapped + (Number(this.host.settings.defaultDuration) || 60) * 60);
-        this.openQuickAdd(dateStr, snapped, endSec, "block");
+        this.openQuickAdd(dateStr, snapped, endSec, "block", { col, scale, ghost: null, isPoint: false });
       };
 
       window.addEventListener("pointermove", onMove);
@@ -1247,13 +1248,86 @@ export class TimenoteRenderer {
     };
   }
 
-  openQuickAdd(dateStr, startSec, endSec, type = "block") {
+  openQuickAdd(dateStr, startSec, endSec, type = "block", pending: any = null) {
     const isPoint = normalizeAddType(type) === "point";
+    // 只有「从日历空白槽拖拽 / 点击」会带 pending；工具栏「+ 记一条」和紧凑流
+    // 空隙没有对应的列 DOM，传 null 退化成无预览（行为与旧版一致）。
+    const hooks = pending
+      ? this.createQuickAddPreviewHooks(pending, startSec, endSec, dateStr, isPoint)
+      : null;
     this.host.openQuickAdd(dateStr, () => this.renderView(),
       formatSecondsToTime(startSec),
       isPoint ? "" : formatSecondsToTime(endSec),
-      isPoint ? "point" : "block"
+      isPoint ? "point" : "block",
+      hooks
     );
+  }
+
+  /**
+   * DEC-033：弹窗打开期间维持一个「待创建」块 / 点线。
+   * 复用拖拽留下的 ghost（不闪烁），由 hooks.onPreview 随表单实时重画，
+   * onDismiss 统一撤掉。渲染层不认识任何宿主弹窗，只认 HostAdapter 的 hooks。
+   */
+  createQuickAddPreviewHooks(pending, startSec, endSec, dateStr, isPoint) {
+    const { col, scale } = pending;
+    this.clearQuickAddPreview();
+    const el = pending.ghost
+      || col.createEl("div", { cls: isPoint ? "timenote-point-ghost" : "timenote-block-ghost" });
+    this.pendingQuickAddEl = el;
+    const defaultDuration = Number(this.host.settings.defaultDuration) || 60;
+
+    const paint = (state) => {
+      if (!el) return;
+      // 弹窗里改了日期：把预览挪到那天的列；当前视图看不到该天就先隐藏
+      const wantedDate = state.dateStr || dateStr;
+      if (wantedDate !== dateStr) {
+        const cols: HTMLElement[] = typeof this.root.querySelectorAll === "function"
+          ? Array.from(this.root.querySelectorAll(".timenote-block-column")) as HTMLElement[] : [];
+        const target = cols.find(c => c.dataset.dateStr === wantedDate);
+        if (target) {
+          if (el.parentElement !== target) target.appendChild(el);
+          el.style.display = "";
+        } else {
+          el.style.display = "none";
+        }
+      } else {
+        el.style.display = "";
+      }
+
+      const rawStart = state.startSec === null || state.startSec === undefined
+        ? startSec : Number(state.startSec);
+      const s = Math.max(scale.dayStartSec,
+        Math.min(scale.dayEndSec - MIN_BLOCK_SECONDS, rawStart));
+      if (state.isPoint) {
+        el.className = "timenote-point-ghost timenote-quickadd-pending is-pending";
+        el.style.top = `${scale.yOf(s)}px`;
+        el.style.removeProperty("height");
+        el.textContent = `${formatSecondsToTime(s)}${state.title ? " · " + state.title : ""}`;
+        return;
+      }
+      const rawEnd = state.endSec === null || state.endSec === undefined
+        ? s + defaultDuration * 60 : Number(state.endSec);
+      const en = Math.max(s + MIN_BLOCK_SECONDS, Math.min(scale.dayEndSec, rawEnd));
+      el.className = "timenote-block-ghost timenote-quickadd-pending is-pending";
+      el.style.top = `${scale.yOf(s)}px`;
+      el.style.height = `${Math.max(16, scale.yOf(en) - scale.yOf(s))}px`;
+      el.textContent = `${formatSecondsToTime(s)} - ${formatSecondsToTime(en)} · ${formatDuration(en - s)}`
+        + (state.title ? `\n${state.title}` : "");
+    };
+
+    // 打开即画一次：让拖拽留下的 ghost 立刻带上「待创建」外观与初始时间范围
+    paint({ dateStr, startSec, endSec: isPoint ? null : endSec, isPoint, title: "" });
+    return {
+      onPreview: paint,
+      onDismiss: () => this.clearQuickAddPreview()
+    };
+  }
+
+  clearQuickAddPreview() {
+    if (this.pendingQuickAddEl && this.pendingQuickAddEl.parentElement) {
+      this.pendingQuickAddEl.remove();
+    }
+    this.pendingQuickAddEl = null;
   }
 
   attachBlockDrag(block, entry, meta, duration, scale) {

@@ -64,5 +64,7 @@ export {
 
 export {
   parseQuickAddSection,
-  sectionHeaderRegex
+  sectionHeaderRegex,
+  normalizeQuickAddBodyLines,
+  buildQuickAddLines
 } from "./section";
